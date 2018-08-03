@@ -20,8 +20,6 @@ set(pkgdatadir ${CMAKE_INSTALL_FULL_DATADIR})
 set(datadir ${CMAKE_INSTALL_FULL_DATADIR}/${PROJECT_NAME})
 set(prefix ${CMAKE_INSTALL_PREFIX})
 
-add_definitions("-DCEPH_LIBDIR=\"${CMAKE_INSTALL_FULL_LIBDIR}\"")
-add_definitions("-DCEPH_PKGLIBDIR=\"${CMAKE_INSTALL_FULL_PKGLIBDIR}\"")
 add_definitions("-DHAVE_CONFIG_H -D__CEPH__ -D_REENTRANT -D_THREAD_SAFE -D__STDC_FORMAT_MACROS")
 add_definitions("-D_FILE_OFFSET_BITS=64")
 if(LINUX)
@@ -40,8 +38,12 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL GNU)
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -rdynamic")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wstrict-null-sentinel -Woverloaded-virtual")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-new-ttp-matching")
-  if(NOT WITH_OSD_INSTRUMENT_FUNCTIONS AND NOT HAVE_SEASTAR)
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -pie")
+  # cmake does not add '-pie' for executables even if
+  # CMAKE_POSITION_INDEPENDENT_CODE is TRUE.
+  if(EXE_LINKER_USE_PIE)
+    if (NOT WITH_OSD_INSTRUMENT_FUNCTIONS AND NOT HAVE_SEASTAR)
+      set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -pie")
+    endif()
   endif()
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL Clang)
   set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_EXPORTS_C_FLAG}")
@@ -99,48 +101,12 @@ if(HAVE_INTEL)
     set(object_format "elf64")
   endif()
   set(CMAKE_ASM_FLAGS "-f ${object_format}")
+  include(CheckYasm)
+  check_yasm_support(${object_format}
+    HAVE_GOOD_YASM_ELF64
+    HAVE_BETTER_YASM_ELF64)
 endif()
 
-execute_process(
-  COMMAND yasm -f "${object_format}" ${CMAKE_SOURCE_DIR}/src/common/crc32c_intel_fast_asm.s -o /dev/null
-  RESULT_VARIABLE no_yasm
-  OUTPUT_QUIET)
-if(no_yasm)
-  message(STATUS " we do not have a modern/working yasm")
-else(no_yasm)
-  message(STATUS " we have a modern and working yasm")
-  if(CMAKE_SYSTEM_PROCESSOR MATCHES "amd64|x86_64")
-    message(STATUS " we are x86_64")
-    set(save_quiet ${CMAKE_REQUIRED_QUIET})
-    set(CMAKE_REQUIRED_QUIET true)
-    include(CheckCXXSourceCompiles)
-    check_cxx_source_compiles("
-      #if defined(__x86_64__) && defined(__ILP32__)
-      #error x32
-      #endif
-      int main() {}
-      " not_arch_x32)
-    set(CMAKE_REQUIRED_QUIET ${save_quiet})
-    if(not_arch_x32)
-      message(STATUS " we are not x32")
-      set(HAVE_GOOD_YASM_ELF64 1)
-      execute_process(COMMAND yasm -f ${object_format} -i
-        ${CMAKE_SOURCE_DIR}/src/isa-l/include/
-        ${CMAKE_SOURCE_DIR}/src/isa-l/erasure_code/gf_vect_dot_prod_avx2.asm
-        -o /dev/null
-        RESULT_VARIABLE rc
-        OUTPUT_QUIET)
-      if(NOT rc)
-        set(HAVE_BETTER_YASM_ELF64 1)
-        message(STATUS " yasm can also build the isa-l stuff")
-      endif(NOT rc)
-    else(not_arch_x32)
-      message(STATUS " we are x32; no yasm for you")
-    endif(not_arch_x32)
-  else(CMAKE_SYSTEM_PROCESSOR MATCHES "amd64|x86_64")
-    message(STATUS " we are not x86_64 && !x32")
-  endif(CMAKE_SYSTEM_PROCESSOR MATCHES "amd64|x86_64")
-endif(no_yasm)
 
 # require c++17
 if(CMAKE_VERSION VERSION_LESS "3.8")
@@ -435,23 +401,12 @@ if(HAVE_QATZIP)
   list(APPEND ceph_common_deps ${QATZIP_LIBRARIES})
 endif()
 
-if(HAVE_ARMV8_CRC)
-  list(APPEND ceph_common_deps common_crc_aarch64)
-endif()
-
 if(WITH_DPDK)
   list(APPEND ceph_common_deps common_async_dpdk)
 endif()
 
 add_library(common STATIC ${ceph_common_objs})
-target_link_libraries(common
-  PRIVATE ${ceph_common_deps})
-if(WITH_STATIC_LIBSTDCXX)
-  # the apps linking against libcommon are daemons also written in C++, so we
-  # need to link them against libstdc++.
-  target_link_libraries(common
-    INTERFACE "-static-libstdc++ -static-libgcc")
-endif()
+target_link_libraries(common ${ceph_common_deps})
 
 add_library(ceph-common SHARED ${ceph_common_objs})
 target_link_libraries(ceph-common ${ceph_common_deps})
@@ -459,12 +414,6 @@ target_link_libraries(ceph-common ${ceph_common_deps})
 set_target_properties(ceph-common PROPERTIES
   SOVERSION 0
   INSTALL_RPATH "")
-if(WITH_STATIC_LIBSTDCXX)
-  # link libstdc++ into ceph-common to avoid including libstdc++ in every apps,
-  # to reduce the size of the app linking against ceph-common.
-  set_target_properties(ceph-common PROPERTIES
-    LINK_FLAGS "-static-libstdc++ -static-libgcc")
-endif()
 install(TARGETS ceph-common DESTINATION ${CMAKE_INSTALL_PKGLIBDIR})
 
 if(${WITH_LTTNG})
@@ -554,6 +503,8 @@ target_link_libraries(ceph-osd osd os global-static common
 if(WITH_FUSE)
   target_link_libraries(ceph-osd ${FUSE_LIBRARIES})
 endif()
+set_target_properties(ceph-osd PROPERTIES
+  POSITION_INDEPENDENT_CODE ${EXE_LINKER_USE_PIE})
 install(TARGETS ceph-osd DESTINATION bin)
 
 add_subdirectory(mds)
@@ -649,10 +600,6 @@ if(WITH_LIBCEPHFS)
   add_library(cephfs ${CEPH_SHARED} ${libcephfs_srcs})
   target_link_libraries(cephfs PRIVATE client ceph-common
     ${CRYPTO_LIBS} ${EXTRALIBS})
-  if(WITH_STATIC_LIBSTDCXX)
-    target_link_libraries(cephfs
-      INTERFACE "-static-libstdc++ -static-libgcc")
-  endif()
   if(ENABLE_SHARED)
     set_target_properties(cephfs PROPERTIES
       OUTPUT_NAME cephfs
@@ -674,18 +621,8 @@ if(WITH_LIBCEPHFS)
     client/SyntheticClient.cc)
   add_executable(ceph-syn ${ceph_syn_srcs})
   target_link_libraries(ceph-syn client global-static ceph-common)
-
-  set(mount_ceph_srcs
-    mount/mount.ceph.c)
-  add_executable(mount.ceph ${mount_ceph_srcs}
-    $<TARGET_OBJECTS:parse_secret_objs>
-    $<TARGET_OBJECTS:common_mountcephfs_objs>)
-  set_target_properties(mount.ceph PROPERTIES
-    INSTALL_RPATH "")
-  target_link_libraries(mount.ceph ${KEYUTILS_LIBRARIES})
-
   install(TARGETS ceph-syn DESTINATION bin)
-  install(TARGETS mount.ceph DESTINATION ${CMAKE_INSTALL_SBINDIR})
+  add_subdirectory(mount)
 endif(WITH_LIBCEPHFS)
 
 if(WITH_FUSE)
@@ -693,9 +630,11 @@ if(WITH_FUSE)
     ceph_fuse.cc
     client/fuse_ll.cc)
   add_executable(ceph-fuse ${ceph_fuse_srcs})
-  target_link_libraries(ceph-fuse ${ALLOC_LIBS} ${FUSE_LIBRARIES}
+  target_link_libraries(ceph-fuse ${FUSE_LIBRARIES}
     client ceph-common global-static)
-  set_target_properties(ceph-fuse PROPERTIES COMPILE_FLAGS "-I${FUSE_INCLUDE_DIRS}")
+  set_target_properties(ceph-fuse PROPERTIES
+    COMPILE_FLAGS "-I${FUSE_INCLUDE_DIRS}"
+    POSITION_INDEPENDENT_CODE ${EXE_LINKER_USE_PIE})
   install(TARGETS ceph-fuse DESTINATION bin)
   install(PROGRAMS mount.fuse.ceph DESTINATION ${CMAKE_INSTALL_SBINDIR})
 endif(WITH_FUSE)
@@ -706,7 +645,7 @@ if(WITH_RBD)
   if(WITH_KRBD)
     add_library(krbd STATIC krbd.cc
       $<TARGET_OBJECTS:parse_secret_objs>)
-    target_link_libraries(krbd ${KEYUTILS_LIBRARIES})
+    target_link_libraries(krbd keyutils::keyutils)
   endif()
   add_subdirectory(librbd)
   if(WITH_FUSE)
