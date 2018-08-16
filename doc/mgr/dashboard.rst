@@ -232,6 +232,13 @@ exist and you may find yourself in the situation that you have to use them::
   $ ceph dashboard set-rgw-api-admin-resource <admin_resource>
   $ ceph dashboard set-rgw-api-user-id <user_id>
 
+If you are using a self-signed certificate in your Object Gateway setup, then
+you should disable certificate verification in the dashboard to avoid refused
+connections, e.g. caused by certificates signed by unknown CA or not matching
+the host name::
+
+  $ ceph dashboard set-rgw-api-ssl-verify False
+
 If the Object Gateway takes too long to process requests and the dashboard runs
 into timeouts, then you can set the timeout value to your needs::
 
@@ -388,6 +395,7 @@ scopes are:
   management.
 - **log**: include all features related to Ceph logs management.
 - **grafana**: include all features related to Grafana proxy.
+- **dashboard-settings**: allows to change dashboard settings.
 
 A *role* specifies a set of mappings between a *security scope* and a set of
 *permissions*. There are four types of permissions:
@@ -420,7 +428,8 @@ installation.
 The list of system roles are:
 
 - **administrator**: provides full permissions for all security scopes.
-- **read-only**: provides *read* permission for all security scopes.
+- **read-only**: provides *read* permission for all security scopes except
+  the dashboard settings.
 - **block-manager**: provides full permissions for *rbd-image*,
   *rbd-mirroring*, and *iscsi* scopes.
 - **rgw-manager**: provides full permissions for the *rgw* scope

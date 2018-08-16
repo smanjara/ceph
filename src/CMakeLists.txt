@@ -305,12 +305,20 @@ include_directories("${CMAKE_SOURCE_DIR}/src/dmclock/support/src")
 include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/src/googletest/googletest/include")
 
 if(WITH_SEASTAR)
-  find_package(fmt 4.0.0)
+  find_package(fmt 4.0.0 QUIET)
   if(NOT fmt_FOUND)
+    message(STATUS "Could not find fmt, will build it")
+    add_subdirectory(fmt)
+  elseif(fmt_VERSION VERSION_GREATER_EQUAL 5.0.0)
+    message(WARNING "Could NOT find fmt: "
+      "Found unsuitable version \"${fmt_VERSION}\", "
+      "but required is at most \"5.0.0\" (found ${fmt_INCLUDE_DIR}). "
+      "Will build it")
     add_subdirectory(fmt)
   endif()
-  find_package(c-ares 1.13.0 QUIET MODULE)
+  find_package(c-ares 1.13.0 QUIET)
   if(NOT c-ares_FOUND)
+    message(STATUS "Could not find c-ares, will build it")
     include(Buildc-ares)
     build_c_ares()
   endif()
@@ -414,6 +422,20 @@ target_link_libraries(ceph-common ${ceph_common_deps})
 set_target_properties(ceph-common PROPERTIES
   SOVERSION 0
   INSTALL_RPATH "")
+if(NOT APPLE)
+  # Apple uses Mach-O, not ELF. so this option does not apply to APPLE.
+  #
+  # prefer the local symbol definitions when binding references to global
+  # symbols. otherwise we could reference the symbols defined by the application
+  # with the same name, instead of using the one defined in libceph-common.
+  # in other words, we require libceph-common to use local symbols, even if redefined
+  # in application".
+  set_property(
+    TARGET ceph-common
+    APPEND APPEND_STRING
+    PROPERTY LINK_FLAGS "-Wl,-Bsymbolic -Wl,-Bsymbolic-functions")
+endif()
+
 install(TARGETS ceph-common DESTINATION ${CMAKE_INSTALL_PKGLIBDIR})
 
 if(${WITH_LTTNG})
@@ -559,6 +581,9 @@ configure_file(${CMAKE_SOURCE_DIR}/src/init-ceph.in
 configure_file(ceph-post-file.in
   ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ceph-post-file @ONLY)
 
+configure_file(ceph-crash.in
+  ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ceph-crash @ONLY)
+
 if(WITH_TESTS)
   install(PROGRAMS
     ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ceph-debugpack
@@ -569,6 +594,7 @@ endif()
 install(PROGRAMS
   ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ceph
   ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ceph-post-file
+  ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/ceph-crash
   ${CMAKE_SOURCE_DIR}/src/ceph-run
   ${CMAKE_SOURCE_DIR}/src/ceph-clsinfo
   DESTINATION bin)

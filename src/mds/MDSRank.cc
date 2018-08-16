@@ -295,7 +295,7 @@ void MDSRankDispatcher::tick()
   heartbeat_reset();
 
   if (beacon.is_laggy()) {
-    dout(5) << "tick bailing out since we seem laggy" << dendl;
+    dout(1) << "skipping upkeep work because connection to Monitors appears laggy" << dendl;
     return;
   }
 
@@ -596,10 +596,10 @@ bool MDSRank::_dispatch(Message *m, bool new_msg)
   }
 
   if (beacon.is_laggy()) {
-    dout(10) << " laggy, deferring " << *m << dendl;
+    dout(5) << " laggy, deferring " << *m << dendl;
     waiting_for_nolaggy.push_back(m);
   } else if (new_msg && !waiting_for_nolaggy.empty()) {
-    dout(10) << " there are deferred messages, deferring " << *m << dendl;
+    dout(5) << " there are deferred messages, deferring " << *m << dendl;
     waiting_for_nolaggy.push_back(m);
   } else {
     if (!handle_deferrable_message(m)) {
@@ -818,14 +818,15 @@ void MDSRank::_advance_queues()
 {
   assert(mds_lock.is_locked_by_me());
 
-  while (!finished_queue.empty()) {
+  if (!finished_queue.empty()) {
     dout(7) << "mds has " << finished_queue.size() << " queued contexts" << dendl;
-    dout(10) << finished_queue << dendl;
-    decltype(finished_queue) ls;
-    ls.swap(finished_queue);
-    for (auto& c : ls) {
-      dout(10) << " finish " << c << dendl;
-      c->complete(0);
+    while (!finished_queue.empty()) {
+      auto fin = finished_queue.front();
+      finished_queue.pop_front();
+
+      dout(10) << " finish " << fin << dendl;
+      fin->complete(0);
+
       heartbeat_reset();
     }
   }
@@ -909,19 +910,22 @@ Session *MDSRank::get_session(Message *m)
     if (session->is_closed()) {
       Session *imported_session = sessionmap.get_session(session->info.inst.name);
       if (imported_session && imported_session != session) {
-        dout(10) << __func__ << " replacing connection bootstrap session " << session << " with imported session " << imported_session << dendl;
+        dout(10) << __func__ << " replacing connection bootstrap session "
+		 << session << " with imported session " << imported_session
+		 << dendl;
         imported_session->info.auth_name = session->info.auth_name;
         //assert(session->info.auth_name == imported_session->info.auth_name);
         assert(session->info.inst == imported_session->info.inst);
-        imported_session->connection = session->connection;
+        imported_session->set_connection(session->get_connection().get());
         // send out any queued messages
         while (!session->preopen_out_queue.empty()) {
-          imported_session->connection->send_message(session->preopen_out_queue.front());
+          imported_session->get_connection()->send_message(
+	    session->preopen_out_queue.front());
           session->preopen_out_queue.pop_front();
         }
         imported_session->auth_caps = session->auth_caps;
         assert(session->get_nref() == 1);
-        imported_session->connection->set_priv(imported_session->get());
+        imported_session->get_connection()->set_priv(imported_session->get());
         session = imported_session;
       }
     }
@@ -1032,8 +1036,8 @@ void MDSRank::send_message_client_counted(Message *m, Session *session)
   version_t seq = session->inc_push_seq();
   dout(10) << "send_message_client_counted " << session->info.inst.name << " seq "
 	   << seq << " " << *m << dendl;
-  if (session->connection) {
-    session->connection->send_message(m);
+  if (session->get_connection()) {
+    session->get_connection()->send_message(m);
   } else {
     session->preopen_out_queue.push_back(m);
   }
@@ -1042,8 +1046,8 @@ void MDSRank::send_message_client_counted(Message *m, Session *session)
 void MDSRank::send_message_client(Message *m, Session *session)
 {
   dout(10) << "send_message_client " << session->info.inst << " " << *m << dendl;
-  if (session->connection) {
-    session->connection->send_message(m);
+  if (session->get_connection()) {
+    session->get_connection()->send_message(m);
   } else {
     session->preopen_out_queue.push_back(m);
   }
@@ -1072,6 +1076,11 @@ void MDSRank::retry_dispatch(Message *m)
 utime_t MDSRank::get_laggy_until() const
 {
   return beacon.get_laggy_until();
+}
+
+double MDSRank::get_dispatch_queue_max_age(utime_t now) const
+{
+  return messenger->get_dispatch_queue_max_age(now);
 }
 
 bool MDSRank::is_daemon_stopping() const
@@ -1535,7 +1544,7 @@ bool MDSRank::queue_one_replay()
     return false;
   }
   queue_waiter(replay_queue.front());
-  replay_queue.pop();
+  replay_queue.pop_front();
   return true;
 }
 
@@ -1947,7 +1956,7 @@ void MDSRankDispatcher::handle_mds_map(
       MDSInternalContextBase::vec ls;
       ls.swap(p->second);
       waiting_for_mdsmap.erase(p++);
-      finish_contexts(g_ceph_context, ls);
+      queue_waiters(ls);
     }
   }
 
@@ -3019,7 +3028,7 @@ void MDSRank::bcast_mds_map()
   for (set<Session*>::const_iterator p = clients.begin();
        p != clients.end();
        ++p)
-    (*p)->connection->send_message(new MMDSMap(monc->get_fsid(), mdsmap));
+    (*p)->get_connection()->send_message(new MMDSMap(monc->get_fsid(), mdsmap));
   last_client_mdsmap_bcast = mdsmap->get_epoch();
 }
 

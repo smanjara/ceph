@@ -1128,9 +1128,7 @@ void OSDMap::Incremental::dump(Formatter *f) const
   }
   f->close_section();
 
-  f->open_object_section("erasure_code_profiles");
   OSDMap::dump_erasure_code_profiles(new_erasure_code_profiles, f);
-  f->close_section();
   f->open_array_section("old_erasure_code_profiles");
   for (const auto &erasure_code_profile : old_erasure_code_profiles) {
     f->dump_string("old", erasure_code_profile.c_str());
@@ -2208,7 +2206,8 @@ void OSDMap::_apply_upmap(const pg_pool_t& pi, pg_t raw_pg, vector<int> *raw) co
   if (p != pg_upmap.end()) {
     // make sure targets aren't marked out
     for (auto osd : p->second) {
-      if (osd != CRUSH_ITEM_NONE && osd < max_osd && osd_weight[osd] == 0) {
+      if (osd != CRUSH_ITEM_NONE && osd < max_osd && osd >= 0 &&
+          osd_weight[osd] == 0) {
 	// reject/ignore the explicit mapping
 	return;
       }
@@ -2235,7 +2234,7 @@ void OSDMap::_apply_upmap(const pg_pool_t& pi, pg_t raw_pg, vector<int> *raw) co
 	if (osd == r.first &&
 	    pos < 0 &&
 	    !(r.second != CRUSH_ITEM_NONE && r.second < max_osd &&
-	      osd_weight[r.second] == 0)) {
+	      r.second >= 0 && osd_weight[r.second] == 0)) {
 	  pos = i;
 	}
       }
@@ -3118,6 +3117,7 @@ void OSDMap::dump_erasure_code_profiles(
   const mempool::osdmap::map<string,map<string,string>>& profiles,
   Formatter *f)
 {
+  f->open_object_section("erasure_code_profiles");
   for (const auto &profile : profiles) {
     f->open_object_section(profile.first.c_str());
     for (const auto &profm : profile.second) {
@@ -3125,6 +3125,7 @@ void OSDMap::dump_erasure_code_profiles(
     }
     f->close_section();
   }
+  f->close_section();
 }
 
 void OSDMap::dump(Formatter *f) const
@@ -3256,9 +3257,7 @@ void OSDMap::dump(Formatter *f) const
   }
   f->close_section();
 
-  f->open_object_section("erasure_code_profiles");
   dump_erasure_code_profiles(erasure_code_profiles, f);
-  f->close_section();
 
   f->open_array_section("removed_snaps_queue");
   for (auto& p : removed_snaps_queue) {
@@ -5187,3 +5186,40 @@ int OSDMap::parse_osd_id_list(const vector<string>& ls, set<int> *out,
   }
   return 0;
 }
+
+void OSDMap::get_random_up_osds_by_subtree(int n,     // whoami
+                                           string &subtree,
+                                           int limit, // how many
+                                           set<int> skip,
+                                           set<int> *want) const {
+  if (limit <= 0)
+    return;
+  int subtree_type = crush->get_type_id(subtree);
+  if (subtree_type < 1)
+    return;
+  vector<int> subtrees;
+  crush->get_subtree_of_type(subtree_type, &subtrees);
+  std::random_shuffle(subtrees.begin(), subtrees.end());
+  for (auto s : subtrees) {
+    if (limit <= 0)
+      break;
+    if (crush->subtree_contains(s, n))
+      continue;
+    vector<int> osds;
+    crush->get_children_of_type(s, 0, &osds);
+    if (osds.empty())
+      continue;
+    vector<int> up_osds;
+    for (auto o : osds) {
+      if (is_up(o) && !skip.count(o))
+        up_osds.push_back(o);
+    }
+    if (up_osds.empty())
+      continue;
+    auto it = up_osds.begin();
+    std::advance(it, (n % up_osds.size()));
+    want->insert(*it);
+    --limit;
+  }
+}
+

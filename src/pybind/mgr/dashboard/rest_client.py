@@ -318,7 +318,7 @@ class _Request(object):
 
 
 class RestClient(object):
-    def __init__(self, host, port, client_name=None, ssl=False, auth=None):
+    def __init__(self, host, port, client_name=None, ssl=False, auth=None, ssl_verify=True):
         super(RestClient, self).__init__()
         self.client_name = client_name if client_name else ''
         self.host = host
@@ -329,6 +329,7 @@ class RestClient(object):
         self.headers = {'Accept': 'application/json'}
         self.auth = auth
         self.session = TimeoutRequestsSession()
+        self.session.verify = ssl_verify
 
     def _login(self, request=None):
         pass
@@ -439,8 +440,11 @@ class RestClient(object):
                     logger.error("%s REST API failed %s, SSL error.",
                                  self.client_name, method.upper())
                 else:
-                    match = re.match(r'.*: \[Errno (-?\d+)\] (.+)',
-                                     ex.args[0].reason.args[0])
+                    try:
+                        match = re.match(r'.*: \[Errno (-?\d+)\] (.+)',
+                                         ex.args[0].reason.args[0])
+                    except AttributeError:
+                        match = False
                     if match:
                         errno = match.group(1)
                         strerror = match.group(2)

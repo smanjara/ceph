@@ -36,6 +36,7 @@
 
 #include "include/types.h"
 #include "include/compat.h"
+#include "include/random.h"
 
 #include "OSD.h"
 #include "OSDMap.h"
@@ -168,8 +169,6 @@
 #undef dout_prefix
 #define dout_prefix _prefix(_dout, whoami, get_osdmap_epoch())
 
-
-const double OSD::OSD_TICK_INTERVAL = 1.0;
 
 static ostream& _prefix(std::ostream* _dout, int whoami, epoch_t epoch) {
   return *_dout << "osd." << whoami << " " << epoch << " ";
@@ -603,8 +602,8 @@ void OSDService::promote_throttle_recalibrate()
   promote_probability_millis = prob;
 
   // set hard limits for this interval to mitigate stampedes
-  promote_max_objects = target_obj_sec * OSD::OSD_TICK_INTERVAL * 2;
-  promote_max_bytes = target_bytes_sec * OSD::OSD_TICK_INTERVAL * 2;
+  promote_max_objects = target_obj_sec * osd->OSD_TICK_INTERVAL * 2;
+  promote_max_bytes = target_bytes_sec * osd->OSD_TICK_INTERVAL * 2;
 }
 
 // -------------------------------------
@@ -1978,6 +1977,14 @@ OSD::~OSD()
   delete store;
 }
 
+double OSD::get_tick_interval() const
+{
+  // vary +/- 5% to avoid scrub scheduling livelocks
+  constexpr auto delta = 0.05;
+  return (OSD_TICK_INTERVAL *
+	  ceph::util::generate_random_number(1.0 - delta, 1.0 + delta));
+}
+
 void cls_initialize(ClassHandler *ch);
 
 void OSD::handle_signal(int signum)
@@ -2606,10 +2613,12 @@ int OSD::init()
   heartbeat_thread.create("osd_srv_heartbt");
 
   // tick
-  tick_timer.add_event_after(cct->_conf->osd_heartbeat_interval, new C_Tick(this));
+  tick_timer.add_event_after(get_tick_interval(),
+			     new C_Tick(this));
   {
     Mutex::Locker l(tick_timer_lock);
-    tick_timer_without_osd_lock.add_event_after(cct->_conf->osd_heartbeat_interval, new C_Tick_WithoutOSDLock(this));
+    tick_timer_without_osd_lock.add_event_after(get_tick_interval(),
+						new C_Tick_WithoutOSDLock(this));
   }
 
   osd_lock.Unlock();
@@ -4306,7 +4315,7 @@ void OSD::maybe_update_heartbeat_peers()
 {
   assert(osd_lock.is_locked());
 
-  if (is_waiting_for_healthy()) {
+  if (is_waiting_for_healthy() || is_active()) {
     utime_t now = ceph_clock_now();
     if (last_heartbeat_resample == utime_t()) {
       last_heartbeat_resample = now;
@@ -4317,7 +4326,9 @@ void OSD::maybe_update_heartbeat_peers()
 	dout(10) << "maybe_update_heartbeat_peers forcing update after " << dur << " seconds" << dendl;
 	heartbeat_set_peers_need_update();
 	last_heartbeat_resample = now;
-	reset_heartbeat_peers();   // we want *new* peers!
+        if (is_waiting_for_healthy()) {
+	  reset_heartbeat_peers();   // we want *new* peers!
+        }
       }
     }
   }
@@ -4352,6 +4363,13 @@ void OSD::maybe_update_heartbeat_peers()
   int prev = osdmap->get_previous_up_osd_before(whoami);
   if (prev >= 0 && prev != next)
     want.insert(prev);
+
+  // make sure we have at least **min_down** osds coming from different
+  // subtree level (e.g., hosts) for fast failure detection.
+  auto min_down = cct->_conf.get_val<uint64_t>("mon_osd_min_down_reporters");
+  auto subtree = cct->_conf.get_val<string>("mon_osd_reporter_subtree_level");
+  osdmap->get_random_up_osds_by_subtree(
+    whoami, subtree, min_down, want, &want);
 
   for (set<int>::iterator p = want.begin(); p != want.end(); ++p) {
     dout(10) << " adding neighbor peer osd." << *p << dendl;
@@ -4505,47 +4523,72 @@ void OSD::handle_osd_ping(MOSDPing *m)
     {
       map<int,HeartbeatInfo>::iterator i = heartbeat_peers.find(from);
       if (i != heartbeat_peers.end()) {
-	if (m->get_connection() == i->second.con_back) {
-	  dout(25) << "handle_osd_ping got reply from osd." << from
-		   << " first_tx " << i->second.first_tx
-		   << " last_tx " << i->second.last_tx
-		   << " last_rx_back " << i->second.last_rx_back << " -> " << m->stamp
-		   << " last_rx_front " << i->second.last_rx_front
-		   << dendl;
-	  i->second.last_rx_back = m->stamp;
-	  // if there is no front con, set both stamps.
-	  if (i->second.con_front == NULL)
-	    i->second.last_rx_front = m->stamp;
-	} else if (m->get_connection() == i->second.con_front) {
-	  dout(25) << "handle_osd_ping got reply from osd." << from
-		   << " first_tx " << i->second.first_tx
-		   << " last_tx " << i->second.last_tx
-		   << " last_rx_back " << i->second.last_rx_back
-		   << " last_rx_front " << i->second.last_rx_front << " -> " << m->stamp
-		   << dendl;
-	  i->second.last_rx_front = m->stamp;
-	}
-
-        utime_t cutoff = ceph_clock_now();
-        cutoff -= cct->_conf->osd_heartbeat_grace;
-        if (i->second.is_healthy(cutoff)) {
-          // Cancel false reports
-	  auto failure_queue_entry = failure_queue.find(from);
-	  if (failure_queue_entry != failure_queue.end()) {
-            dout(10) << "handle_osd_ping canceling queued "
-                     << "failure report for osd." << from << dendl;
-            failure_queue.erase(failure_queue_entry);
+        auto acked = i->second.ping_history.find(m->stamp);
+        if (acked != i->second.ping_history.end()) {
+          utime_t now = ceph_clock_now();
+          int &unacknowledged = acked->second.second;
+          if (m->get_connection() == i->second.con_back) {
+            dout(25) << "handle_osd_ping got reply from osd." << from
+                     << " first_tx " << i->second.first_tx
+                     << " last_tx " << i->second.last_tx
+                     << " last_rx_back " << i->second.last_rx_back << " -> " << now
+                     << " last_rx_front " << i->second.last_rx_front
+                     << dendl;
+            i->second.last_rx_back = now;
+            assert(unacknowledged > 0);
+            --unacknowledged;
+            // if there is no front con, set both stamps.
+            if (i->second.con_front == NULL) {
+              i->second.last_rx_front = now;
+              assert(unacknowledged > 0);
+              --unacknowledged;
+            }
+          } else if (m->get_connection() == i->second.con_front) {
+            dout(25) << "handle_osd_ping got reply from osd." << from
+                     << " first_tx " << i->second.first_tx
+                     << " last_tx " << i->second.last_tx
+                     << " last_rx_back " << i->second.last_rx_back
+                     << " last_rx_front " << i->second.last_rx_front << " -> " << now
+                     << dendl;
+            i->second.last_rx_front = now;
+            assert(unacknowledged > 0);
+            --unacknowledged;
           }
 
-	  auto failure_pending_entry = failure_pending.find(from);
-	  if (failure_pending_entry != failure_pending.end()) {
-            dout(10) << "handle_osd_ping canceling in-flight "
-                     << "failure report for osd." << from << dendl;
-            send_still_alive(curmap->get_epoch(),
-			     from,
-			     failure_pending_entry->second.second);
-            failure_pending.erase(failure_pending_entry);
+          if (unacknowledged == 0) {
+            // succeeded in getting all replies
+            dout(25) << "handle_osd_ping got all replies from osd." << from
+                     << " , erase pending ping(sent at " << m->stamp << ")"
+                     << " and older pending ping(s)"
+                     << dendl;
+            i->second.ping_history.erase(i->second.ping_history.begin(), ++acked);
           }
+
+          if (i->second.is_healthy(now)) {
+            // Cancel false reports
+            auto failure_queue_entry = failure_queue.find(from);
+            if (failure_queue_entry != failure_queue.end()) {
+              dout(10) << "handle_osd_ping canceling queued "
+                       << "failure report for osd." << from << dendl;
+              failure_queue.erase(failure_queue_entry);
+            }
+
+            auto failure_pending_entry = failure_pending.find(from);
+            if (failure_pending_entry != failure_pending.end()) {
+              dout(10) << "handle_osd_ping canceling in-flight "
+                       << "failure report for osd." << from << dendl;
+              send_still_alive(curmap->get_epoch(),
+                               from,
+                               failure_pending_entry->second.second);
+              failure_pending.erase(failure_pending_entry);
+            }
+          }
+        } else {
+          // old replies, deprecated by newly sent pings.
+          dout(10) << "handle_osd_ping no pending ping(sent at " << m->stamp
+                   << ") is found, treat as covered by newly sent pings "
+                   << "and ignore"
+                   << dendl;
         }
       }
 
@@ -4597,9 +4640,7 @@ void OSD::heartbeat_check()
   assert(heartbeat_lock.is_locked());
   utime_t now = ceph_clock_now();
 
-  // check for heartbeat replies (move me elsewhere?)
-  utime_t cutoff = now;
-  cutoff -= cct->_conf->osd_heartbeat_grace;
+  // check for incoming heartbeats (move me elsewhere?)
   for (map<int,HeartbeatInfo>::iterator p = heartbeat_peers.begin();
        p != heartbeat_peers.end();
        ++p) {
@@ -4616,19 +4657,26 @@ void OSD::heartbeat_check()
 	     << " last_rx_back " << p->second.last_rx_back
 	     << " last_rx_front " << p->second.last_rx_front
 	     << dendl;
-    if (p->second.is_unhealthy(cutoff)) {
+    if (p->second.is_unhealthy(now)) {
+      utime_t oldest_deadline = p->second.ping_history.begin()->second.first;
       if (p->second.last_rx_back == utime_t() ||
 	  p->second.last_rx_front == utime_t()) {
-	derr << "heartbeat_check: no reply from " << p->second.con_front->get_peer_addr().get_sockaddr()
-	     << " osd." << p->first << " ever on either front or back, first ping sent "
-	     << p->second.first_tx << " (cutoff " << cutoff << ")" << dendl;
+        derr << "heartbeat_check: no reply from "
+             << p->second.con_front->get_peer_addr().get_sockaddr()
+             << " osd." << p->first
+             << " ever on either front or back, first ping sent "
+             << p->second.first_tx
+             << " (oldest deadline " << oldest_deadline << ")"
+             << dendl;
 	// fail
-	failure_queue[p->first] = p->second.last_tx;
+	failure_queue[p->first] = p->second.first_tx;
       } else {
-	derr << "heartbeat_check: no reply from " << p->second.con_front->get_peer_addr().get_sockaddr()
+	derr << "heartbeat_check: no reply from "
+             << p->second.con_front->get_peer_addr().get_sockaddr()
 	     << " osd." << p->first << " since back " << p->second.last_rx_back
 	     << " front " << p->second.last_rx_front
-	     << " (cutoff " << cutoff << ")" << dendl;
+	     << " (oldest deadline " << oldest_deadline << ")"
+             << dendl;
 	// fail
 	failure_queue[p->first] = std::min(p->second.last_rx_back, p->second.last_rx_front);
       }
@@ -4669,6 +4717,8 @@ void OSD::heartbeat()
   dout(5) << "heartbeat: " << service.get_osd_stat() << dendl;
 
   utime_t now = ceph_clock_now();
+  utime_t deadline = now;
+  deadline += cct->_conf->osd_heartbeat_grace;
 
   // send heartbeats
   for (map<int,HeartbeatInfo>::iterator i = heartbeat_peers.begin();
@@ -4678,6 +4728,8 @@ void OSD::heartbeat()
     i->second.last_tx = now;
     if (i->second.first_tx == utime_t())
       i->second.first_tx = now;
+    i->second.ping_history[now] = make_pair(deadline,
+      HeartbeatInfo::HEARTBEAT_MAX_CONN);
     dout(30) << "heartbeat sending ping to osd." << peer << dendl;
     i->second.con_back->send_message(new MOSDPing(monc->get_fsid(),
 					  service.get_osdmap_epoch(),
@@ -4770,7 +4822,7 @@ void OSD::tick()
 
   do_waiters();
 
-  tick_timer.add_event_after(OSD_TICK_INTERVAL, new C_Tick(this));
+  tick_timer.add_event_after(get_tick_interval(), new C_Tick(this));
 }
 
 void OSD::tick_without_osd_lock()
@@ -4841,7 +4893,8 @@ void OSD::tick_without_osd_lock()
 
   mgrc.update_daemon_health(get_health_metrics());
   service.kick_recovery_queue();
-  tick_timer_without_osd_lock.add_event_after(OSD_TICK_INTERVAL, new C_Tick_WithoutOSDLock(this));
+  tick_timer_without_osd_lock.add_event_after(get_tick_interval(),
+					      new C_Tick_WithoutOSDLock(this));
 }
 
 // Usage:
@@ -5116,9 +5169,8 @@ void OSD::ms_handle_fast_connect(Connection *con)
     auto priv = con->get_priv();
     auto s = static_cast<Session*>(priv.get());
     if (!s) {
-      s = new Session{cct};
+      s = new Session{cct, con};
       con->set_priv(RefCountedPtr{s, false});
-      s->con = con;
       dout(10) << " new session (outgoing) " << s << " con=" << s->con
           << " addr=" << s->con->get_peer_addr() << dendl;
       // we don't connect to clients
@@ -5135,9 +5187,8 @@ void OSD::ms_handle_fast_accept(Connection *con)
     auto priv = con->get_priv();
     auto s = static_cast<Session*>(priv.get());
     if (!s) {
-      s = new Session{cct};
+      s = new Session{cct, con};
       con->set_priv(RefCountedPtr{s, false});
-      s->con = con;
       dout(10) << "new session (incoming)" << s << " con=" << con
           << " addr=" << con->get_peer_addr()
           << " must have raced with connect" << dendl;
@@ -5315,13 +5366,12 @@ bool OSD::_is_healthy()
 
   if (is_waiting_for_healthy()) {
     Mutex::Locker l(heartbeat_lock);
-    utime_t cutoff = ceph_clock_now();
-    cutoff -= cct->_conf->osd_heartbeat_grace;
+    utime_t now = ceph_clock_now();
     int num = 0, up = 0;
     for (map<int,HeartbeatInfo>::iterator p = heartbeat_peers.begin();
 	 p != heartbeat_peers.end();
 	 ++p) {
-      if (p->second.is_healthy(cutoff))
+      if (p->second.is_healthy(now))
 	++up;
       ++num;
     }
@@ -6583,9 +6633,8 @@ bool OSD::ms_verify_authorizer(
     auto priv = con->get_priv();
     auto s = static_cast<Session*>(priv.get());
     if (!s) {
-      s = new Session{cct};
+      s = new Session{cct, con};
       con->set_priv(RefCountedPtr{s, false});
-      s->con = con;
       dout(10) << " new session " << s << " con=" << s->con
 	       << " addr=" << con->get_peer_addr() << dendl;
     }

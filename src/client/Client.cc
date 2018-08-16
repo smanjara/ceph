@@ -230,36 +230,20 @@ vinodeno_t Client::map_faked_ino(ino_t ino)
 
 Client::Client(Messenger *m, MonClient *mc, Objecter *objecter_)
   : Dispatcher(m->cct),
-    m_command_hook(this),
     timer(m->cct, client_lock),
-    callback_handle(NULL),
-    switch_interrupt_cb(NULL),
-    remount_cb(NULL),
-    ino_invalidate_cb(NULL),
-    dentry_invalidate_cb(NULL),
-    umask_cb(NULL),
-    can_invalidate_dentries(false),
+    client_lock("Client::client_lock"),
+    messenger(m),
+    monclient(mc),
+    objecter(objecter_),
+    whoami(mc->get_global_id()),
     async_ino_invalidator(m->cct),
     async_dentry_invalidator(m->cct),
     interrupt_finisher(m->cct),
     remount_finisher(m->cct),
     objecter_finisher(m->cct),
-    tick_event(NULL),
-    messenger(m), monclient(mc),
-    objecter(objecter_),
-    whoami(mc->get_global_id()), cap_epoch_barrier(0),
-    last_tid(0), oldest_tid(0), last_flush_tid(1),
-    local_osd(-ENXIO), local_osd_epoch(0),
-    unsafe_sync_write(0),
-    client_lock("Client::client_lock"),
-    deleg_timeout(0)
+    m_command_hook(this)
 {
   _reset_faked_inos();
-  //
-  root = 0;
-  root_ancestor = 0;
-
-  num_flushing_caps = 0;
 
   _dir_vxattrs_name_size = _vxattrs_calcu_name_size(_dir_vxattrs);
   _file_vxattrs_name_size = _vxattrs_calcu_name_size(_file_vxattrs);
@@ -267,7 +251,6 @@ Client::Client(Messenger *m, MonClient *mc, Objecter *objecter_)
   user_id = cct->_conf->client_mount_uid;
   group_id = cct->_conf->client_mount_gid;
 
-  acl_type = NO_ACL;
   if (cct->_conf->client_acl_type == "posix_acl")
     acl_type = POSIX_ACL;
 
@@ -1068,7 +1051,13 @@ void Client::insert_readdir_results(MetaRequest *request, MetaSession *session, 
 
   MClientReply *reply = request->reply;
   ConnectionRef con = request->reply->get_connection();
-  uint64_t features = con->get_features();
+  uint64_t features;
+  if(session->mds_features.test(CEPHFS_FEATURE_REPLY_ENCODING)) {
+    features = (uint64_t)-1;
+  }
+  else {
+    features = con->get_features();
+  }
 
   dir_result_t *dirp = request->dirp;
   assert(dirp);
@@ -1087,7 +1076,7 @@ void Client::insert_readdir_results(MetaRequest *request, MetaSession *session, 
     assert(dir);
 
     // dirstat
-    DirStat dst(p);
+    DirStat dst(p, features);
     __u32 numdn;
     __u16 flags;
     decode(numdn, p);
@@ -1145,7 +1134,7 @@ void Client::insert_readdir_results(MetaRequest *request, MetaSession *session, 
     LeaseStat dlease;
     for (unsigned i=0; i<numdn; i++) {
       decode(dname, p);
-      decode(dlease, p);
+      dlease.decode(p, features);
       InodeStat ist(p, features);
 
       ldout(cct, 15) << "" << i << ": '" << dname << "'" << dendl;
@@ -1266,7 +1255,13 @@ Inode* Client::insert_trace(MetaRequest *request, MetaSession *session)
   }
 
   ConnectionRef con = request->reply->get_connection();
-  uint64_t features = con->get_features();
+  uint64_t features;
+  if (session->mds_features.test(CEPHFS_FEATURE_REPLY_ENCODING)) {
+    features = (uint64_t)-1;
+  }
+  else {
+    features = con->get_features();
+  }
   ldout(cct, 10) << " features 0x" << hex << features << dec << dendl;
 
   // snap trace
@@ -1287,9 +1282,9 @@ Inode* Client::insert_trace(MetaRequest *request, MetaSession *session)
 
   if (reply->head.is_dentry) {
     dirst.decode(p, features);
-    dst.decode(p);
+    dst.decode(p, features);
     decode(dname, p);
-    decode(dlease, p);
+    dlease.decode(p, features);
   }
 
   Inode *in = 0;
@@ -2072,6 +2067,7 @@ void Client::handle_client_session(MClientSession *m)
 	_closed_mds_session(session);
 	break;
       }
+      session->mds_features = std::move(m->supported_features);
 
       renew_caps(session);
       session->state = MetaSession::STATE_OPEN;
@@ -13413,13 +13409,14 @@ int Client::fallocate(int fd, int mode, loff_t offset, loff_t length)
 int Client::ll_release(Fh *fh)
 {
   Mutex::Locker lock(client_lock);
+
+  if (unmounting)
+    return -ENOTCONN;
+
   ldout(cct, 3) << __func__ << " (fh)" << fh << " " << fh->inode->ino << " " <<
     dendl;
   tout(cct) << __func__ << " (fh)" << std::endl;
   tout(cct) << (unsigned long)fh << std::endl;
-
-  if (unmounting)
-    return -ENOTCONN;
 
   if (ll_unclosed_fh_set.count(fh))
     ll_unclosed_fh_set.erase(fh);
@@ -14244,7 +14241,7 @@ int StandaloneClient::init()
   objecter->init();
 
   client_lock.Lock();
-  assert(!initialized);
+  assert(!is_initialized());
 
   messenger->add_dispatcher_tail(objecter);
   messenger->add_dispatcher_tail(this);

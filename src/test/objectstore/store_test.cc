@@ -5129,10 +5129,10 @@ void colsplittest(
     ObjectStore::Transaction t;
     t.create_collection(tid, common_suffix_size + 1);
     t.split_collection(cid, common_suffix_size+1, 1<<common_suffix_size, tid);
-    r = queue_transaction(store, tch, std::move(t));
+    r = queue_transaction(store, ch, std::move(t));
     ASSERT_EQ(r, 0);
   }
-  tch->flush();
+  ch->flush();
 
   ObjectStore::Transaction t;
   vector<ghobject_t> objects;
@@ -7032,6 +7032,43 @@ TEST_P(StoreTest, BluestoreStatistics) {
   EXPECT_NO_THROW(store->get_db_statistics(f));
   f->flush(cout);
   cout << std::endl;
+}
+
+TEST_P(StoreTestSpecificAUSize, BluestoreTinyDevFailure) {
+  if (string(GetParam()) != "bluestore")
+    return;
+  // This caused superblock overwrite by bluefs, see
+  // https://tracker.ceph.com/issues/24480
+  SetVal(g_conf(), "bluestore_block_size",
+    stringify(1024 * 1024 * 1024).c_str()); //1 Gb
+  SetVal(g_conf(), "bluestore_block_db_size", "0");
+  SetVal(g_conf(), "bluestore_block_db_create", "false");
+  SetVal(g_conf(), "bluestore_bluefs_min",
+    stringify(1024 * 1024 * 1024).c_str());
+  StartDeferred(0x1000);
+  store->umount();
+  ASSERT_EQ(store->fsck(false), 0); // do fsck explicitly
+  store->mount();
+}
+
+TEST_P(StoreTestSpecificAUSize, BluestoreTinyDevFailure2) {
+  if (string(GetParam()) != "bluestore")
+    return;
+
+  // This caused assert in allocator as initial bluefs extent as slow device
+  // overlaped with superblock
+  // https://tracker.ceph.com/issues/24480
+  SetVal(g_conf(), "bluestore_block_size",
+    stringify(1024 * 1024 * 1024).c_str()); //1 Gb
+  SetVal(g_conf(), "bluestore_block_db_size",
+    stringify(1024 * 1024 * 1024).c_str()); //1 Gb
+  SetVal(g_conf(), "bluestore_block_db_create", "true");
+  SetVal(g_conf(), "bluestore_bluefs_min",
+    stringify(1024 * 1024 * 1024).c_str());
+  StartDeferred(0x1000);
+  store->umount();
+  ASSERT_EQ(store->fsck(false), 0); // do fsck explicitly
+  store->mount();
 }
 #endif  // WITH_BLUESTORE
 
