@@ -404,7 +404,9 @@ void Objecter::shutdown()
 
   initialized = false;
 
+  wl.unlock();
   cct->_conf.remove_observer(this);
+  wl.lock();
 
   map<int,OSDSession*>::iterator p;
   while (!osd_sessions.empty()) {
@@ -1328,15 +1330,7 @@ void Objecter::handle_osd_map(MOSDMap *m)
   for (list<LingerOp*>::iterator p = need_resend_linger.begin();
        p != need_resend_linger.end(); ++p) {
     LingerOp *op = *p;
-    if (!op->session) {
-      _calc_target(&op->target, nullptr);
-      OSDSession *s = NULL;
-      const int r = _get_session(op->target.osd, &s, sul);
-      ceph_assert(r == 0);
-      ceph_assert(s != NULL);
-      op->session = s;
-      put_session(s);
-    }
+    ceph_assert(op->session);
     if (!op->session->is_homeless()) {
       logger->inc(l_osdc_linger_resend);
       _send_linger(op, sul);
@@ -1952,15 +1946,9 @@ void Objecter::wait_for_latest_osdmap(Context *fin)
 void Objecter::get_latest_version(epoch_t oldest, epoch_t newest, Context *fin)
 {
   unique_lock wl(rwlock);
-  _get_latest_version(oldest, newest, fin);
-}
-
-void Objecter::_get_latest_version(epoch_t oldest, epoch_t newest,
-				   Context *fin)
-{
-  // rwlock is locked unique
   if (osdmap->get_epoch() >= newest) {
-  ldout(cct, 10) << __func__ << " latest " << newest << ", have it" << dendl;
+    ldout(cct, 10) << __func__ << " latest " << newest << ", have it" << dendl;
+    wl.unlock();
     if (fin)
       fin->complete(0);
     return;
@@ -2885,10 +2873,11 @@ int Objecter::_calc_target(op_target_t *t, Connection *con, bool any_change)
   }
 
   bool unpaused = false;
-  if (t->paused && !target_should_be_paused(t)) {
-    t->paused = false;
+  bool should_be_paused = target_should_be_paused(t);
+  if (t->paused && !should_be_paused) {
     unpaused = true;
   }
+  t->paused = should_be_paused;
 
   bool legacy_change =
     t->pgid != pgid ||
@@ -3289,11 +3278,11 @@ int Objecter::calc_op_budget(const vector<OSDOp>& ops)
     if (i->op.op & CEPH_OSD_OP_MODE_WR) {
       op_budget += i->indata.length();
     } else if (ceph_osd_op_mode_read(i->op.op)) {
-      if (ceph_osd_op_type_data(i->op.op)) {
-	if ((int64_t)i->op.extent.length > 0)
-	  op_budget += (int64_t)i->op.extent.length;
+      if (ceph_osd_op_uses_extent(i->op.op)) {
+        if ((int64_t)i->op.extent.length > 0)
+          op_budget += (int64_t)i->op.extent.length;
       } else if (ceph_osd_op_type_attr(i->op.op)) {
-	op_budget += i->op.xattr.name_len + i->op.xattr.value_len;
+        op_budget += i->op.xattr.name_len + i->op.xattr.value_len;
       }
     }
   }
@@ -4384,7 +4373,10 @@ bool Objecter::ms_handle_reset(Connection *con)
     if (session) {
       ldout(cct, 1) << "ms_handle_reset " << con << " session " << session
 		    << " osd." << session->osd << dendl;
-      if (!initialized) {
+      // the session maybe had been closed if new osdmap just handled
+      // says the osd down
+      if (!(initialized && osdmap->is_up(session->osd))) {
+	ldout(cct, 1) << "ms_handle_reset aborted,initialized=" << initialized << dendl;
 	wl.unlock();
 	return false;
       }
@@ -4423,8 +4415,7 @@ bool Objecter::ms_handle_refused(Connection *con)
 }
 
 bool Objecter::ms_get_authorizer(int dest_type,
-				 AuthAuthorizer **authorizer,
-				 bool force_new)
+				 AuthAuthorizer **authorizer)
 {
   if (!initialized)
     return false;
@@ -4691,7 +4682,8 @@ void Objecter::blacklist_self(bool set)
   else
     cmd.push_back("\"blacklistop\":\"rm\",");
   stringstream ss;
-  ss << messenger->get_myaddr();
+  // this is somewhat imprecise in that we are blacklisting our first addr only
+  ss << messenger->get_myaddrs().front().get_legacy_str();
   cmd.push_back("\"addr\":\"" + ss.str() + "\"");
 
   MMonCommand *m = new MMonCommand(monc->get_fsid());

@@ -33,13 +33,9 @@ function install_seastar_deps {
 }
 
 function munge_ceph_spec_in {
+    # http://rpm.org/user_doc/conditional_builds.html
     local OUTFILE=$1
     sed -e 's/@//g' -e 's/%bcond_with make_check/%bcond_without make_check/g' < ceph.spec.in > $OUTFILE
-    if type python2 > /dev/null 2>&1 ; then
-        sed -i -e 's/%bcond_with python2/%bcond_without python2/g' $OUTFILE
-    else
-        sed -i -e 's/%bcond_without python2/%bcond_with python2/g' $OUTFILE
-    fi
     if [ $WITH_SEASTAR ]; then
         sed -i -e 's/%bcond_with seastar/%bcond_without seastar/g' $OUTFILE
     fi
@@ -48,7 +44,7 @@ function munge_ceph_spec_in {
 function ensure_decent_gcc_on_ubuntu {
     # point gcc to the one offered by g++-7 if the used one is not
     # new enough
-    local old=$(gcc -dumpversion)
+    local old=$(gcc -dumpfullversion -dumpversion)
     local new=$1
     local codename=$2
     if dpkg --compare-versions $old ge 7.0; then
@@ -127,6 +123,29 @@ function install_pkg_on_ubuntu {
     fi
 }
 
+function install_boost_on_ubuntu {
+    local codename=$1
+    install_pkg_on_ubuntu \
+	ceph-libboost1.67 \
+	dd38c27740c1f9a9e6719a07eef84a1369dc168b \
+	$codename \
+	ceph-libboost-atomic1.67-dev \
+	ceph-libboost-chrono1.67-dev \
+	ceph-libboost-container1.67-dev \
+	ceph-libboost-context1.67-dev \
+	ceph-libboost-coroutine1.67-dev \
+	ceph-libboost-date-time1.67-dev \
+	ceph-libboost-filesystem1.67-dev \
+	ceph-libboost-iostreams1.67-dev \
+	ceph-libboost-program-options1.67-dev \
+	ceph-libboost-python1.67-dev \
+	ceph-libboost-random1.67-dev \
+	ceph-libboost-regex1.67-dev \
+	ceph-libboost-system1.67-dev \
+	ceph-libboost-thread1.67-dev \
+	ceph-libboost-timer1.67-dev
+}
+
 function version_lt {
     test $1 != $(echo -e "$1\n$2" | sort -rV | head -n 1)
 }
@@ -175,7 +194,6 @@ if [ x$(uname)x = xFreeBSDx ]; then
         devel/py-virtualenv \
         databases/leveldb \
         net/openldap24-client \
-        security/nss \
         archivers/snappy \
         archivers/liblz4 \
         ftp/curl \
@@ -193,16 +211,20 @@ if [ x$(uname)x = xFreeBSDx ]; then
         java/junit \
         lang/python \
         lang/python27 \
+        lang/python36 \
         devel/py-pip \
+        devel/py-flake8 \
         devel/py-argparse \
         devel/py-nose \
         devel/py-prettytable \
-	www/py-routes \
+        www/py-routes \
         www/py-flask \
-	www/node \
-	www/npm \
+        www/node \
+        www/npm \
         www/fcgi \
-	security/oath-toolkit \
+        security/nss \
+        security/kbr5 \
+        security/oath-toolkit \
         sysutils/flock \
         sysutils/fusefs-libs \
 
@@ -223,25 +245,10 @@ else
                 ;;
             *Xenial*)
                 ensure_decent_gcc_on_ubuntu 7 xenial
-                install_pkg_on_ubuntu \
-		    ceph-libboost1.67 \
-		    dd38c27740c1f9a9e6719a07eef84a1369dc168b \
-		    xenial \
-		    ceph-libboost-atomic1.67-dev \
-		    ceph-libboost-chrono1.67-dev \
-		    ceph-libboost-container1.67-dev \
-		    ceph-libboost-context1.67-dev \
-		    ceph-libboost-coroutine1.67-dev \
-		    ceph-libboost-date-time1.67-dev \
-		    ceph-libboost-filesystem1.67-dev \
-		    ceph-libboost-iostreams1.67-dev \
-		    ceph-libboost-program-options1.67-dev \
-		    ceph-libboost-python1.67-dev \
-		    ceph-libboost-random1.67-dev \
-		    ceph-libboost-regex1.67-dev \
-		    ceph-libboost-system1.67-dev \
-		    ceph-libboost-thread1.67-dev \
-		    ceph-libboost-timer1.67-dev
+                install_boost_on_ubuntu xenial
+                ;;
+            *Bionic*)
+                install_boost_on_ubuntu bionic
                 ;;
             *)
                 $SUDO apt-get install -y gcc
@@ -274,7 +281,7 @@ else
         ;;
     centos|fedora|rhel|ol|virtuozzo)
         yumdnf="yum"
-        builddepcmd="yum-builddep -y"
+        builddepcmd="yum-builddep -y --setopt=*.skip_if_unavailable=true"
         if test "$(echo "$VERSION_ID >= 22" | bc)" -ne 0; then
             yumdnf="dnf"
             builddepcmd="dnf -y builddep --allowerasing"
@@ -285,7 +292,6 @@ else
 	    $SUDO yum-config-manager --disable centos-sclo-rh || true
 	    $SUDO yum remove centos-release-scl || true
 	fi
-
         case $ID in
             fedora)
                 if test $yumdnf = yum; then
@@ -293,16 +299,16 @@ else
                 fi
                 ;;
             centos|rhel|ol|virtuozzo)
+                MAJOR_VERSION="$(echo $VERSION_ID | cut -d. -f1)"
                 $SUDO yum install -y yum-utils
                 if test $ID = rhel ; then
-                    $SUDO yum-config-manager --enable rhel-$VERSION_ID-server-optional-rpms
+                    $SUDO yum-config-manager --enable rhel-$MAJOR_VERSION-server-optional-rpms
                 fi
-                $SUDO yum-config-manager --add-repo https://dl.fedoraproject.org/pub/epel/$VERSION_ID/x86_64/
+                $SUDO yum-config-manager --add-repo https://dl.fedoraproject.org/pub/epel/$MAJOR_VERSION/x86_64/
                 $SUDO yum install --nogpgcheck -y epel-release
-                $SUDO rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-$VERSION_ID
+                $SUDO rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-$MAJOR_VERSION
                 $SUDO rm -f /etc/yum.repos.d/dl.fedoraproject.org*
-                if test $ID = centos -a $VERSION_ID = 7 ; then
-                    $SUDO yum-config-manager --enable cr
+                if test $ID = centos -a $MAJOR_VERSION = 7 ; then
 		    case $(uname -m) in
 			x86_64)
 			    $SUDO yum -y install centos-release-scl
@@ -318,8 +324,6 @@ else
                 elif test $ID = rhel -a $MAJOR_VERSION = 7 ; then
                     $SUDO yum-config-manager --enable rhel-server-rhscl-7-rpms
                     dts_ver=7
-                elif test $ID = virtuozzo -a $MAJOR_VERSION = 7 ; then
-                    $SUDO yum-config-manager --enable cr
                 fi
                 ;;
         esac
@@ -366,8 +370,7 @@ function populate_wheelhouse() {
 
     # although pip comes with virtualenv, having a recent version
     # of pip matters when it comes to using wheel packages
-    # workaround of https://github.com/pypa/setuptools/issues/1042
-    pip --timeout 300 $install 'setuptools >= 0.8,< 36' 'pip >= 7.0' 'wheel >= 0.24' || return 1
+    pip --timeout 300 $install 'setuptools >= 0.8' 'pip >= 7.0' 'wheel >= 0.24' || return 1
     if test $# != 0 ; then
         pip --timeout 300 $install $@ || return 1
     fi

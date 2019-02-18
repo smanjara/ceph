@@ -1,4 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab
 
 #include "MonMap.h"
 
@@ -21,25 +22,33 @@
 #include "common/ceph_argparse.h"
 #include "common/dns_resolve.h"
 #include "common/errno.h"
-
 #include "common/dout.h"
+#include "common/Clock.h"
 
 using ceph::Formatter;
 
 void mon_info_t::encode(bufferlist& bl, uint64_t features) const
 {
-  ENCODE_START(2, 1, bl);
+  uint8_t v = 3;
+  if (!HAVE_FEATURE(features, SERVER_NAUTILUS)) {
+    v = 2;
+  }
+  ENCODE_START(v, 1, bl);
   encode(name, bl);
-  encode(public_addr, bl, features);
+  if (v < 3) {
+    encode(public_addrs.legacy_addr(), bl, features);
+  } else {
+    encode(public_addrs, bl, features);
+  }
   encode(priority, bl);
   ENCODE_FINISH(bl);
 }
 
 void mon_info_t::decode(bufferlist::const_iterator& p)
 {
-  DECODE_START(1, p);
+  DECODE_START(3, p);
   decode(name, p);
-  decode(public_addr, p);
+  decode(public_addrs, p);
   if (struct_v >= 2) {
     decode(priority, p);
   }
@@ -49,16 +58,16 @@ void mon_info_t::decode(bufferlist::const_iterator& p)
 void mon_info_t::print(ostream& out) const
 {
   out << "mon." << name
-      << " public " << public_addr
+      << " addrs " << public_addrs
       << " priority " << priority;
 }
 
 namespace {
   struct rank_cmp {
     bool operator()(const mon_info_t &a, const mon_info_t &b) const {
-      if (a.public_addr == b.public_addr)
+      if (a.public_addrs.legacy_or_front_addr() == b.public_addrs.legacy_or_front_addr())
         return a.name < b.name;
-      return a.public_addr < b.public_addr;
+      return a.public_addrs.legacy_or_front_addr() < b.public_addrs.legacy_or_front_addr();
     }
   };
 }
@@ -119,11 +128,14 @@ void MonMap::encode(bufferlist& blist, uint64_t con_features) const
   }
 
   map<string,entity_addr_t> legacy_mon_addr;
-  for (auto& [name, info] : mon_info) {
-    legacy_mon_addr[name] = info.public_addr;
+  if (!HAVE_FEATURE(con_features, MONENC) ||
+      !HAVE_FEATURE(con_features, SERVER_NAUTILUS)) {
+    for (auto& [name, info] : mon_info) {
+      legacy_mon_addr[name] = info.public_addrs.legacy_addr();
+    }
   }
 
-  if ((con_features & CEPH_FEATURE_MONENC) == 0) {
+  if (!HAVE_FEATURE(con_features, MONENC)) {
     /* we keep the mon_addr map when encoding to ensure compatibility
        * with clients and other monitors that do not yet support the 'mons'
        * map. This map keeps its original behavior, containing a mapping of
@@ -156,7 +168,7 @@ void MonMap::encode(bufferlist& blist, uint64_t con_features) const
     return;
   }
 
-  ENCODE_START(6, 6, blist);
+  ENCODE_START(7, 6, blist);
   encode_raw(fsid, blist);
   encode(epoch, blist);
   encode(last_changed, blist);
@@ -165,13 +177,14 @@ void MonMap::encode(bufferlist& blist, uint64_t con_features) const
   encode(optional_features, blist);
   encode(mon_info, blist, con_features);
   encode(ranks, blist);
+  encode(min_mon_release, blist);
   ENCODE_FINISH(blist);
 }
 
 void MonMap::decode(bufferlist::const_iterator& p)
 {
   map<string,entity_addr_t> mon_addr;
-  DECODE_START_LEGACY_COMPAT_LEN_16(6, 3, 3, p);
+  DECODE_START_LEGACY_COMPAT_LEN_16(7, 3, 3, p);
   decode_raw(fsid, p);
   decode(epoch, p);
   if (struct_v == 1) {
@@ -198,7 +211,7 @@ void MonMap::decode(bufferlist::const_iterator& p)
     for (auto& [name, addr] : mon_addr) {
       mon_info_t &m = mon_info[name];
       m.name = name;
-      m.public_addr = addr;
+      m.public_addrs = entity_addrvec_t(addr);
     }
   } else {
     decode(mon_info, p);
@@ -207,6 +220,11 @@ void MonMap::decode(bufferlist::const_iterator& p)
     calc_legacy_ranks();
   } else {
     decode(ranks, p);
+  }
+  if (struct_v >= 7) {
+    decode(min_mon_release, p);
+  } else {
+    min_mon_release = infer_ceph_release_from_mon_features(persistent_features);
   }
   calc_addr_mons();
   DECODE_FINISH(p);
@@ -219,29 +237,29 @@ void MonMap::generate_test_instances(list<MonMap*>& o)
   o.back()->epoch = 1;
   o.back()->last_changed = utime_t(123, 456);
   o.back()->created = utime_t(789, 101112);
-  o.back()->add("one", entity_addr_t());
+  o.back()->add("one", entity_addrvec_t());
 
   MonMap *m = new MonMap;
   {
     m->epoch = 1;
     m->last_changed = utime_t(123, 456);
 
-    entity_addr_t empty_addr_one;
-    empty_addr_one.set_nonce(1);
+    entity_addrvec_t empty_addr_one = entity_addrvec_t(entity_addr_t());
+    empty_addr_one.v[0].set_nonce(1);
     m->add("empty_addr_one", empty_addr_one);
-    entity_addr_t empty_addr_two;
-    empty_addr_two.set_nonce(2);
-    m->add("empty_adrr_two", empty_addr_two);
+    entity_addrvec_t empty_addr_two = entity_addrvec_t(entity_addr_t());
+    empty_addr_two.v[0].set_nonce(2);
+    m->add("empty_addr_two", empty_addr_two);
 
     const char *local_pub_addr_s = "127.0.1.2";
 
     const char *end_p = local_pub_addr_s + strlen(local_pub_addr_s);
-    entity_addr_t local_pub_addr;
+    entity_addrvec_t local_pub_addr;
     local_pub_addr.parse(local_pub_addr_s, &end_p);
 
-    m->add(mon_info_t("filled_pub_addr", local_pub_addr, 1));
+    m->add(mon_info_t("filled_pub_addr", entity_addrvec_t(local_pub_addr), 1));
 
-    m->add("empty_addr_zero", entity_addr_t());
+    m->add("empty_addr_zero", entity_addrvec_t());
   }
   o.push_back(m);
 }
@@ -282,7 +300,7 @@ void MonMap::print_summary(ostream& out) const
        ++p) {
     if (has_printed)
       out << ",";
-    out << p->first << "=" << p->second.public_addr;
+    out << p->first << "=" << p->second.public_addrs;
     has_printed = true;
   }
   out << "}";
@@ -294,11 +312,13 @@ void MonMap::print(ostream& out) const
   out << "fsid " << fsid << "\n";
   out << "last_changed " << last_changed << "\n";
   out << "created " << created << "\n";
+  out << "min_mon_release " << (int)min_mon_release
+      << " (" << ceph_release_name(min_mon_release) << ")\n";
   unsigned i = 0;
   for (vector<string>::const_iterator p = ranks.begin();
        p != ranks.end();
        ++p) {
-    out << i++ << ": " << get_addr(*p) << " mon." << *p << "\n";
+    out << i++ << ": " << get_addrs(*p) << " mon." << *p << "\n";
   }
 }
 
@@ -308,6 +328,8 @@ void MonMap::dump(Formatter *f) const
   f->dump_stream("fsid") <<  fsid;
   f->dump_stream("modified") << last_changed;
   f->dump_stream("created") << created;
+  f->dump_unsigned("min_mon_release", min_mon_release);
+  f->dump_string("min_mon_release_name", ceph_release_name(min_mon_release));
   f->open_object_section("features");
   persistent_features.dump(f, "persistent");
   optional_features.dump(f, "optional");
@@ -320,19 +342,112 @@ void MonMap::dump(Formatter *f) const
     f->open_object_section("mon");
     f->dump_int("rank", i);
     f->dump_string("name", *p);
-    f->dump_stream("addr") << get_addr(*p);
-    f->dump_stream("public_addr") << get_addr(*p);
+    f->dump_object("public_addrs", get_addrs(*p));
+    // compat: make these look like pre-nautilus entity_addr_t
+    f->dump_stream("addr") << get_addrs(*p).get_legacy_str();
+    f->dump_stream("public_addr") << get_addrs(*p).get_legacy_str();
     f->close_section();
   }
   f->close_section();
 }
 
+// an ambiguous mon addr may be legacy or may be msgr2--we aren' sure.
+// when that happens we need to try them both (unless we can
+// reasonably infer from the port number which it is).
+void MonMap::_add_ambiguous_addr(const string& name,
+				 entity_addr_t addr,
+				 int priority,
+				 bool for_mkfs)
+{
+  if (addr.get_type() != entity_addr_t::TYPE_ANY) {
+    // a v1: or v2: prefix was specified
+    if (addr.get_port() == 0) {
+      // use default port
+      if (addr.get_type() == entity_addr_t::TYPE_ANY) {
+	addr.set_port(CEPH_MON_PORT_IANA);
+      } else if (addr.get_type() == entity_addr_t::TYPE_LEGACY) {
+	addr.set_port(CEPH_MON_PORT_LEGACY);
+      } else if (addr.get_type() == entity_addr_t::TYPE_MSGR2) {
+	addr.set_port(CEPH_MON_PORT_IANA);
+      } else {
+	// wth
+	return;
+      }
+      if (!contains(addr)) {
+	add(name, entity_addrvec_t(addr));
+      }
+    } else {
+      if (!contains(addr)) {
+	add(name, entity_addrvec_t(addr), priority);
+      }
+    }
+  } else {
+    // no v1: or v2: prefix specified
+    if (addr.get_port() == CEPH_MON_PORT_LEGACY) {
+      // legacy port implies legacy addr
+      addr.set_type(entity_addr_t::TYPE_LEGACY);
+      if (!contains(addr)) {
+	if (!for_mkfs) {
+	  add(name + "-legacy", entity_addrvec_t(addr));
+	} else {
+	  add(name, entity_addrvec_t(addr));
+	}
+      }
+    } else if (addr.get_port() == CEPH_MON_PORT_IANA) {
+      // iana port implies msgr2 addr
+      addr.set_type(entity_addr_t::TYPE_MSGR2);
+      if (!contains(addr)) {
+	add(name, entity_addrvec_t(addr));
+      }
+    } else if (addr.get_port() == 0) {
+      // no port; include both msgr2 and legacy ports
+      if (!for_mkfs) {
+	addr.set_type(entity_addr_t::TYPE_MSGR2);
+	addr.set_port(CEPH_MON_PORT_IANA);
+	if (!contains(addr)) {
+	  add(name, entity_addrvec_t(addr));
+	}
+	addr.set_type(entity_addr_t::TYPE_LEGACY);
+	addr.set_port(CEPH_MON_PORT_LEGACY);
+	if (!contains(addr)) {
+	  add(name + "-legacy", entity_addrvec_t(addr));
+	}
+      } else {
+	entity_addrvec_t av;
+	addr.set_type(entity_addr_t::TYPE_MSGR2);
+	addr.set_port(CEPH_MON_PORT_IANA);
+	av.v.push_back(addr);
+	addr.set_type(entity_addr_t::TYPE_LEGACY);
+	addr.set_port(CEPH_MON_PORT_LEGACY);
+	av.v.push_back(addr);
+	if (!contains(av)) {
+	  add(name, av);
+	}
+      }
+    } else {
+      addr.set_type(entity_addr_t::TYPE_MSGR2);
+      if (!contains(addr)) {
+	add(name, entity_addrvec_t(addr), priority);
+      }
+      if (!for_mkfs) {
+	// try legacy on same port too
+	addr.set_type(entity_addr_t::TYPE_LEGACY);
+	if (!contains(addr)) {
+	  add(name + "-legacy", entity_addrvec_t(addr), priority);
+	}
+      }
+    }
+  }
+}
 
 int MonMap::init_with_ips(const std::string& ips,
+			  bool for_mkfs,
 			  const std::string &prefix)
 {
-  vector<entity_addr_t> addrs;
-  if (!parse_ip_port_vec(ips.c_str(), addrs)) {
+  vector<entity_addrvec_t> addrs;
+  if (!parse_ip_port_vec(
+	ips.c_str(), addrs,
+	entity_addr_t::TYPE_ANY)) {
     return -EINVAL;
   }
   if (addrs.empty())
@@ -341,17 +456,22 @@ int MonMap::init_with_ips(const std::string& ips,
     char n[2];
     n[0] = 'a' + i;
     n[1] = 0;
-    if (addrs[i].get_port() == 0)
-      addrs[i].set_port(CEPH_MON_PORT_LEGACY);
-    string name = prefix;
+    string name;
+    name = prefix;
     name += n;
-    if (!contains(addrs[i]))
-      add(name, addrs[i]);
+    if (addrs[i].v.size() == 1) {
+      _add_ambiguous_addr(name, addrs[i].front(), 0, for_mkfs);
+    } else {
+      // they specified an addrvec, so let's assume they also specified
+      // the addr *type* and *port*.  (we could possibly improve this?)
+      add(name, addrs[i], 0);
+    }
   }
   return 0;
 }
 
 int MonMap::init_with_hosts(const std::string& hostlist,
+			    bool for_mkfs,
 			    const std::string& prefix)
 {
   // maybe they passed us a DNS-resolvable name
@@ -359,26 +479,26 @@ int MonMap::init_with_hosts(const std::string& hostlist,
   if (!hosts)
     return -EINVAL;
 
-  vector<entity_addr_t> addrs;
-  bool success = parse_ip_port_vec(hosts, addrs);
+  vector<entity_addrvec_t> addrs;
+  bool success = parse_ip_port_vec(
+    hosts, addrs,
+    for_mkfs ? entity_addr_t::TYPE_MSGR2 : entity_addr_t::TYPE_ANY);
   free(hosts);
   if (!success)
     return -EINVAL;
-
   if (addrs.empty())
     return -ENOENT;
-
   for (unsigned i=0; i<addrs.size(); i++) {
     char n[2];
     n[0] = 'a' + i;
     n[1] = 0;
-    if (addrs[i].get_port() == 0)
-      addrs[i].set_port(CEPH_MON_PORT_LEGACY);
     string name = prefix;
     name += n;
-    if (!contains(addrs[i]) &&
-	!contains(name))
-      add(name, addrs[i]);
+    if (addrs[i].v.size() == 1) {
+      _add_ambiguous_addr(name, addrs[i].front(), 0);
+    } else {
+      add(name, addrs[i], 0);
+    }
   }
   calc_legacy_ranks();
   return 0;
@@ -386,32 +506,37 @@ int MonMap::init_with_hosts(const std::string& hostlist,
 
 void MonMap::set_initial_members(CephContext *cct,
 				 list<std::string>& initial_members,
-				 string my_name, const entity_addr_t& my_addr,
-				 set<entity_addr_t> *removed)
+				 string my_name,
+				 const entity_addrvec_t& my_addrs,
+				 set<entity_addrvec_t> *removed)
 {
   // remove non-initial members
   unsigned i = 0;
   while (i < size()) {
     string n = get_name(i);
-    if (std::find(initial_members.begin(), initial_members.end(), n) != initial_members.end()) {
-      lgeneric_dout(cct, 1) << " keeping " << n << " " << get_addr(i) << dendl;
+    if (std::find(initial_members.begin(), initial_members.end(), n)
+	!= initial_members.end()) {
+      lgeneric_dout(cct, 1) << " keeping " << n << " " << get_addrs(i) << dendl;
       i++;
       continue;
     }
 
-    lgeneric_dout(cct, 1) << " removing " << get_name(i) << " " << get_addr(i) << dendl;
-    if (removed)
-      removed->insert(get_addr(i));
+    lgeneric_dout(cct, 1) << " removing " << get_name(i) << " " << get_addrs(i)
+			  << dendl;
+    if (removed) {
+      removed->insert(get_addrs(i));
+    }
     remove(n);
     ceph_assert(!contains(n));
   }
 
   // add missing initial members
-  for (list<string>::iterator p = initial_members.begin(); p != initial_members.end(); ++p) {
-    if (!contains(*p)) {
-      if (*p == my_name) {
-	lgeneric_dout(cct, 1) << " adding self " << *p << " " << my_addr << dendl;
-	add(*p, my_addr);
+  for (auto& p : initial_members) {
+    if (!contains(p)) {
+      if (p == my_name) {
+	lgeneric_dout(cct, 1) << " adding self " << p << " " << my_addrs
+			      << dendl;
+	add(p, my_addrs);
       } else {
 	entity_addr_t a;
 	a.set_type(entity_addr_t::TYPE_LEGACY);
@@ -421,10 +546,10 @@ void MonMap::set_initial_members(CephContext *cct,
 	  if (!contains(a))
 	    break;
 	}
-	lgeneric_dout(cct, 1) << " adding " << *p << " " << a << dendl;
-	add(*p, a);
+	lgeneric_dout(cct, 1) << " adding " << p << " " << a << dendl;
+	add(p, entity_addrvec_t(a));
       }
-      ceph_assert(contains(*p));
+      ceph_assert(contains(p));
     }
   }
   calc_legacy_ranks();
@@ -464,8 +589,11 @@ int MonMap::init_with_config_file(const ConfigProxy& conf,
              << ": error " << res << std::endl;
       continue;
     }
+    // the 'mon addr' field is a legacy field, so assume anything
+    // there on a weird port is a v1 address, and do not handle
+    // addrvecs.
     entity_addr_t addr;
-    if (!addr.parse(val.c_str())) {
+    if (!addr.parse(val.c_str(), nullptr, entity_addr_t::TYPE_LEGACY)) {
       errout << "unable to parse address for mon." << mon_name
              << ": addr='" << val << "'" << std::endl;
       continue;
@@ -483,13 +611,13 @@ int MonMap::init_with_config_file(const ConfigProxy& conf,
         continue;
       }
     }
+
     // the make sure this mon isn't already in the map
     if (contains(addr))
       remove(get_name(addr));
     if (contains(mon_name))
       remove(mon_name);
-
-    add(mon_info_t{mon_name, addr, priority});
+    _add_ambiguous_addr(mon_name, addr, priority);
   }
   return 0;
 }
@@ -513,7 +641,7 @@ future<> MonMap::read_monmap(const std::string& monmap)
   });
 }
 
-future<> MonMap::init_with_dns_srv(const std::string& name)
+future<> MonMap::init_with_dns_srv(bool for_mkfs, const std::string& name)
 {
   string domain;
   string service = name;
@@ -532,7 +660,7 @@ future<> MonMap::init_with_dns_srv(const std::string& name)
 	// the resolved address does not contain ceph specific info like nonce
 	// nonce or msgr proto (legacy, msgr2), so set entity_addr_t manually
 	entity_addr_t addr;
-	addr.set_type(entity_addr_t::TYPE_LEGACY);
+	addr.set_type(entity_addr_t::TYPE_ANY);
 	addr.set_family(int(a.in_family()));
 	addr.set_port(record.port);
 	switch (a.in_family()) {
@@ -543,7 +671,7 @@ future<> MonMap::init_with_dns_srv(const std::string& name)
 	  addr.in6_addr().sin6_addr = a;
 	  break;
 	}
-	add(mon_info_t{record.target, addr, record.priority});
+	_add_ambiguous_addr(record.target, addr, record.priority);
       });
     });
   }).handle_exception_type([](const std::system_error& e) {
@@ -552,16 +680,17 @@ future<> MonMap::init_with_dns_srv(const std::string& name)
   });
 }
 
-seastar::future<> MonMap::build_monmap(const ceph::common::ConfigProxy& conf)
+seastar::future<> MonMap::build_monmap(const ceph::common::ConfigProxy& conf,
+				       bool for_mkfs)
 {
   // -m foo?
   if (const auto mon_host = conf.get_val<std::string>("mon_host");
       !mon_host.empty()) {
-    if (auto ret = init_with_ips(mon_host, "noname-"); ret == 0) {
+    if (auto ret = init_with_ips(mon_host, for_mkfs, "noname-"); ret == 0) {
       return make_ready_future<>();
     }
     // TODO: resolve_addrs() is a blocking call
-    if (auto ret = init_with_hosts(mon_host, "noname-"); ret == 0) {
+    if (auto ret = init_with_hosts(mon_host, for_mkfs, "noname-"); ret == 0) {
       return make_ready_future<>();
     } else {
       throw std::runtime_error(cpp_strerror(ret));
@@ -578,14 +707,14 @@ seastar::future<> MonMap::build_monmap(const ceph::common::ConfigProxy& conf)
   }
   // no info found from conf options lets try use DNS SRV records
   const string srv_name = conf.get_val<std::string>("mon_dns_srv_name");
-  return init_with_dns_srv(srv_name).then([this] {
+  return init_with_dns_srv(for_mkfs, srv_name).then([this] {
     if (size() == 0) {
       throw std::runtime_error("no monitors specified to connect to.");
     }
   });
 }
 
-future<> MonMap::build_initial(const ceph::common::ConfigProxy& conf)
+future<> MonMap::build_initial(const ceph::common::ConfigProxy& conf, bool for_mkfs)
 {
   // file?
   if (const auto monmap = conf.get_val<std::string>("monmap");
@@ -597,7 +726,7 @@ future<> MonMap::build_initial(const ceph::common::ConfigProxy& conf)
         !new_fsid.is_zero()) {
       fsid = new_fsid;
     }
-    return build_monmap(conf).then([this] {
+    return build_monmap(conf, for_mkfs).then([this] {
       created = ceph_clock_now();
       last_changed = created;
       calc_legacy_ranks();
@@ -624,6 +753,7 @@ int MonMap::init_with_monmap(const std::string& monmap, std::ostream& errout)
 
 int MonMap::init_with_dns_srv(CephContext* cct,
                               std::string srv_name,
+			      bool for_mkfs,
                               std::ostream& errout)
 {
   string domain;
@@ -642,16 +772,16 @@ int MonMap::init_with_dns_srv(CephContext* cct,
            << "ceph-mon" << std::endl;
     return -1;
   } else {
-    for (const auto& record : records) {
-      add(mon_info_t{record.first,
-            record.second.addr,
-            record.second.priority});
+    for (auto& record : records) {
+      record.second.addr.set_type(entity_addr_t::TYPE_ANY);
+      _add_ambiguous_addr(record.first, record.second.addr,
+			  record.second.priority);
     }
     return 0;
   }
 }
 
-int MonMap::build_initial(CephContext *cct, ostream& errout)
+int MonMap::build_initial(CephContext *cct, bool for_mkfs, ostream& errout)
 {
   const auto& conf = cct->_conf;
   // file?
@@ -668,9 +798,9 @@ int MonMap::build_initial(CephContext *cct, ostream& errout)
   // -m foo?
   if (const auto mon_host = conf.get_val<std::string>("mon_host");
       !mon_host.empty()) {
-    auto ret = init_with_ips(mon_host, "noname-");
+    auto ret = init_with_ips(mon_host, for_mkfs, "noname-");
     if (ret == -EINVAL) {
-      ret = init_with_hosts(mon_host, "noname-");
+      ret = init_with_hosts(mon_host, for_mkfs, "noname-");
     }
     if (ret < 0) {
       errout << "unable to parse addrs in '" << mon_host << "'"
@@ -687,7 +817,7 @@ int MonMap::build_initial(CephContext *cct, ostream& errout)
   if (size() == 0) {
     // no info found from conf options lets try use DNS SRV records
     string srv_name = conf.get_val<std::string>("mon_dns_srv_name");
-    if (auto ret = init_with_dns_srv(cct, srv_name, errout); ret < 0) {
+    if (auto ret = init_with_dns_srv(cct, srv_name, for_mkfs, errout); ret < 0) {
       return -ENOENT;
     }
   }

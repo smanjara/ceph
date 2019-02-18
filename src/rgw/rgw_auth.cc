@@ -320,6 +320,54 @@ rgw::auth::Strategy::add_engine(const Control ctrl_flag,
   auth_stack.push_back(std::make_pair(std::cref(engine), ctrl_flag));
 }
 
+void rgw::auth::WebIdentityApplier::to_str(std::ostream& out) const
+{
+  out << "rgw::auth::WebIdentityApplier(sub =" << token_claims.sub
+      << ", user_name=" << token_claims.user_name
+      << ", aud =" << token_claims.aud
+      << ", provider_id =" << token_claims.iss << ")";
+}
+
+string rgw::auth::WebIdentityApplier::get_idp_url() const
+{
+  string idp_url = token_claims.iss;
+  auto pos = idp_url.find("http://");
+  if (pos == std::string::npos) {
+      pos = idp_url.find("https://");
+      if (pos != std::string::npos) {
+        idp_url.erase(pos, 8);
+    }
+  } else {
+    idp_url.erase(pos, 7);
+  }
+  return idp_url;
+}
+
+void rgw::auth::WebIdentityApplier::modify_request_state(const DoutPrefixProvider *dpp, req_state* s) const
+{
+  s->info.args.append("sub", token_claims.sub);
+  s->info.args.append("aud", token_claims.aud);
+  s->info.args.append("provider_id", token_claims.iss);
+
+  string idp_url = get_idp_url();
+  string condition = idp_url + ":app_id";
+  s->env.emplace(condition, token_claims.aud);
+}
+
+bool rgw::auth::WebIdentityApplier::is_identity(const idset_t& ids) const
+{
+  if (ids.size() > 1) {
+    return false;
+  }
+
+  for (auto id : ids) {
+    string idp_url = get_idp_url();
+    if (id.is_oidc_provider() && id.get_idp_url() == idp_url) {
+      return true;
+    }
+  }
+    return false;
+}
 
 /* rgw::auth::RemoteAuthApplier */
 uint32_t rgw::auth::RemoteApplier::get_perms_from_aclspec(const DoutPrefixProvider* dpp, const aclspec_t& aclspec) const
@@ -535,7 +583,39 @@ void rgw::auth::LocalApplier::load_acct_info(const DoutPrefixProvider* dpp, RGWU
   user_info = this->user_info;
 }
 
-void rgw::auth::LocalApplier::modify_request_state(const DoutPrefixProvider *dpp, req_state* s) const
+void rgw::auth::RoleApplier::to_str(std::ostream& out) const {
+  out << "rgw::auth::LocalApplier(role name =" << role_name;
+  for (auto policy : role_policies) {
+    out << ", role policy =" << policy;
+  }
+  out << ")";
+}
+
+bool rgw::auth::RoleApplier::is_identity(const idset_t& ids) const {
+  for (auto& p : ids) {
+    string name;
+    string tenant = p.get_tenant();
+    if (tenant.empty()) {
+      name = p.get_id();
+    } else {
+      name = tenant + "$" + p.get_id();
+    }
+    if (p.is_wildcard()) {
+      return true;
+    } else if (p.is_role() && name == role_name) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void rgw::auth::RoleApplier::load_acct_info(const DoutPrefixProvider* dpp, RGWUserInfo& user_info) const /* out */
+{
+  /* Load the user id */
+  user_info.user_id = this->user_id;
+}
+
+void rgw::auth::RoleApplier::modify_request_state(const DoutPrefixProvider *dpp, req_state* s) const
 {
   for (auto it : role_policies) {
     try {
@@ -562,7 +642,7 @@ rgw::auth::AnonymousEngine::authenticate(const DoutPrefixProvider* dpp, const re
     auto apl = \
       apl_factory->create_apl_local(cct, s, user_info,
                                     rgw::auth::LocalApplier::NO_SUBUSER,
-                                    boost::none, boost::none);
+                                    boost::none);
     return result_t::grant(std::move(apl));
   }
 }

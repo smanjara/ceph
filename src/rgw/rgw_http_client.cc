@@ -472,7 +472,7 @@ int RGWHTTPClient::get_req_retcode()
 /*
  * init request, will be used later with RGWHTTPManager
  */
-int RGWHTTPClient::init_request(rgw_http_req_data *_req_data, bool send_data_hint)
+int RGWHTTPClient::init_request(rgw_http_req_data *_req_data)
 {
   ceph_assert(!req_data);
   _req_data->get();
@@ -930,11 +930,11 @@ void RGWHTTPManager::manage_pending_requests()
   }
 }
 
-int RGWHTTPManager::add_request(RGWHTTPClient *client, bool send_data_hint)
+int RGWHTTPManager::add_request(RGWHTTPClient *client)
 {
   rgw_http_req_data *req_data = new rgw_http_req_data;
 
-  int ret = client->init_request(req_data, send_data_hint);
+  int ret = client->init_request(req_data);
   if (ret < 0) {
     req_data->put();
     req_data = NULL;
@@ -1154,6 +1154,7 @@ void *RGWHTTPManager::reqs_thread_entry()
               << cct->_conf->rgw_curl_low_speed_limit << " Bytes per second during " << cct->_conf->rgw_curl_low_speed_time << " seconds." << dendl;
           default:
             dout(20) << "ERROR: msg->data.result=" << result << " req_data->id=" << id << " http_status=" << http_status << dendl;
+            dout(20) << "ERROR: curl error: " << curl_easy_strerror((CURLcode)result) << dendl;
 	    break;
         }
       }

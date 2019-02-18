@@ -17,6 +17,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <sys/file.h>
 
 #include "KernelDevice.h"
 #include "include/types.h"
@@ -24,8 +25,12 @@
 #include "include/stringify.h"
 #include "common/blkdev.h"
 #include "common/errno.h"
+#if defined(__FreeBSD__)
+#include "bsm/audit_errno.h"
+#endif
 #include "common/debug.h"
 #include "common/align.h"
+#include "common/numa.h"
 
 #define dout_context cct
 #define dout_subsys ceph_subsys_bdev
@@ -51,13 +56,12 @@ KernelDevice::KernelDevice(CephContext* cct, aio_callback_t cb, void *cbpriv, ai
 
 int KernelDevice::_lock()
 {
-  struct flock l;
-  memset(&l, 0, sizeof(l));
-  l.l_type = F_WRLCK;
-  l.l_whence = SEEK_SET;
-  int r = ::fcntl(fd_directs[WRITE_LIFE_NOT_SET], F_SETLK, &l);
-  if (r < 0)
+  dout(10) << __func__ << " " << fd_directs[WRITE_LIFE_NOT_SET] << dendl;
+  int r = ::flock(fd_directs[WRITE_LIFE_NOT_SET], LOCK_EX | LOCK_NB);
+  if (r < 0) {
+    derr << __func__ << " flock failed on " << path << dendl;
     return -errno;
+  }
   return 0;
 }
 
@@ -88,6 +92,7 @@ int KernelDevice::open(const string& p)
     goto out_fail;
   }
 
+#if defined(F_SET_FILE_RW_HINT)
   for (i = WRITE_LIFE_NONE; i < WRITE_LIFE_MAX; i++) {
     if (fcntl(fd_directs[i], F_SET_FILE_RW_HINT, &i) < 0) {
       r = -errno;
@@ -102,6 +107,7 @@ int KernelDevice::open(const string& p)
     enable_wrt = false;
     dout(0) << "ioctl(F_SET_FILE_RW_HINT) on " << path << " failed: " << cpp_strerror(r) << dendl;
   }
+#endif
 
   dio = true;
   aio = cct->_conf->bdev_aio;
@@ -118,11 +124,13 @@ int KernelDevice::open(const string& p)
     goto out_fail;
   }
 
-  r = _lock();
-  if (r < 0) {
-    derr << __func__ << " failed to lock " << path << ": " << cpp_strerror(r)
-	 << dendl;
-    goto out_fail;
+  if (lock_exclusive) {
+    r = _lock();
+    if (r < 0) {
+      derr << __func__ << " failed to lock " << path << ": " << cpp_strerror(r)
+	   << dendl;
+      goto out_fail;
+    }
   }
 
   struct stat st;
@@ -218,10 +226,7 @@ int KernelDevice::get_devices(std::set<std::string> *ls)
   if (devname.empty()) {
     return 0;
   }
-  ls->insert(devname);
-  if (devname.find("dm-") == 0) {
-    get_dm_parents(devname, ls);
-  }
+  get_raw_devices(devname, ls);
   return 0;
 }
 
@@ -305,6 +310,13 @@ int KernelDevice::collect_metadata(const string& prefix, map<string,string> *pm)
 
     if (blkdev.is_nvme())
       (*pm)[prefix + "type"] = "nvme";
+
+    // numa
+    int node;
+    r = blkdev.get_numa_node(&node);
+    if (r >= 0) {
+      (*pm)[prefix + "numa_node"] = stringify(node);
+    }
   } else {
     (*pm)[prefix + "access_mode"] = "file";
     (*pm)[prefix + "path"] = path;
@@ -451,9 +463,14 @@ static bool is_expected_ioerr(const int r)
 {
   // https://lxr.missinglinkelectronics.com/linux+v4.15/block/blk-core.c#L135
   return (r == -EOPNOTSUPP || r == -ETIMEDOUT || r == -ENOSPC ||
-	  r == -ENOLINK || r == -EREMOTEIO || r == -EBADE ||
+	  r == -ENOLINK || r == -EREMOTEIO  || r == -EAGAIN || r == -EIO ||
 	  r == -ENODATA || r == -EILSEQ || r == -ENOMEM ||
-	  r == -EAGAIN || r == -EREMCHG || r == -EIO);
+#if defined(__linux__)
+	  r == -EREMCHG || r == -EBADE
+#elif defined(__FreeBSD__)
+	  r == - BSM_ERRNO_EREMCHG || r == -BSM_ERRNO_EBADE
+#endif
+	  );
 }
 
 void KernelDevice::_aio_thread()
@@ -729,6 +746,7 @@ int KernelDevice::_sync_write(uint64_t off, bufferlist &bl, bool buffered, int w
     derr << __func__ << " pwritev error: " << cpp_strerror(r) << dendl;
     return r;
   }
+#ifdef HAVE_SYNC_FILE_RANGE
   if (buffered) {
     // initiate IO (but do not wait)
     r = ::sync_file_range(fd_buffereds[WRITE_LIFE_NOT_SET], off, len, SYNC_FILE_RANGE_WRITE);
@@ -738,6 +756,7 @@ int KernelDevice::_sync_write(uint64_t off, bufferlist &bl, bool buffered, int w
       return r;
     }
   }
+#endif
 
   io_since_flush.store(true);
 
@@ -847,11 +866,15 @@ int KernelDevice::read(uint64_t off, uint64_t len, bufferlist *pbl,
 
   _aio_log_start(ioc, off, len);
 
-  bufferptr p = buffer::create_small_page_aligned(len);
+  auto p = buffer::ptr_node::create(buffer::create_small_page_aligned(len));
   int r = ::pread(buffered ? fd_buffereds[WRITE_LIFE_NOT_SET] : fd_directs[WRITE_LIFE_NOT_SET],
-		  p.c_str(), len, off);
+		  p->c_str(), len, off);
   if (r < 0) {
-    r = -errno;
+    if (ioc->allow_eio && is_expected_ioerr(r)) {
+      r = -EIO;
+    } else {
+      r = -errno;
+    }
     goto out;
   }
   ceph_assert((uint64_t)r == len);

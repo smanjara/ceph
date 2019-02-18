@@ -1,5 +1,6 @@
 import os
 import pytest
+from ceph_volume.util import disk
 from ceph_volume.api import lvm as lvm_api
 from ceph_volume import conf, configuration
 
@@ -66,6 +67,7 @@ def fakedevice(factory):
             is_lvm_member=True,
         )
         params.update(dict(kw))
+        params['lvm_size'] = disk.Size(b=params['sys_api'].get("size", 0))
         return factory(**params)
     return apply
 
@@ -192,10 +194,11 @@ def tmpfile(tmpdir):
 
 @pytest.fixture
 def device_info(monkeypatch):
-    def apply(devices=None, lsblk=None, lv=None, blkid=None):
+    def apply(devices=None, lsblk=None, lv=None, blkid=None, udevadm=None):
         devices = devices if devices else {}
         lsblk = lsblk if lsblk else {}
         blkid = blkid if blkid else {}
+        udevadm = udevadm if udevadm else {}
         lv = Factory(**lv) if lv else None
         monkeypatch.setattr("ceph_volume.sys_info.devices", {})
         monkeypatch.setattr("ceph_volume.util.device.disk.get_devices", lambda: devices)
@@ -206,4 +209,5 @@ def device_info(monkeypatch):
         monkeypatch.setattr("ceph_volume.util.device.lvm.get_lv", lambda vg_name, lv_uuid: lv)
         monkeypatch.setattr("ceph_volume.util.device.disk.lsblk", lambda path: lsblk)
         monkeypatch.setattr("ceph_volume.util.device.disk.blkid", lambda path: blkid)
+        monkeypatch.setattr("ceph_volume.util.disk.udevadm_property", lambda *a, **kw: udevadm)
     return apply

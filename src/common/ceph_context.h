@@ -67,6 +67,7 @@ public:
   {}
   ~CephContext();
 
+  uint32_t get_module_type() const;
   CryptoRandom* random() const;
   PerfCountersCollectionImpl* get_perfcounters_collection();
   ceph::common::ConfigProxy& _conf;
@@ -225,7 +226,7 @@ public:
   };
 
   void register_fork_watcher(ForkWatcher *w) {
-    std::lock_guard<ceph::spinlock> lg(_fork_watchers_lock);
+    std::lock_guard lg(_fork_watchers_lock);
     _fork_watchers.push_back(w);
   }
 

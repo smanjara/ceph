@@ -224,7 +224,7 @@ boost::optional<ARN> ARN::parse(const string& s, bool wildcards) {
 			     std::regex_constants::ECMAScript |
 			     std::regex_constants::optimize);
   static const regex rx_no_wild(
-    "arn:([^:*]*):([^:*]*):([^:*]*):([^:*]*):([^:*]*)",
+    "arn:([^:*]*):([^:*]*):([^:*]*):([^:*]*):(.*)",
     std::regex_constants::ECMAScript |
     std::regex_constants::optimize);
 
@@ -393,7 +393,7 @@ bool ARN::match(const ARN& candidate) const {
     return false;
   }
 
-  if (!match_policy(resource, candidate.resource, MATCH_POLICY_ARN)) {
+  if (!match_policy(resource, candidate.resource, MATCH_POLICY_RESOURCE)) {
     return false;
   }
 
@@ -469,6 +469,8 @@ static const actpair actpairs[] =
  { "iam:ListRolePolicies", iamListRolePolicies},
  { "iam:DeleteRolePolicy", iamDeleteRolePolicy},
  { "sts:AssumeRole", stsAssumeRole},
+ { "sts:AssumeRoleWithWebIdentity", stsAssumeRoleWithWebIdentity},
+ { "sts:GetSessionToken", stsGetSessionToken},
 };
 
 struct PolicyParser;
@@ -757,8 +759,8 @@ static boost::optional<Principal> parse_principal(CephContext* cct, TokenID t,
     // Do nothing for now.
   } else if (t == TokenID::CanonicalUser) {
 
-    // AWS ARNs
-  } else if (t == TokenID::AWS) {
+  }  // AWS and Federated ARNs
+   else if (t == TokenID::AWS || t == TokenID::Federated) {
     if (auto a = ARN::parse(s)) {
       if (a->resource == "root") {
 	return Principal::tenant(std::move(a->account));
@@ -779,6 +781,10 @@ static boost::optional<Principal> parse_principal(CephContext* cct, TokenID t,
 	  return Principal::role(std::move(a->account),
 				 match[2]);
 	}
+
+        if (match[1] == "oidc-provider") {
+                return Principal::oidc_provider(std::move(match[2]));
+        }
       }
     } else {
       if (std::none_of(s.begin(), s.end(),
@@ -1326,10 +1332,26 @@ Effect Statement::eval(const Environment& e,
 
 Effect Statement::eval_principal(const Environment& e,
 		       boost::optional<const rgw::auth::Identity&> ida) const {
-  if (ida && (!ida->is_identity(princ) || ida->is_identity(noprinc))) {
-    return Effect::Deny;
+  if (ida) {
+    if (princ.empty() && noprinc.empty()) {
+      return Effect::Deny;
+    }
+    if (!princ.empty() && !ida->is_identity(princ)) {
+      return Effect::Deny;
+    } else if (!noprinc.empty() && ida->is_identity(noprinc)) {
+      return Effect::Deny;
+    }
   }
   return Effect::Allow;
+}
+
+Effect Statement::eval_conditions(const Environment& e) const {
+  if (std::all_of(conditions.begin(),
+		  conditions.end(),
+		  [&e](const Condition& c) { return c.eval(e);})) {
+    return Effect::Allow;
+  }
+  return Effect::Deny;
 }
 
 namespace {
@@ -1537,6 +1559,12 @@ const char* action_bit_string(uint64_t action) {
 
   case stsAssumeRole:
     return "sts:AssumeRole";
+
+  case stsAssumeRoleWithWebIdentity:
+    return "sts:AssumeRoleWithWebIdentity";
+
+  case stsGetSessionToken:
+    return "sts:GetSessionToken";
   }
   return "s3Invalid";
 }
@@ -1667,6 +1695,19 @@ Effect Policy::eval_principal(const Environment& e,
   auto allowed = false;
   for (auto& s : statements) {
     auto g = s.eval_principal(e, ida);
+    if (g == Effect::Deny) {
+      return g;
+    } else if (g == Effect::Allow) {
+      allowed = true;
+    }
+  }
+  return allowed ? Effect::Allow : Effect::Deny;
+}
+
+Effect Policy::eval_conditions(const Environment& e) const {
+  auto allowed = false;
+  for (auto& s : statements) {
+    auto g = s.eval_conditions(e);
     if (g == Effect::Deny) {
       return g;
     } else if (g == Effect::Allow) {

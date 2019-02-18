@@ -12,6 +12,7 @@
 
 #include "common/errno.h"
 #include "common/ceph_json.h"
+#include "include/scope_guard.h"
 #include "rgw_rados.h"
 #include "rgw_zone.h"
 #include "rgw_acl.h"
@@ -29,7 +30,7 @@
 #include "include/rados/librados.hpp"
 // until everything is moved from rgw_common
 #include "rgw_common.h"
-
+#include "rgw_reshard.h"
 #include "cls/user/cls_user_types.h"
 
 #define dout_context g_ceph_context
@@ -299,7 +300,8 @@ int rgw_bucket_instance_store_info(RGWRados *store, string& entry, bufferlist& b
   return store->meta_mgr->put_entry(bucket_instance_meta_handler, entry, bl, exclusive, objv_tracker, mtime, pattrs);
 }
 
-int rgw_bucket_instance_remove_entry(RGWRados *store, string& entry, RGWObjVersionTracker *objv_tracker) {
+int rgw_bucket_instance_remove_entry(RGWRados *store, const string& entry,
+                                     RGWObjVersionTracker *objv_tracker) {
   return store->meta_mgr->remove_entry(bucket_instance_meta_handler, entry, objv_tracker);
 }
 
@@ -540,11 +542,13 @@ int rgw_remove_bucket(RGWRados *store, rgw_bucket& bucket, bool delete_children)
   int max = 1000;
 
   list_op.params.list_versions = true;
+  list_op.params.allow_unordered = true;
 
+  bool is_truncated = false;
   do {
     objs.clear();
 
-    ret = list_op.list_objects(max, &objs, &common_prefixes, NULL);
+    ret = list_op.list_objects(max, &objs, &common_prefixes, &is_truncated);
     if (ret < 0)
       return ret;
 
@@ -556,11 +560,11 @@ int rgw_remove_bucket(RGWRados *store, rgw_bucket& bucket, bool delete_children)
     for (const auto& obj : objs) {
       rgw_obj_key key(obj.key);
       ret = rgw_remove_object(store, info, bucket, key);
-      if (ret < 0)
+      if (ret < 0 && ret != -ENOENT) {
         return ret;
+      }
     }
-
-  } while (!objs.empty());
+  } while(is_truncated);
 
   string prefix, delimiter;
 
@@ -576,9 +580,12 @@ int rgw_remove_bucket(RGWRados *store, rgw_bucket& bucket, bool delete_children)
 
   RGWObjVersionTracker objv_tracker;
 
-  ret = store->delete_bucket(info, objv_tracker);
+  // if we deleted children above we will force delete, as any that
+  // remain is detrius from a prior bug
+  ret = store->delete_bucket(info, objv_tracker, !delete_children);
   if (ret < 0) {
-    lderr(store->ctx()) << "ERROR: could not remove bucket " << bucket.name << dendl;
+    lderr(store->ctx()) << "ERROR: could not remove bucket " <<
+      bucket.name << dendl;
     return ret;
   }
 
@@ -646,16 +653,20 @@ int rgw_remove_bucket_bypass_gc(RGWRados *store, rgw_bucket& bucket,
   RGWRados::Bucket::List list_op(&target);
 
   list_op.params.list_versions = true;
+  list_op.params.allow_unordered = true;
 
   std::list<librados::AioCompletion*> handles;
 
   int max = 1000;
   int max_aio = concurrent_max;
-  ret = list_op.list_objects(max, &objs, &common_prefixes, NULL);
-  if (ret < 0)
-    return ret;
+  bool is_truncated = true;
 
-  while (!objs.empty()) {
+  while (is_truncated) {
+    objs.clear();
+    ret = list_op.list_objects(max, &objs, &common_prefixes, &is_truncated);
+    if (ret < 0)
+      return ret;
+
     std::vector<rgw_bucket_dir_entry>::iterator it = objs.begin();
     for (; it != objs.end(); ++it) {
       RGWObjState *astate = NULL;
@@ -718,11 +729,6 @@ int rgw_remove_bucket_bypass_gc(RGWRados *store, rgw_bucket& bucket,
         max_aio = concurrent_max;
       }
     } // for all RGW objects
-    objs.clear();
-
-    ret = list_op.list_objects(max, &objs, &common_prefixes, NULL);
-    if (ret < 0)
-      return ret;
   }
 
   ret = drain_handles(handles);
@@ -738,7 +744,10 @@ int rgw_remove_bucket_bypass_gc(RGWRados *store, rgw_bucket& bucket,
 
   RGWObjVersionTracker objv_tracker;
 
-  ret = store->delete_bucket(info, objv_tracker);
+  // this function can only be run if caller wanted children to be
+  // deleted, so we can ignore the check for children as any that
+  // remain are detritus from a prior bug
+  ret = store->delete_bucket(info, objv_tracker, false);
   if (ret < 0) {
     lderr(store->ctx()) << "ERROR: could not remove bucket " << bucket.name << dendl;
     return ret;
@@ -1434,7 +1443,7 @@ static int bucket_stats(RGWRados *store, const std::string& tenant_name, std::st
   formatter->dump_string("bucket", bucket.name);
   formatter->dump_string("tenant", bucket.tenant);
   formatter->dump_string("zonegroup", bucket_info.zonegroup);
-  formatter->dump_string("placement_rule", bucket_info.placement_rule);
+  formatter->dump_string("placement_rule", bucket_info.placement_rule.to_str());
   ::encode_json("explicit_placement", bucket.explicit_placement, formatter);
   formatter->dump_string("id", bucket.bucket_id);
   formatter->dump_string("marker", bucket.marker);
@@ -1628,16 +1637,21 @@ int RGWBucketAdminOp::info(RGWRados *store, RGWBucketAdminOpState& op_state,
       return ret;
     }
   } else {
-    RGWAccessHandle handle;
+    void *handle = nullptr;
+    bool truncated = true;
 
     formatter->open_array_section("buckets");
-    if (store->list_buckets_init(&handle) >= 0) {
-      rgw_bucket_dir_entry obj;
-      while (store->list_buckets_next(obj, &handle) >= 0) {
+    ret = store->meta_mgr->list_keys_init("bucket", &handle);
+    while (ret == 0 && truncated) {
+      std::list<std::string> buckets;
+      const int max_keys = 1000;
+      ret = store->meta_mgr->list_keys_next(handle, max_keys, buckets,
+                                            &truncated);
+      for (auto& bucket_name : buckets) {
         if (show_stats)
-          bucket_stats(store, user_id.tenant, obj.key.name, formatter);
+          bucket_stats(store, user_id.tenant, bucket_name, formatter);
         else
-          formatter->dump_string("bucket", obj.key.name);
+          formatter->dump_string("bucket", bucket_name);
       }
     }
 
@@ -1657,6 +1671,210 @@ int RGWBucketAdminOp::set_quota(RGWRados *store, RGWBucketAdminOpState& op_state
   if (ret < 0)
     return ret;
   return bucket.set_quota(op_state);
+}
+
+static int purge_bucket_instance(RGWRados *store, const RGWBucketInfo& bucket_info)
+{
+  int max_shards = (bucket_info.num_shards > 0 ? bucket_info.num_shards : 1);
+  for (int i = 0; i < max_shards; i++) {
+    RGWRados::BucketShard bs(store);
+    int shard_id = (bucket_info.num_shards > 0  ? i : -1);
+    int ret = bs.init(bucket_info.bucket, shard_id, nullptr);
+    if (ret < 0) {
+      cerr << "ERROR: bs.init(bucket=" << bucket_info.bucket << ", shard=" << shard_id
+           << "): " << cpp_strerror(-ret) << std::endl;
+      return ret;
+    }
+    ret = store->bi_remove(bs);
+    if (ret < 0) {
+      cerr << "ERROR: failed to remove bucket index object: "
+           << cpp_strerror(-ret) << std::endl;
+      return ret;
+    }
+  }
+  return 0;
+}
+
+inline auto split_tenant(const std::string& bucket_name){
+  auto p = bucket_name.find('/');
+  if(p != std::string::npos) {
+    return std::make_pair(bucket_name.substr(0,p), bucket_name.substr(p+1));
+  }
+  return std::make_pair(std::string(), bucket_name);
+}
+
+using bucket_instance_ls = std::vector<RGWBucketInfo>;
+void get_stale_instances(RGWRados *store, const std::string& bucket_name,
+                         const vector<std::string>& lst,
+                         bucket_instance_ls& stale_instances)
+{
+
+  auto obj_ctx = store->svc.sysobj->init_obj_ctx();
+
+  bucket_instance_ls other_instances;
+// first iterate over the entries, and pick up the done buckets; these
+// are guaranteed to be stale
+  for (const auto& bucket_instance : lst){
+    RGWBucketInfo binfo;
+    int r = store->get_bucket_instance_info(obj_ctx, bucket_instance,
+                                            binfo, nullptr,nullptr);
+    if (r < 0){
+      // this can only happen if someone deletes us right when we're processing
+      lderr(store->ctx()) << "Bucket instance is invalid: " << bucket_instance
+                          << cpp_strerror(-r) << dendl;
+      continue;
+    }
+    if (binfo.reshard_status == CLS_RGW_RESHARD_DONE)
+      stale_instances.emplace_back(std::move(binfo));
+    else {
+      other_instances.emplace_back(std::move(binfo));
+    }
+  }
+
+  // Read the cur bucket info, if the bucket doesn't exist we can simply return
+  // all the instances
+  auto [tenant, bucket] = split_tenant(bucket_name);
+  RGWBucketInfo cur_bucket_info;
+  int r = store->get_bucket_info(obj_ctx, tenant, bucket, cur_bucket_info, nullptr);
+  if (r < 0) {
+    if (r == -ENOENT) {
+      // bucket doesn't exist, everything is stale then
+      stale_instances.insert(std::end(stale_instances),
+                             std::make_move_iterator(other_instances.begin()),
+                             std::make_move_iterator(other_instances.end()));
+    } else {
+      // all bets are off if we can't read the bucket, just return the sureshot stale instances
+      lderr(store->ctx()) << "error: reading bucket info for bucket: "
+                          << bucket << cpp_strerror(-r) << dendl;
+    }
+    return;
+  }
+
+  // Don't process further in this round if bucket is resharding
+  if (cur_bucket_info.reshard_status == CLS_RGW_RESHARD_IN_PROGRESS)
+    return;
+
+  other_instances.erase(std::remove_if(other_instances.begin(), other_instances.end(),
+                                       [&cur_bucket_info](const RGWBucketInfo& b){
+                                         return (b.bucket.bucket_id == cur_bucket_info.bucket.bucket_id ||
+                                                 b.bucket.bucket_id == cur_bucket_info.new_bucket_instance_id);
+                                       }),
+                        other_instances.end());
+
+  // check if there are still instances left
+  if (other_instances.empty()) {
+    return;
+  }
+
+  // Now we have a bucket with instances where the reshard status is none, this
+  // usually happens when the reshard process couldn't complete, lockdown the
+  // bucket and walk through these instances to make sure no one else interferes
+  // with these
+  {
+    RGWBucketReshardLock reshard_lock(store, cur_bucket_info, true);
+    r = reshard_lock.lock();
+    if (r < 0) {
+      // most likely bucket is under reshard, return the sureshot stale instances
+      ldout(store->ctx(), 5) << __func__
+                             << "failed to take reshard lock; reshard underway likey" << dendl;
+      return;
+    }
+    auto sg = make_scope_guard([&reshard_lock](){ reshard_lock.unlock();} );
+    // this should be fast enough that we may not need to renew locks and check
+    // exit status?, should we read the values of the instances again?
+    stale_instances.insert(std::end(stale_instances),
+                           std::make_move_iterator(other_instances.begin()),
+                           std::make_move_iterator(other_instances.end()));
+  }
+
+  return;
+}
+
+static int process_stale_instances(RGWRados *store, RGWBucketAdminOpState& op_state,
+                                   RGWFormatterFlusher& flusher,
+                                   std::function<void(const bucket_instance_ls&,
+                                                      Formatter *,
+                                                      RGWRados*)> process_f)
+{
+  std::string marker;
+  void *handle;
+  Formatter *formatter = flusher.get_formatter();
+  static constexpr auto default_max_keys = 1000;
+
+  int ret = store->meta_mgr->list_keys_init("bucket.instance", marker, &handle);
+  if (ret < 0) {
+    cerr << "ERROR: can't get key: " << cpp_strerror(-ret) << std::endl;
+    return ret;
+  }
+
+  bool truncated;
+
+  formatter->open_array_section("keys");
+
+  do {
+    list<std::string> keys;
+
+    ret = store->meta_mgr->list_keys_next(handle, default_max_keys, keys, &truncated);
+    if (ret < 0 && ret != -ENOENT) {
+      cerr << "ERROR: lists_keys_next(): " << cpp_strerror(-ret) << std::endl;
+      return ret;
+    } if (ret != -ENOENT) {
+      // partition the list of buckets by buckets as the listing is un sorted,
+      // since it would minimize the reads to bucket_info
+      std::unordered_map<std::string, std::vector<std::string>> bucket_instance_map;
+      for (auto &key: keys) {
+        auto pos = key.find(':');
+        if(pos != std::string::npos)
+          bucket_instance_map[key.substr(0,pos)].emplace_back(std::move(key));
+      }
+      for (const auto& kv: bucket_instance_map) {
+        bucket_instance_ls stale_lst;
+        get_stale_instances(store, kv.first, kv.second, stale_lst);
+        process_f(stale_lst, formatter, store);
+      }
+    }
+  } while (truncated);
+
+  formatter->close_section(); // keys
+  formatter->flush(cout);
+  return 0;
+}
+
+int RGWBucketAdminOp::list_stale_instances(RGWRados *store,
+                                           RGWBucketAdminOpState& op_state,
+                                           RGWFormatterFlusher& flusher)
+{
+  auto process_f = [](const bucket_instance_ls& lst,
+                      Formatter *formatter,
+                      RGWRados*){
+                     for (const auto& binfo: lst)
+                       formatter->dump_string("key", binfo.bucket.get_key());
+                   };
+  return process_stale_instances(store, op_state, flusher, process_f);
+}
+
+
+int RGWBucketAdminOp::clear_stale_instances(RGWRados *store,
+                                            RGWBucketAdminOpState& op_state,
+                                            RGWFormatterFlusher& flusher)
+{
+  auto process_f = [](const bucket_instance_ls& lst,
+                      Formatter *formatter,
+                      RGWRados *store){
+                     for (const auto &binfo: lst) {
+                       int ret = purge_bucket_instance(store, binfo);
+                       if (ret == 0){
+                         auto md_key = "bucket.instance:" + binfo.bucket.get_key();
+                         ret = store->meta_mgr->remove(md_key);
+                       }
+                       formatter->open_object_section("delete_status");
+                       formatter->dump_string("bucket_instance", binfo.bucket.get_key());
+                       formatter->dump_int("status", -ret);
+                       formatter->close_section();
+                     }
+                   };
+
+  return process_stale_instances(store, op_state, flusher, process_f);
 }
 
 void rgw_data_change::dump(Formatter *f) const
@@ -2270,6 +2488,204 @@ public:
   }
 };
 
+void get_md5_digest(const RGWBucketEntryPoint *be, string& md5_digest) {
+
+   char md5[CEPH_CRYPTO_MD5_DIGESTSIZE * 2 + 1];
+   unsigned char m[CEPH_CRYPTO_MD5_DIGESTSIZE];
+   bufferlist bl;
+
+   Formatter *f = new JSONFormatter(false);
+   be->dump(f);
+   f->flush(bl);
+
+   MD5 hash;
+   hash.Update((const unsigned char *)bl.c_str(), bl.length());
+   hash.Final(m);
+
+   buf_to_hex(m, CEPH_CRYPTO_MD5_DIGESTSIZE, md5);
+
+   delete f;
+
+   md5_digest = md5;
+}
+
+#define ARCHIVE_META_ATTR RGW_ATTR_PREFIX "zone.archive.info" 
+
+struct archive_meta_info {
+  rgw_bucket orig_bucket;
+
+  bool from_attrs(CephContext *cct, map<string, bufferlist>& attrs) {
+    auto iter = attrs.find(ARCHIVE_META_ATTR);
+    if (iter == attrs.end()) {
+      return false;
+    }
+
+    auto bliter = iter->second.cbegin();
+    try {
+      decode(bliter);
+    } catch (buffer::error& err) {
+      ldout(cct, 0) << "ERROR: failed to decode archive meta info" << dendl;
+      return false;
+    }
+
+    return true;
+  }
+
+  void store_in_attrs(map<string, bufferlist>& attrs) const {
+    encode(attrs[ARCHIVE_META_ATTR]);
+  }
+
+  void encode(bufferlist& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(orig_bucket, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(bufferlist::const_iterator& bl) {
+     DECODE_START(1, bl);
+     decode(orig_bucket, bl);
+     DECODE_FINISH(bl);
+  }
+};
+WRITE_CLASS_ENCODER(archive_meta_info)
+
+class RGWArchiveBucketMetadataHandler : public RGWBucketMetadataHandler {
+public:
+  int remove(RGWRados *store, string& entry, RGWObjVersionTracker& objv_tracker) override {
+    ldout(store->ctx(), 5) << "SKIP: bucket removal is not allowed on archive zone: bucket:" << entry << " ... proceeding to rename" << dendl;
+
+    string tenant_name, bucket_name;
+    parse_bucket(entry, &tenant_name, &bucket_name);
+
+    real_time mtime;
+
+    /* read original entrypoint */
+
+    RGWBucketEntryPoint be;
+    auto obj_ctx = store->svc.sysobj->init_obj_ctx();
+    map<string, bufferlist> attrs;
+    int ret = store->get_bucket_entrypoint_info(obj_ctx, tenant_name, bucket_name, be, &objv_tracker, &mtime, &attrs);
+    if (ret < 0) {
+        return ret;
+    }
+
+    string meta_name = bucket_name + ":" + be.bucket.bucket_id;
+
+    /* read original bucket instance info */
+
+    map<string, bufferlist> attrs_m;
+    ceph::real_time orig_mtime;
+    RGWBucketInfo old_bi;
+
+    ret = store->get_bucket_instance_info(obj_ctx, be.bucket, old_bi, &orig_mtime, &attrs_m);
+    if (ret < 0) {
+        return ret;
+    }
+
+    archive_meta_info ami;
+
+    if (!ami.from_attrs(store->ctx(), attrs_m)) {
+      ami.orig_bucket = old_bi.bucket;
+      ami.store_in_attrs(attrs_m);
+    }
+
+    /* generate a new bucket instance. We could have avoided this if we could just point a new
+     * bucket entry point to the old bucket instance, however, due to limitation in the way
+     * we index buckets under the user, bucket entrypoint and bucket instance of the same
+     * bucket need to have the same name, so we need to copy the old bucket instance into
+     * to a new entry with the new name
+     */
+
+    string new_bucket_name;
+
+    RGWBucketInfo new_bi = old_bi;
+    RGWBucketEntryPoint new_be = be;
+
+    string md5_digest;
+
+    get_md5_digest(&new_be, md5_digest);
+    new_bucket_name = ami.orig_bucket.name + "-deleted-" + md5_digest;
+
+    new_bi.bucket.name = new_bucket_name;
+    new_bi.objv_tracker.clear();
+
+    new_be.bucket.name = new_bucket_name;
+
+    ret = store->put_bucket_instance_info(new_bi, false, orig_mtime, &attrs_m);
+    if (ret < 0) {
+      ldout(store->ctx(), 0) << "ERROR: failed to put new bucket instance info for bucket=" << new_bi.bucket << " ret=" << ret << dendl;
+      return ret;
+    }
+
+    /* store a new entrypoint */
+
+    RGWObjVersionTracker ot;
+    ot.generate_new_write_ver(store->ctx());
+
+    ret = store->put_bucket_entrypoint_info(tenant_name, new_bucket_name, new_be, true, ot, mtime, &attrs);
+    if (ret < 0) {
+      ldout(store->ctx(), 0) << "ERROR: failed to put new bucket entrypoint for bucket=" << new_be.bucket << " ret=" << ret << dendl;
+      return ret;
+    }
+
+    /* link new bucket */
+
+    ret = rgw_link_bucket(store, new_be.owner, new_be.bucket, new_be.creation_time, false);
+    if (ret < 0) {
+      ldout(store->ctx(), 0) << "ERROR: failed to link new bucket for bucket=" << new_be.bucket << " ret=" << ret << dendl;
+      return ret;
+    }
+
+    /* clean up old stuff */
+
+    ret = rgw_unlink_bucket(store, be.owner, tenant_name, bucket_name, false);
+    if (ret < 0) {
+        lderr(store->ctx()) << "could not unlink bucket=" << entry << " owner=" << be.owner << dendl;
+    }
+
+    // if (ret == -ECANCELED) it means that there was a race here, and someone
+    // wrote to the bucket entrypoint just before we removed it. The question is
+    // whether it was a newly created bucket entrypoint ...  in which case we
+    // should ignore the error and move forward, or whether it is a higher version
+    // of the same bucket instance ... in which we should retry
+    ret = rgw_bucket_delete_bucket_obj(store, tenant_name, bucket_name, objv_tracker);
+    if (ret < 0) {
+        lderr(store->ctx()) << "could not delete bucket=" << entry << dendl;
+    }
+
+    ret = rgw_delete_system_obj(store, store->svc.zone->get_zone_params().domain_root, RGW_BUCKET_INSTANCE_MD_PREFIX + meta_name, NULL);
+
+    /* idempotent */
+
+    return 0;
+  }
+
+  int put(RGWRados *store, string& entry, RGWObjVersionTracker& objv_tracker,
+          real_time mtime, JSONObj *obj, sync_type_t sync_type) override {
+    if (entry.find("-deleted-") != string::npos) {
+      RGWObjVersionTracker ot;
+      RGWMetadataObject *robj;
+      int ret = get(store, entry, &robj);
+      if (ret != -ENOENT) {
+        if (ret < 0) {
+          return ret;
+        }
+        ot.read_version = robj->get_version();
+        delete robj;
+
+        ret = remove(store, entry, ot);
+        if (ret < 0) {
+          return ret;
+        }
+      }
+    }
+
+    return RGWBucketMetadataHandler::put(store, entry, objv_tracker,
+                                         mtime, obj, sync_type);
+  }
+
+};
+
 class RGWBucketInstanceMetadataHandler : public RGWMetadataHandler {
 
 public:
@@ -2392,7 +2808,8 @@ public:
     RGWListRawObjsCtx ctx;
   };
 
-  int remove(RGWRados *store, string& entry, RGWObjVersionTracker& objv_tracker) override {
+  int remove(RGWRados *store, string& entry,
+	     RGWObjVersionTracker& objv_tracker) override {
     RGWBucketInfo info;
     auto obj_ctx = store->svc.sysobj->init_obj_ctx();
 
@@ -2400,7 +2817,8 @@ public:
     if (ret < 0 && ret != -ENOENT)
       return ret;
 
-    return rgw_bucket_instance_remove_entry(store, entry, &info.objv_tracker);
+    return rgw_bucket_instance_remove_entry(store, entry,
+					    &info.objv_tracker);
   }
 
   void get_pool_and_oid(RGWRados *store, const string& key, rgw_pool& pool, string& oid) override {
@@ -2487,10 +2905,41 @@ public:
   }
 };
 
+class RGWArchiveBucketInstanceMetadataHandler : public RGWBucketInstanceMetadataHandler {
+public:
+
+  int remove(RGWRados *store, string& entry, RGWObjVersionTracker& objv_tracker) override {
+    ldout(store->ctx(), 0) << "SKIP: bucket instance removal is not allowed on archive zone: bucket.instance:" << entry << dendl;
+    return 0;
+  }
+};
+
+RGWMetadataHandler *RGWBucketMetaHandlerAllocator::alloc() {
+  return new RGWBucketMetadataHandler;
+}
+
+RGWMetadataHandler *RGWBucketInstanceMetaHandlerAllocator::alloc() {
+  return new RGWBucketInstanceMetadataHandler;
+}
+
+RGWMetadataHandler *RGWArchiveBucketMetaHandlerAllocator::alloc() {
+  return new RGWArchiveBucketMetadataHandler;
+}
+
+RGWMetadataHandler *RGWArchiveBucketInstanceMetaHandlerAllocator::alloc() {
+  return new RGWArchiveBucketInstanceMetadataHandler;
+}
+
 void rgw_bucket_init(RGWMetadataManager *mm)
 {
-  bucket_meta_handler = new RGWBucketMetadataHandler;
+  auto sync_module = mm->get_store()->get_sync_module();
+  if (sync_module) {
+    bucket_meta_handler = sync_module->alloc_bucket_meta_handler();
+    bucket_instance_meta_handler = sync_module->alloc_bucket_instance_meta_handler();
+  } else {
+    bucket_meta_handler = RGWBucketMetaHandlerAllocator::alloc();
+    bucket_instance_meta_handler = RGWBucketInstanceMetaHandlerAllocator::alloc();
+  }
   mm->register_handler(bucket_meta_handler);
-  bucket_instance_meta_handler = new RGWBucketInstanceMetadataHandler;
   mm->register_handler(bucket_instance_meta_handler);
 }

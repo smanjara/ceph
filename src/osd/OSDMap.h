@@ -1152,6 +1152,7 @@ public:
    * raw and primary must be non-NULL
    */
   void pg_to_raw_osds(pg_t pg, vector<int> *raw, int *primary) const;
+  void pg_to_raw_upmap(pg_t pg, vector<int> *raw_upmap) const;
   /// map a pg to its acting set. @return acting set size
   void pg_to_acting_osds(const pg_t& pg, vector<int> *acting,
                         int *acting_primary) const {
@@ -1364,7 +1365,7 @@ public:
 
   int clean_pg_upmaps(
     CephContext *cct,
-    Incremental *pending_inc);
+    Incremental *pending_inc) const;
 
   bool try_pg_upmap(
     CephContext *cct,
@@ -1475,6 +1476,9 @@ public:
   int parse_osd_id_list(const vector<string>& ls,
 			set<int> *out,
 			ostream *ss) const;
+
+  float pool_raw_used_rate(int64_t poolid) const;
+
 };
 WRITE_CLASS_ENCODER_FEATURES(OSDMap)
 WRITE_CLASS_ENCODER_FEATURES(OSDMap::Incremental)

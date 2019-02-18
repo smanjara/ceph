@@ -32,11 +32,11 @@ private:
 
 public:
   uint32_t stats_period = 0;
-  
+
   // Default 0 means if unspecified will include all stats
   uint32_t stats_threshold = 0;
 
-  std::list<OSDPerfMetricQuery> osd_perf_metric_queries;
+  std::map<OSDPerfMetricQuery, OSDPerfMetricLimits> osd_perf_metric_queries;
 
   void decode_payload() override
   {
@@ -57,7 +57,7 @@ public:
     encode(osd_perf_metric_queries, payload);
   }
 
-  const char *get_type_name() const override { return "mgrconfigure"; }
+  std::string_view get_type_name() const override { return "mgrconfigure"; }
   void print(ostream& out) const override {
     out << get_type_name() << "(period=" << stats_period
                            << ", threshold=" << stats_threshold << ")";

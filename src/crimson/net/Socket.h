@@ -12,6 +12,7 @@ namespace ceph::net {
 
 class Socket
 {
+  const seastar::shard_id sid;
   seastar::connected_socket socket;
   seastar::input_stream<char> in;
   seastar::output_stream<char> out;
@@ -24,18 +25,17 @@ class Socket
 
  public:
   explicit Socket(seastar::connected_socket&& _socket)
-    : socket(std::move(_socket)),
+    : sid{seastar::engine().cpu_id()},
+      socket(std::move(_socket)),
       in(socket.input()),
       out(socket.output()) {}
-  Socket(Socket&& o) = default;
+  Socket(Socket&& o) = delete;
 
   /// read the requested number of bytes into a bufferlist
   seastar::future<bufferlist> read(size_t bytes);
   using tmp_buf = seastar::temporary_buffer<char>;
   using packet = seastar::net::packet;
-  seastar::future<tmp_buf> read_exactly(size_t bytes) {
-    return in.read_exactly(bytes);
-  }
+  seastar::future<tmp_buf> read_exactly(size_t bytes);
 
   seastar::future<> write(packet&& buf) {
     return out.write(std::move(buf));
@@ -49,7 +49,10 @@ class Socket
 
   /// Socket can only be closed once.
   seastar::future<> close() {
-    return seastar::when_all(in.close(), out.close()).discard_result();
+    return seastar::smp::submit_to(sid, [this] {
+        return seastar::when_all(
+          in.close(), out.close()).discard_result();
+      });
   }
 };
 

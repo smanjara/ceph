@@ -31,6 +31,9 @@ class MgrMonitor: public PaxosService
   std::map<std::string, bufferlist> pending_metadata;
   std::set<std::string>             pending_metadata_rm;
 
+  std::map<std::string,Option> mgr_module_options;
+  std::list<std::string> misc_option_strings;
+
   utime_t first_seen_inactive;
 
   std::map<uint64_t, ceph::coarse_mono_clock::time_point> last_beacon;
@@ -78,9 +81,13 @@ public:
 
   const MgrMap &get_map() const { return map; }
 
+  const Option *find_module_option(const string& name);
+
   bool in_use() const { return map.epoch > 0; }
 
   version_t get_trim_to() const override;
+
+  void prime_mgr_client();
 
   void create_initial() override;
   void get_store_prefixes(std::set<string>& s) const override;

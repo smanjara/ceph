@@ -1,6 +1,8 @@
 Dashboard Developer Documentation
 ====================================
 
+.. contents:: Table of Contents
+
 Frontend Development
 --------------------
 
@@ -153,6 +155,16 @@ Note:
   When using docker, as your device, you might need to run the script with sudo
   permissions.
 
+Writing End-to-End Tests
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+When writing e2e tests you don't want to recompile every time from scratch to
+try out if your test has succeeded. As usual you have your development server
+open (``npm start``) which already has compiled all files. To attach
+`Protractor <http://www.protractortest.org/>`__ to this process, instead of
+spinning up it's own server, you can use ``npm run e2e -- --dev-server-target``
+or just ``npm run e2e:dev`` which is equivalent.
+
 Further Help
 ~~~~~~~~~~~~
 
@@ -218,6 +230,54 @@ Example:
       Some <strong>helper</strong> html text
     </cd-helper>
 
+Frontend branding
+~~~~~~~~~~~~~~~~~
+
+Every vendor can customize the 'Ceph dashboard' to his needs. No matter if
+logo, HTML-Template or TypeScript, every file inside the frontend folder can be
+replaced.
+
+To replace files, open ``./frontend/angular.json`` and scroll to the section
+``fileReplacements`` inside the production configuration. Here you can add the
+files you wish to brand. We recommend to place the branded version of a file in
+the same directory as the original one and to add a ``.brand`` to the file
+name, right in front of the file extension. A ``fileReplacement`` could for
+example look like this:
+
+.. code:: javascript
+
+    {
+      "replace": "src/app/core/auth/login/login.component.html",
+      "with": "src/app/core/auth/login/login.component.brand.html"
+    }
+
+To serve or build the branded user interface run:
+
+    $ npm run start -- --prod
+
+or
+
+    $ npm run build -- --prod
+
+Unfortunately it's currently not possible to use multiple configurations when
+serving or building the UI at the same time. That means a configuration just
+for the branding ``fileReplacements`` is not an option, because you want to use
+the production configuration anyway
+(https://github.com/angular/angular-cli/issues/10612).
+Furthermore it's also not possible to use glob expressions for
+``fileReplacements``. As long as the feature hasn't been implemented, you have
+to add the file replacements manually to the angular.json file
+(https://github.com/angular/angular-cli/issues/12354).
+
+Nevertheless you should stick to the suggested naming scheme because it makes
+it easier for you to use glob expressions once it's supported in the future.
+
+To change the variable defaults you can overwrite them in the file
+``./frontend/src/vendor.variables.scss``. Just reassign the variable you want
+to change, for example ``$color-primary: teal;``
+To overwrite or extend the default CSS, you can add your own styles in
+``./frontend/src/vendor.overrides.scss``.
+
 I18N
 ----
 
@@ -225,7 +285,7 @@ How to extract messages from source code?
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 To extract the I18N messages from the templates and the TypeScript files just
-run the following command in ``src/pybind/mgr/dashboard/frontend``:
+run the following command in ``src/pybind/mgr/dashboard/frontend``::
 
   $ npm run i18n
 
@@ -238,6 +298,10 @@ parse the TypeScript files.
 
 When the command ran successfully, it should have created or updated the file
 ``src/locale/messages.xlf``.
+
+To make sure this file is always up to date in master branch, we added a
+validation in ``run-frontend-unittests.sh`` that will fail if it finds
+uncommitted translations.
 
 Supported languages
 ~~~~~~~~~~~~~~~~~~~
@@ -273,6 +337,72 @@ Each language file should be placed in ``src/locale/messages.<locale-id>.xlf``.
 For example, the path for german would be ``src/locale/messages.de-DE.xlf``.
 ``<locale-id>`` should match the id previouisly inserted in
 ``supported-languages.enum.ts``.
+
+Suggestions
+~~~~~~~~~~~
+
+Strings need to start and end in the same line as the element:
+
+.. code-block:: xml
+
+  <!-- avoid -->
+  <span i18n>
+    Foo
+  </span>
+
+  <!-- recommended -->
+  <span i18n>Foo</span>
+
+
+  <!-- avoid -->
+  <span i18n>
+    Foo bar baz.
+    Foo bar baz.
+  </span>
+
+  <!-- recommended -->
+  <span i18n>Foo bar baz.
+    Foo bar baz.</span>
+
+Isolated interpolations should not be translated:
+
+.. code-block:: xml
+
+  <!-- avoid -->
+  <span i18n>{{ foo }}</span>
+
+  <!-- recommended -->
+  <span>{{ foo }}</span>
+
+Interpolations used in a sentence should be kept in the translation:
+
+.. code-block:: xml
+
+  <!-- recommended -->
+  <span i18n>There are {{ x }} OSDs.</span>
+
+Remove elements that are outside the context of the translation:
+
+.. code-block:: xml
+
+  <!-- avoid -->
+  <label i18n>
+    Profile
+    <span class="required"></span>
+  </label>
+
+  <!-- recommended -->
+  <label>
+    <ng-container i18n>Profile<ng-container>
+    <span class="required"></span>
+  </label>
+
+Keep elements that affect the sentence:
+
+.. code-block:: xml
+
+  <!-- recommended -->
+  <span i18n>Profile <b>foo</b> will be removed.</span>
 
 Backend Development
 -------------------
@@ -312,9 +442,26 @@ Alternatively, you can use Python's native package installation method::
   $ pip install coverage
 
 To run the tests, run ``run-tox.sh`` in the dashboard directory (where
-``tox.ini`` is located).
+``tox.ini`` is located)::
 
-We also collect coverage information from the backend code. You can check the
+  ## Run Python 2+3 tests+lint commands:
+  $ ./run-tox.sh
+
+  ## Run Python 3 tests+lint commands:
+  $ WITH_PYTHON2=OFF ./run-tox.sh
+
+  ## Run Python 3 arbitrary command (e.g. 1 single test):
+  $ WITH_PYTHON2=OFF ./run-tox.sh pytest tests/test_rgw_client.py::RgwClientTest::test_ssl_verify
+
+You can also run tox instead of ``run-tox.sh``::
+
+  ## Run Python 3 tests command:
+  $ CEPH_BUILD_DIR=.tox tox -e py3-cov
+
+  ## Run Python 3 arbitrary command (e.g. 1 single test):
+  $ CEPH_BUILD_DIR=.tox tox -e py3-run pytest tests/test_rgw_client.py::RgwClientTest::test_ssl_verify
+
+We also collect coverage information from the backend code when you run tests. You can check the
 coverage information provided by the tox output, or by running the following
 command after tox has finished successfully::
 
@@ -322,11 +469,6 @@ command after tox has finished successfully::
 
 This command will create a directory ``htmlcov`` with an HTML representation of
 the code coverage of the backend.
-
-You can also run a single step of the tox script (aka tox environment), for
-instance if you only want to run the linting tools, do::
-
-  $ tox -e lint
 
 API tests based on Teuthology
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -644,6 +786,44 @@ same applies to other request types:
 +--------------+------------+----------------+-------------+
 | DELETE       | Yes        | delete         | 204         |
 +--------------+------------+----------------+-------------+
+
+How to use a custom API endpoint in a RESTController?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If you don't have any access restriction you can use ``@Endpoint``. If you
+have set a permission scope to restrict access to your endpoints,
+``@Endpoint`` will fail, as it doesn't know which permission property should be
+used. To use a custom endpoint inside a restricted ``RESTController`` use
+``@RESTController.Collection`` instead. You can also choose
+``@RESTController.Resource`` if you have set a ``RESOURCE_ID`` in your
+``RESTController`` class.
+
+.. code-block:: python
+
+  import cherrypy
+  from ..tools import ApiController, RESTController
+
+  @ApiController('ping', Scope.Ping)
+  class Ping(RESTController):
+    RESOURCE_ID = 'ping'
+
+    @RESTController.Resource('GET')
+    def some_get_endpoint(self):
+      return {"msg": "Hello"}
+
+    @RESTController.Collection('POST')
+    def some_post_endpoint(self, **data):
+      return {"msg": data}
+
+Both decorators also support four parameters to customize the
+endpoint:
+
+* ``method="GET"``: the HTTP method allowed to access this endpoint.
+* ``path="/<method_name>"``: the URL path of the endpoint, excluding the
+  controller URL path prefix.
+* ``status=200``: set the HTTP status response code
+* ``query_params=[]``: list of method parameter names that correspond to URL
+  query parameters.
 
 How to restrict access to a controller?
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1317,3 +1497,87 @@ will end up as internal server errors in the API.
 In general, do not ``return`` error responses in the REST API. They will be
 returned by the  error handler. Instead, raise the appropriate exception.
 
+Plug-ins
+~~~~~~~~
+
+New functionality can be provided by means of a plug-in architecture. Among the
+benefits this approach brings in, loosely coupled development is one of the most
+notable. As the Ceph-Dashboard grows in feature richness, its code-base becomes
+more and more complex. The hook-based nature of a plug-in architecture allows to
+extend functionality in a controlled manner, and isolate the scope of the
+changes.
+
+Ceph-Dashboard relies on `Pluggy <https://pluggy.readthedocs.io>`_ to provide
+for plug-ing support. On top of pluggy, an interface-based approach has been
+implemented, with some safety checks (method override and abstract method
+checks).
+
+In order to create a new plugin, the following steps are required:
+
+#. Add a new file under ``src/pybind/mgr/dashboard/plugins``.
+#. Import the ``PLUGIN_MANAGER`` instance and the ``Interfaces``.
+#. Create a class extending the desired interfaces. The plug-in library will check if all the methods of the interfaces have been properly overridden.
+#. Register the plugin in the ``PLUGIN_MANAGER`` instance.
+#. Import the plug-in from within the Ceph-Dashboard ``module.py`` (currently no dynamic loading is implemented).
+
+The available interfaces are the following:
+
+- ``CanMgr``: provides the plug-in with access to the ``mgr`` instance under ``self.mgr``.
+- ``CanLog``: provides the plug-in with access to the Ceph-Dashboard logger under ``self.log``.
+- ``Setupable``: requires overriding ``setup()`` hook. This method is run in the Ceph-Dashboard ``serve()`` method, right after CherryPy has been configured, but before it is started. It's a placeholder for the plug-in initialization logic.
+- ``HasOptions``: requires overriding ``get_options()`` hook by returning a list of ``Options()``. The options returned here are added to the ``MODULE_OPTIONS``.
+- ``HasCommands``: requires overriding ``register_commands()`` hook by defining the commands the plug-in can handle and decorating them with ``@CLICommand`. The commands can be optionally returned, so that they can be invoked externally (which makes unit testing easier).
+- ``HasControllers``: requires overriding ``get_controllers()`` hook by defining and returning the controllers as usual.
+- ``FilterRequest.BeforeHandler``: requires overriding ``filter_request_before_handler()`` hook. This method receives a ``cherrypy.request`` object for processing. A usual implementation of this method will allow some requests to pass or will raise a ``cherrypy.HTTPError` based on the ``request`` metadata and other conditions.
+
+New interfaces and hooks should be added as soon as they are required to
+implement new functionality. The above list only comprises the hooks needed for
+the existing plugins.
+
+A sample plugin implementation would look like this:
+
+.. code-block:: python
+
+  # src/pybind/mgr/dashboard/plugins/mute.py
+
+  from . import PLUGIN_MANAGER as PM
+  from . import interfaces as I
+
+  from mgr_module import CLICommand, Option
+  import cherrypy
+
+  @PM.add_plugin
+  class Mute(I.CanMgr, I.CanLog, I.Setupable, I.HasOptions,
+                       I.HasCommands, I.FilterRequest.BeforeHandler,
+                       I.HasControllers):
+    @PM.add_hook
+    def get_options(self):
+      return [Option('mute', default=False, type='bool')]
+
+    @PM.add_hook
+    def setup(self):
+      self.mute = self.mgr.get_module_options('mute')
+
+    @PM.add_hook
+    def register_commands(self):
+      @CLICommand("dashboard mute")
+      def _(mgr):
+        self.mute = True
+        self.mgr.set_module_options('mute', True)
+        return 0
+
+    @PM.add_hook
+    def filter_request_before_handler(self, request):
+      if self.mute:
+        raise cherrypy.HTTPError(500, "I'm muted :-x")
+
+    @PM.add_hook
+    def get_controllers(self):
+      from ..controllers import ApiController, RESTController
+
+      @ApiController('/mute')
+      class MuteController(RESTController):
+        def get(_):
+          return self.mute
+
+      return [FeatureTogglesEndpoint]

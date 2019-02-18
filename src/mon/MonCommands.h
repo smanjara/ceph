@@ -282,7 +282,7 @@ COMMAND("versions",
  * MDS commands (MDSMonitor.cc)
  */
 
-COMMAND("mds stat", "show MDS status", "mds", "r")
+COMMAND_WITH_FLAG("mds stat", "show MDS status", "mds", "r", FLAG(HIDDEN))
 COMMAND_WITH_FLAG("mds dump "
 	"name=epoch,type=CephInt,req=false,range=0", \
 	"dump legacy MDS cluster info, optionally from epoch",
@@ -325,10 +325,10 @@ COMMAND_WITH_FLAG("mds set " \
 // arbitrary limit 0-20 below; worth standing on head to make it
 // relate to actual state definitions?
 // #include "include/ceph_fs.h"
-COMMAND("mds set_state " \
+COMMAND_WITH_FLAG("mds set_state " \
 	"name=gid,type=CephInt,range=0 " \
 	"name=state,type=CephInt,range=0|20", \
-	"set mds state of <gid> to <numeric-state>", "mds", "rw")
+	"set mds state of <gid> to <numeric-state>", "mds", "rw", FLAG(HIDDEN))
 COMMAND("mds fail name=role_or_gid,type=CephString", \
 	"Mark MDS failed: trigger a failover if a standby is available",
         "mds", "rw")
@@ -337,9 +337,9 @@ COMMAND("mds repaired name=role,type=CephString", \
 COMMAND("mds rm " \
 	"name=gid,type=CephInt,range=0", \
 	"remove nonactive mds", "mds", "rw")
-COMMAND("mds rmfailed name=role,type=CephString " \
+COMMAND_WITH_FLAG("mds rmfailed name=role,type=CephString " \
         "name=yes_i_really_mean_it,type=CephBool,req=false", \
-	"remove failed mds", "mds", "rw")
+	"remove failed rank", "mds", "rw", FLAG(HIDDEN))
 COMMAND_WITH_FLAG("mds cluster_down", "take MDS cluster down", "mds", "rw", FLAG(OBSOLETE))
 COMMAND_WITH_FLAG("mds cluster_up", "bring MDS cluster up", "mds", "rw", FLAG(OBSOLETE))
 COMMAND("mds compat rm_compat " \
@@ -370,6 +370,10 @@ COMMAND("fs new " \
 	"name=force,type=CephBool,req=false " \
 	"name=allow_dangerous_metadata_overlay,type=CephBool,req=false", \
 	"make new filesystem using named pools <metadata> and <data>", \
+	"fs", "rw")
+COMMAND("fs fail " \
+	"name=fs_name,type=CephString ", \
+	"bring the file system down and all of its ranks", \
 	"fs", "rw")
 COMMAND("fs rm " \
 	"name=fs_name,type=CephString " \
@@ -451,6 +455,9 @@ COMMAND("mon set-rank " \
 	"name=rank,type=CephInt",
 	"set the rank for the specified mon",
 	"mon", "rw")
+COMMAND("mon enable-msgr2",
+	"enable the msgr2 protocol on port 3300",
+	"mon", "rw")
 
 /*
  * OSD commands
@@ -496,6 +503,9 @@ COMMAND("osd count-metadata name=property,type=CephString",
 	"osd", "r")
 COMMAND("osd versions", \
 	"check running versions of OSDs",
+	"osd", "r")
+COMMAND("osd numa-status",
+	"show NUMA status of OSDs",
 	"osd", "r")
 COMMAND("osd map " \
 	"name=pool,type=CephPoolname " \
@@ -755,7 +765,7 @@ COMMAND("osd erasure-code-profile ls", \
 	"list all erasure code profiles", \
 	"osd", "r")
 COMMAND("osd set " \
-	"name=key,type=CephChoices,strings=full|pause|noup|nodown|noout|noin|nobackfill|norebalance|norecover|noscrub|nodeep-scrub|notieragent|nosnaptrim|sortbitwise|recovery_deletes|require_jewel_osds|require_kraken_osds " \
+	"name=key,type=CephChoices,strings=full|pause|noup|nodown|noout|noin|nobackfill|norebalance|norecover|noscrub|nodeep-scrub|notieragent|nosnaptrim|sortbitwise|recovery_deletes|require_jewel_osds|require_kraken_osds|pglog_hardlimit " \
         "name=yes_i_really_mean_it,type=CephBool,req=false", \
 	"set <key>", "osd", "rw")
 COMMAND("osd unset " \
@@ -939,7 +949,11 @@ COMMAND("osd pool create " \
         "name=pool_type,type=CephChoices,strings=replicated|erasure,req=false " \
 	"name=erasure_code_profile,type=CephString,req=false,goodchars=[A-Za-z0-9-_.] " \
 	"name=rule,type=CephString,req=false " \
-        "name=expected_num_objects,type=CephInt,req=false", \
+        "name=expected_num_objects,type=CephInt,req=false " \
+        "name=size,type=CephInt,req=false " \
+	"name=pg_num_min,type=CephInt,range=0,req=false " \
+	"name=target_size_bytes,type=CephInt,range=0,req=false " \
+	"name=target_size_ratio,type=CephFloat,range=0|1,req=false",\
 	"create pool", "osd", "rw")
 COMMAND_WITH_FLAG("osd pool delete " \
 	"name=pool,type=CephPoolname " \
@@ -962,11 +976,11 @@ COMMAND("osd pool rename " \
 	"rename <srcpool> to <destpool>", "osd", "rw")
 COMMAND("osd pool get " \
 	"name=pool,type=CephPoolname " \
-	"name=var,type=CephChoices,strings=size|min_size|pg_num|pgp_num|crush_rule|hashpspool|nodelete|nopgchange|nosizechange|write_fadvise_dontneed|noscrub|nodeep-scrub|hit_set_type|hit_set_period|hit_set_count|hit_set_fpp|use_gmt_hitset|target_max_objects|target_max_bytes|cache_target_dirty_ratio|cache_target_dirty_high_ratio|cache_target_full_ratio|cache_min_flush_age|cache_min_evict_age|erasure_code_profile|min_read_recency_for_promote|all|min_write_recency_for_promote|fast_read|hit_set_grade_decay_rate|hit_set_search_last_n|scrub_min_interval|scrub_max_interval|deep_scrub_interval|recovery_priority|recovery_op_priority|scrub_priority|compression_mode|compression_algorithm|compression_required_ratio|compression_max_blob_size|compression_min_blob_size|csum_type|csum_min_block|csum_max_block|allow_ec_overwrites|fingerprint_algorithm", \
+	"name=var,type=CephChoices,strings=size|min_size|pg_num|pgp_num|crush_rule|hashpspool|nodelete|nopgchange|nosizechange|write_fadvise_dontneed|noscrub|nodeep-scrub|hit_set_type|hit_set_period|hit_set_count|hit_set_fpp|use_gmt_hitset|target_max_objects|target_max_bytes|cache_target_dirty_ratio|cache_target_dirty_high_ratio|cache_target_full_ratio|cache_min_flush_age|cache_min_evict_age|erasure_code_profile|min_read_recency_for_promote|all|min_write_recency_for_promote|fast_read|hit_set_grade_decay_rate|hit_set_search_last_n|scrub_min_interval|scrub_max_interval|deep_scrub_interval|recovery_priority|recovery_op_priority|scrub_priority|compression_mode|compression_algorithm|compression_required_ratio|compression_max_blob_size|compression_min_blob_size|csum_type|csum_min_block|csum_max_block|allow_ec_overwrites|fingerprint_algorithm|pg_autoscale_mode|pg_num_min|target_size_bytes|target_size_ratio", \
 	"get pool parameter <var>", "osd", "r")
 COMMAND("osd pool set " \
 	"name=pool,type=CephPoolname " \
-	"name=var,type=CephChoices,strings=size|min_size|pg_num|pgp_num|crush_rule|hashpspool|nodelete|nopgchange|nosizechange|write_fadvise_dontneed|noscrub|nodeep-scrub|hit_set_type|hit_set_period|hit_set_count|hit_set_fpp|use_gmt_hitset|target_max_bytes|target_max_objects|cache_target_dirty_ratio|cache_target_dirty_high_ratio|cache_target_full_ratio|cache_min_flush_age|cache_min_evict_age|min_read_recency_for_promote|min_write_recency_for_promote|fast_read|hit_set_grade_decay_rate|hit_set_search_last_n|scrub_min_interval|scrub_max_interval|deep_scrub_interval|recovery_priority|recovery_op_priority|scrub_priority|compression_mode|compression_algorithm|compression_required_ratio|compression_max_blob_size|compression_min_blob_size|csum_type|csum_min_block|csum_max_block|allow_ec_overwrites|fingerprint_algorithm " \
+	"name=var,type=CephChoices,strings=size|min_size|pg_num|pgp_num|crush_rule|hashpspool|nodelete|nopgchange|nosizechange|write_fadvise_dontneed|noscrub|nodeep-scrub|hit_set_type|hit_set_period|hit_set_count|hit_set_fpp|use_gmt_hitset|target_max_bytes|target_max_objects|cache_target_dirty_ratio|cache_target_dirty_high_ratio|cache_target_full_ratio|cache_min_flush_age|cache_min_evict_age|min_read_recency_for_promote|min_write_recency_for_promote|fast_read|hit_set_grade_decay_rate|hit_set_search_last_n|scrub_min_interval|scrub_max_interval|deep_scrub_interval|recovery_priority|recovery_op_priority|scrub_priority|compression_mode|compression_algorithm|compression_required_ratio|compression_max_blob_size|compression_min_blob_size|csum_type|csum_min_block|csum_max_block|allow_ec_overwrites|fingerprint_algorithm|pg_autoscale_mode|pg_num_min|target_size_bytes|target_size_ratio " \
 	"name=val,type=CephString " \
 	"name=yes_i_really_mean_it,type=CephBool,req=false", \
 	"set pool parameter <var> to <val>", "osd", "rw")
@@ -1127,7 +1141,8 @@ COMMAND("mgr versions", \
 COMMAND("config set" \
 	" name=who,type=CephString" \
 	" name=name,type=CephString" \
-	" name=value,type=CephString", \
+	" name=value,type=CephString" \
+	" name=force,type=CephBool,req=false",
 	"Set a configuration option for one or more entities",
 	"config", "rw")
 COMMAND("config rm"						\
@@ -1157,6 +1172,9 @@ COMMAND("config reset" \
 	" name=num,type=CephInt",
 	"Revert configuration to previous state",
 	"config", "rw")
+COMMAND("config generate-minimal-conf",
+	"Generate a minimal ceph.conf file",
+	"config", "r")
 
 COMMAND_WITH_FLAG("smart name=devid,type=CephString,req=false",
 		  "Query health metrics for underlying device",

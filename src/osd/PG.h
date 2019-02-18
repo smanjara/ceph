@@ -121,6 +121,11 @@ public:
 
   void dump(Formatter* f) const;
 
+  string get_current_state() {
+    if (pi == nullptr) return "unknown";
+    return std::get<1>(pi->embedded_states.top());
+  }
+
 private:
   bool pg_in_destructor = false;
   PG* thispg = nullptr;
@@ -269,7 +274,7 @@ public:
     return ceph_subsys_osd;
   }
 
-  OSDMapRef get_osdmap() const {
+  const OSDMapRef& get_osdmap() const {
     ceph_assert(is_locked());
     ceph_assert(osdmap_ref);
     return osdmap_ref;
@@ -315,7 +320,13 @@ public:
   }
 
   void set_last_scrub_stamp(utime_t t) {
+    info.stats.last_scrub_stamp = t;
     info.history.last_scrub_stamp = t;
+  }
+
+  void set_last_deep_scrub_stamp(utime_t t) {
+    info.stats.last_deep_scrub_stamp = t;
+    info.history.last_deep_scrub_stamp = t;
   }
 
   bool is_deleting() const {
@@ -610,15 +621,6 @@ protected:
 
 protected:
   PGLog  pg_log;
-  static string get_info_key(spg_t pgid) {
-    return stringify(pgid) + "_info";
-  }
-  static string get_biginfo_key(spg_t pgid) {
-    return stringify(pgid) + "_biginfo";
-  }
-  static string get_epoch_key(spg_t pgid) {
-    return stringify(pgid) + "_epoch";
-  }
   ghobject_t    pgmeta_oid;
 
   // ------------------
@@ -1084,6 +1086,7 @@ protected:
   bool        need_up_thru;
   set<pg_shard_t>    stray_set;   // non-acting osds that have PG data.
   map<pg_shard_t, pg_info_t>    peer_info;   // info from peers (stray or prior)
+  map<pg_shard_t, int64_t>    peer_bytes;   // Peer's num_bytes from peer_info
   set<pg_shard_t> peer_purged; // peers purged
   map<pg_shard_t, pg_missing_t> peer_missing;
   set<pg_shard_t> peer_log_requested;  // logs i've requested (and start stamps)
@@ -1202,8 +1205,97 @@ protected:
 
   set<pg_shard_t> backfill_targets,  async_recovery_targets;
 
+  // The primary's num_bytes and local num_bytes for this pg, only valid
+  // during backfill for non-primary shards.
+  // Both of these are adjusted for EC to reflect the on-disk bytes
+  std::atomic<int64_t> primary_num_bytes = 0;
+  std::atomic<int64_t> local_num_bytes = 0;
+
+public:
   bool is_backfill_targets(pg_shard_t osd) {
     return backfill_targets.count(osd);
+  }
+
+  // Space reserved for backfill is primary_num_bytes - local_num_bytes
+  // Don't care that difference itself isn't atomic
+  uint64_t get_reserved_num_bytes() {
+    int64_t primary = primary_num_bytes.load();
+    int64_t local = local_num_bytes.load();
+    if (primary > local)
+      return primary - local;
+    else
+      return 0;
+  }
+
+  bool is_remote_backfilling() {
+    return primary_num_bytes.load() > 0;
+  }
+
+  void set_reserved_num_bytes(int64_t primary, int64_t local);
+  void clear_reserved_num_bytes();
+
+  // If num_bytes are inconsistent and local_num- goes negative
+  // it's ok, because it would then be ignored.
+
+  // The value of num_bytes could be negative,
+  // but we don't let local_num_bytes go negative.
+  void add_local_num_bytes(int64_t num_bytes) {
+    if (num_bytes) {
+      int64_t prev = local_num_bytes.fetch_add(num_bytes);
+      ceph_assert(prev >= 0);
+      if (num_bytes < 0 && prev < -num_bytes) {
+        local_num_bytes.store(0);
+      }
+    }
+  }
+  void sub_local_num_bytes(int64_t num_bytes) {
+    ceph_assert(num_bytes >= 0);
+    if (num_bytes) {
+      if (local_num_bytes.fetch_sub(num_bytes) < num_bytes) {
+        local_num_bytes.store(0);
+      }
+    }
+  }
+  // The value of num_bytes could be negative,
+  // but we don't let info.stats.stats.sum.num_bytes go negative.
+  void add_num_bytes(int64_t num_bytes) {
+    ceph_assert(_lock.is_locked_by_me());
+    if (num_bytes) {
+      info.stats.stats.sum.num_bytes += num_bytes;
+      if (info.stats.stats.sum.num_bytes < 0) {
+        info.stats.stats.sum.num_bytes = 0;
+      }
+    }
+  }
+  void sub_num_bytes(int64_t num_bytes) {
+    ceph_assert(_lock.is_locked_by_me());
+    ceph_assert(num_bytes >= 0);
+    if (num_bytes) {
+      info.stats.stats.sum.num_bytes -= num_bytes;
+      if (info.stats.stats.sum.num_bytes < 0) {
+        info.stats.stats.sum.num_bytes = 0;
+      }
+    }
+  }
+
+  // Only used in testing so not worried about needing the PG lock here
+  int64_t get_stats_num_bytes() {
+    Mutex::Locker l(_lock);
+    int num_bytes = info.stats.stats.sum.num_bytes;
+    if (pool.info.is_erasure()) {
+      num_bytes /= (int)get_pgbackend()->get_ec_data_chunk_count();
+      // Round up each object by a stripe
+      num_bytes +=  get_pgbackend()->get_ec_stripe_chunk_size() * info.stats.stats.sum.num_objects;
+    }
+    int64_t lnb = local_num_bytes.load();
+    if (lnb && lnb != num_bytes) {
+      lgeneric_dout(cct, 0) << this << " " << info.pgid << " num_bytes mismatch "
+			    << lnb << " vs stats "
+                            << info.stats.stats.sum.num_bytes << " / chunk "
+                            << get_pgbackend()->get_ec_data_chunk_count()
+                            << dendl;
+    }
+    return num_bytes;
   }
 
 protected:
@@ -1308,6 +1400,7 @@ protected:
 
   void _update_calc_stats();
   void _update_blocked_by();
+  friend class TestOpsSocketHook;
   void publish_stats_to_osd();
   void clear_publish_stats();
 
@@ -1387,6 +1480,8 @@ protected:
   }
 
   virtual void calc_trim_to() = 0;
+
+  virtual void calc_trim_to_aggressive() = 0;
 
   void proc_replica_log(pg_info_t &oinfo, const pg_log_t &olog,
 			pg_missing_t& omissing, pg_shard_t from);
@@ -1846,6 +1941,7 @@ protected:
   };
 
 public:
+  int pg_stat_adjust(osd_stat_t *new_stat);
 protected:
 
   struct AdvMap : boost::statechart::event< AdvMap > {
@@ -2448,8 +2544,7 @@ protected:
 	boost::statechart::custom_reaction< RemoteBackfillReserved >,
 	boost::statechart::custom_reaction< RejectRemoteReservation >,
 	boost::statechart::custom_reaction< RemoteReservationRejected >,
-	boost::statechart::custom_reaction< RemoteReservationCanceled >,
-	boost::statechart::custom_reaction< RecoveryDone >
+	boost::statechart::custom_reaction< RemoteReservationCanceled >
 	> reactions;
       explicit RepWaitBackfillReserved(my_context ctx);
       void exit();
@@ -2457,7 +2552,6 @@ protected:
       boost::statechart::result react(const RejectRemoteReservation &evt);
       boost::statechart::result react(const RemoteReservationRejected &evt);
       boost::statechart::result react(const RemoteReservationCanceled &evt);
-      boost::statechart::result react(const RecoveryDone&);
     };
 
     struct RepWaitRecoveryReserved : boost::statechart::state< RepWaitRecoveryReserved, ReplicaActive >, NamedState {
@@ -2771,6 +2865,10 @@ protected:
     return !(get_osdmap()->test_flag(CEPH_OSDMAP_RECOVERY_DELETES));
   }
 
+  bool hard_limit_pglog() const {
+    return (get_osdmap()->test_flag(CEPH_OSDMAP_PGLOG_HARDLIMIT));
+  }
+
   void init_primary_up_acting(
     const vector<int> &newup,
     const vector<int> &newacting,
@@ -2890,7 +2988,7 @@ protected:
   eversion_t projected_last_update;
   eversion_t get_next_version() const {
     eversion_t at_version(
-      get_osdmap()->get_epoch(),
+      get_osdmap_epoch(),
       projected_last_update.version+1);
     ceph_assert(at_version > info.last_update);
     ceph_assert(at_version > pg_log.get_head());

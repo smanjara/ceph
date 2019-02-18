@@ -4,13 +4,14 @@ import string
 import sys
 import time
 import logging
+import errno
 
 try:
     from itertools import izip_longest as zip_longest
 except ImportError:
     from itertools import zip_longest
 from itertools import combinations
-from cStringIO import StringIO
+from six import StringIO
 
 import boto
 import boto.s3.connection
@@ -21,7 +22,7 @@ from nose.tools import eq_ as eq
 from nose.plugins.attrib import attr
 from nose.plugins.skip import SkipTest
 
-from .multisite import Zone
+from .multisite import Zone, ZoneGroup, Credentials
 
 from .conn import get_gateway_connection
 from .tools import assert_raises
@@ -674,22 +675,19 @@ def test_versioned_object_incremental_sync():
             k = new_key(zone_conn, bucket, obj)
 
             k.set_contents_from_string('version1')
-            v = get_latest_object_version(k)
-            log.debug('version1 id=%s', v.version_id)
+            log.debug('version1 id=%s', k.version_id)
             # don't delete version1 - this tests that the initial version
             # doesn't get squashed into later versions
 
             # create and delete the following object versions to test that
             # the operations don't race with each other during sync
             k.set_contents_from_string('version2')
-            v = get_latest_object_version(k)
-            log.debug('version2 id=%s', v.version_id)
-            k.bucket.delete_key(obj, version_id=v.version_id)
+            log.debug('version2 id=%s', k.version_id)
+            k.bucket.delete_key(obj, version_id=k.version_id)
 
             k.set_contents_from_string('version3')
-            v = get_latest_object_version(k)
-            log.debug('version3 id=%s', v.version_id)
-            k.bucket.delete_key(obj, version_id=v.version_id)
+            log.debug('version3 id=%s', k.version_id)
+            k.bucket.delete_key(obj, version_id=k.version_id)
 
     for _, bucket in zone_bucket:
         zonegroup_bucket_checkpoint(zonegroup_conns, bucket.name)
@@ -705,6 +703,89 @@ def test_versioned_object_incremental_sync():
     for _, bucket in zone_bucket:
         zonegroup_bucket_checkpoint(zonegroup_conns, bucket.name)
 
+def test_version_suspended_incremental_sync():
+    zonegroup = realm.master_zonegroup()
+    zonegroup_conns = ZonegroupConns(zonegroup)
+
+    zone = zonegroup_conns.rw_zones[0]
+
+    # create a non-versioned bucket
+    bucket = zone.create_bucket(gen_bucket_name())
+    log.debug('created bucket=%s', bucket.name)
+    zonegroup_meta_checkpoint(zonegroup)
+
+    # upload an initial object
+    key1 = new_key(zone, bucket, 'obj')
+    key1.set_contents_from_string('')
+    log.debug('created initial version id=%s', key1.version_id)
+    zonegroup_bucket_checkpoint(zonegroup_conns, bucket.name)
+
+    # enable versioning
+    bucket.configure_versioning(True)
+    zonegroup_meta_checkpoint(zonegroup)
+
+    # re-upload the object as a new version
+    key2 = new_key(zone, bucket, 'obj')
+    key2.set_contents_from_string('')
+    log.debug('created new version id=%s', key2.version_id)
+    zonegroup_bucket_checkpoint(zonegroup_conns, bucket.name)
+
+    # suspend versioning
+    bucket.configure_versioning(False)
+    zonegroup_meta_checkpoint(zonegroup)
+
+    # re-upload the object as a 'null' version
+    key3 = new_key(zone, bucket, 'obj')
+    key3.set_contents_from_string('')
+    log.debug('created null version id=%s', key3.version_id)
+    zonegroup_bucket_checkpoint(zonegroup_conns, bucket.name)
+
+def test_delete_marker_full_sync():
+    zonegroup = realm.master_zonegroup()
+    zonegroup_conns = ZonegroupConns(zonegroup)
+    buckets, zone_bucket = create_bucket_per_zone(zonegroup_conns)
+
+    # enable versioning
+    for _, bucket in zone_bucket:
+        bucket.configure_versioning(True)
+    zonegroup_meta_checkpoint(zonegroup)
+
+    for zone, bucket in zone_bucket:
+        # upload an initial object
+        key1 = new_key(zone, bucket, 'obj')
+        key1.set_contents_from_string('')
+
+        # create a delete marker
+        key2 = new_key(zone, bucket, 'obj')
+        key2.delete()
+
+    # wait for full sync
+    for _, bucket in zone_bucket:
+        zonegroup_bucket_checkpoint(zonegroup_conns, bucket.name)
+
+def test_suspended_delete_marker_full_sync():
+    zonegroup = realm.master_zonegroup()
+    zonegroup_conns = ZonegroupConns(zonegroup)
+    buckets, zone_bucket = create_bucket_per_zone(zonegroup_conns)
+
+    # enable/suspend versioning
+    for _, bucket in zone_bucket:
+        bucket.configure_versioning(True)
+        bucket.configure_versioning(False)
+    zonegroup_meta_checkpoint(zonegroup)
+
+    for zone, bucket in zone_bucket:
+        # upload an initial object
+        key1 = new_key(zone, bucket, 'obj')
+        key1.set_contents_from_string('')
+
+        # create a delete marker
+        key2 = new_key(zone, bucket, 'obj')
+        key2.delete()
+
+    # wait for full sync
+    for _, bucket in zone_bucket:
+        zonegroup_bucket_checkpoint(zonegroup_conns, bucket.name)
 
 def test_bucket_versioning():
     buckets, zone_bucket = create_bucket_per_zone_in_realm()
@@ -894,9 +975,13 @@ def test_zonegroup_remove():
     z1, z2 = zonegroup.zones[0:2]
     c1, c2 = (z1.cluster, z2.cluster)
 
+    # get admin credentials out of existing zone
+    system_key = z1.data['system_key']
+    admin_creds = Credentials(system_key['access_key'], system_key['secret_key'])
+
     # create a new zone in zonegroup on c2 and commit
     zone = Zone('remove', zonegroup, c2)
-    zone.create(c2)
+    zone.create(c2, admin_creds.credential_args())
     zonegroup.zones.append(zone)
     zonegroup.period.update(zone, commit=True)
 
@@ -911,6 +996,34 @@ def test_zonegroup_remove():
 
     # validate the resulting period
     zonegroup.period.update(z1, commit=True)
+
+
+def test_zg_master_zone_delete():
+
+    master_zg = realm.master_zonegroup()
+    master_zone = master_zg.master_zone
+
+    assert(len(master_zg.zones) >= 1)
+    master_cluster = master_zg.zones[0].cluster
+
+    rm_zg = ZoneGroup('remove_zg')
+    rm_zg.create(master_cluster)
+
+    rm_zone = Zone('remove', rm_zg, master_cluster)
+    rm_zone.create(master_cluster)
+    master_zg.period.update(master_zone, commit=True)
+
+
+    rm_zone.delete(master_cluster)
+    # Period update: This should now fail as the zone will be the master zone
+    # in that zg
+    _, retcode = master_zg.period.update(master_zone, check_retcode=False)
+    assert(retcode == errno.EINVAL)
+
+    # Proceed to delete the zonegroup as well, previous period now does not
+    # contain a dangling master_zone, this must succeed
+    rm_zg.delete(master_cluster)
+    master_zg.period.update(master_zone, commit=True)
 
 def test_set_bucket_website():
     buckets, zone_bucket = create_bucket_per_zone_in_realm()

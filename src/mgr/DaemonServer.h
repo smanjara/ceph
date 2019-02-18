@@ -26,8 +26,6 @@
 #include <msg/Messenger.h>
 #include <mon/MonClient.h>
 
-#include "auth/AuthAuthorizeHandler.h"
-
 #include "ServiceMap.h"
 #include "MgrSession.h"
 #include "DaemonState.h"
@@ -66,11 +64,6 @@ protected:
   ClusterState &cluster_state;
   PyModuleRegistry &py_modules;
   LogChannelRef clog, audit_clog;
-
-  // Authentication methods for cluster peers
-  AuthAuthorizeHandlerRegistry auth_cluster_registry;
-  // Authentication methods for clients
-  AuthAuthorizeHandlerRegistry auth_service_registry;
 
   // Connections for daemons, and clients with service names set
   // (i.e. those MgrClients that are allowed to send MMgrReports)
@@ -149,8 +142,7 @@ public:
   bool ms_handle_reset(Connection *con) override;
   void ms_handle_remote_reset(Connection *con) override {}
   bool ms_handle_refused(Connection *con) override;
-  bool ms_get_authorizer(int dest_type, AuthAuthorizer **authorizer,
-                         bool force_new) override;
+  bool ms_get_authorizer(int dest_type, AuthAuthorizer **authorizer) override;
   KeyStore *ms_get_auth1_authorizer_keystore() override;
 
   bool handle_open(MMgrOpen *m);
@@ -165,8 +157,12 @@ public:
 
   void _send_configure(ConnectionRef c);
 
-  OSDPerfMetricQueryID add_osd_perf_query(const OSDPerfMetricQuery &query);
+  OSDPerfMetricQueryID add_osd_perf_query(
+      const OSDPerfMetricQuery &query,
+      const std::optional<OSDPerfMetricLimit> &limit);
   int remove_osd_perf_query(OSDPerfMetricQueryID query_id);
+  int get_osd_perf_counters(OSDPerfMetricQueryID query_id,
+                            std::map<OSDPerfMetricKey, PerformanceCounters> *c);
 
   virtual const char** get_tracked_conf_keys() const override;
   virtual void handle_conf_change(const ConfigProxy& conf,

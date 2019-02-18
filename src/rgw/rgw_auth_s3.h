@@ -17,7 +17,6 @@
 #include "common/sstring.hh"
 #include "rgw_common.h"
 #include "rgw_rest_s3.h"
-
 #include "rgw_auth.h"
 #include "rgw_auth_filters.h"
 #include "rgw_auth_keystone.h"
@@ -34,7 +33,8 @@ bool is_time_skew_ok(time_t t);
 
 class STSAuthStrategy : public rgw::auth::Strategy,
                         public rgw::auth::RemoteApplier::Factory,
-                        public rgw::auth::LocalApplier::Factory {
+                        public rgw::auth::LocalApplier::Factory,
+                        public rgw::auth::RoleApplier::Factory {
   typedef rgw::auth::IdentityApplier::aplptr_t aplptr_t;
   RGWRados* const store;
 
@@ -55,10 +55,19 @@ class STSAuthStrategy : public rgw::auth::Strategy,
                             const req_state* const s,
                             const RGWUserInfo& user_info,
                             const std::string& subuser,
-                            const boost::optional<vector<std::string> >& role_policies,
                             const boost::optional<uint32_t>& perm_mask) const override {
     auto apl = rgw::auth::add_sysreq(cct, store, s,
-      rgw::auth::LocalApplier(cct, user_info, subuser, role_policies, perm_mask));
+      rgw::auth::LocalApplier(cct, user_info, subuser, perm_mask));
+    return aplptr_t(new decltype(apl)(std::move(apl)));
+  }
+
+  aplptr_t create_apl_role(CephContext* const cct,
+                            const req_state* const s,
+                            const string& role_name,
+                            const rgw_user& user_id,
+                            const vector<std::string>& role_policies) const override {
+    auto apl = rgw::auth::add_sysreq(cct, store, s,
+      rgw::auth::RoleApplier(cct, role_name, user_id, role_policies));
     return aplptr_t(new decltype(apl)(std::move(apl)));
   }
 
@@ -69,7 +78,8 @@ public:
     : store(store),
       sts_engine(cct, store, *ver_abstractor,
                   static_cast<rgw::auth::LocalApplier::Factory*>(this),
-                  static_cast<rgw::auth::RemoteApplier::Factory*>(this)) {
+                  static_cast<rgw::auth::RemoteApplier::Factory*>(this),
+                  static_cast<rgw::auth::RoleApplier::Factory*>(this)) {
       if (cct->_conf->rgw_s3_auth_use_sts) {
         add_engine(Control::SUFFICIENT, sts_engine);
       }
@@ -123,8 +133,7 @@ public:
 
     }
 
-    if (cct->_conf->rgw_s3_auth_use_ldap &&
-        ! cct->_conf->rgw_ldap_uri.empty()) {
+    if (ldap_engine.valid()) {
       add_engine(Control::SUFFICIENT, ldap_engine);
     }
   }
@@ -157,10 +166,9 @@ class AWSAuthStrategy : public rgw::auth::Strategy,
                             const req_state* const s,
                             const RGWUserInfo& user_info,
                             const std::string& subuser,
-                            const boost::optional<vector<std::string> >& role_policies,
                             const boost::optional<uint32_t>& perm_mask) const override {
     auto apl = rgw::auth::add_sysreq(cct, store, s,
-      rgw::auth::LocalApplier(cct, user_info, subuser, role_policies, perm_mask));
+      rgw::auth::LocalApplier(cct, user_info, subuser, perm_mask));
     /* TODO(rzarzynski): replace with static_ptr. */
     return aplptr_t(new decltype(apl)(std::move(apl)));
   }
@@ -247,8 +255,7 @@ class AWSv4ComplMulti : public rgw::auth::Completer,
                         public rgw::io::DecoratedRestfulClient<rgw::io::RestfulClient*>,
                         public std::enable_shared_from_this<AWSv4ComplMulti> {
   using io_base_t = rgw::io::DecoratedRestfulClient<rgw::io::RestfulClient*>;
-  using signing_key_t = std::array<unsigned char,
-                                   CEPH_CRYPTO_HMACSHA256_DIGESTSIZE>;
+  using signing_key_t = sha256_digest_t;
 
   CephContext* const cct;
 
@@ -404,6 +411,7 @@ void rgw_create_s3_canonical_header(
   const char *content_type,
   const char *date,
   const std::map<std::string, std::string>& meta_map,
+  const std::map<std::string, std::string>& qs_map,
   const char *request_uri,
   const std::map<std::string, std::string>& sub_resources,
   std::string& dest_str);
@@ -435,14 +443,14 @@ static constexpr char AWS4_UNSIGNED_PAYLOAD_HASH[] = "UNSIGNED-PAYLOAD";
 static constexpr char AWS4_STREAMING_PAYLOAD_HASH[] = \
   "STREAMING-AWS4-HMAC-SHA256-PAYLOAD";
 
-int parse_credentials(const req_info& info,                     /* in */
-                      boost::string_view& access_key_id,        /* out */
-                      boost::string_view& credential_scope,     /* out */
-                      boost::string_view& signedheaders,        /* out */
-                      boost::string_view& signature,            /* out */
-                      boost::string_view& date,                 /* out */
-                      boost::string_view& session_token,        /* out */
-                      const bool using_qs);                     /* in */
+int parse_v4_credentials(const req_info& info,                     /* in */
+			 boost::string_view& access_key_id,        /* out */
+			 boost::string_view& credential_scope,     /* out */
+			 boost::string_view& signedheaders,        /* out */
+			 boost::string_view& signature,            /* out */
+			 boost::string_view& date,                 /* out */
+			 boost::string_view& session_token,        /* out */
+			 const bool using_qs);                     /* in */
 
 static inline bool char_needs_aws4_escaping(const char c, bool encode_slash)
 {
@@ -501,6 +509,14 @@ static inline std::string get_v4_canonical_uri(const req_info& info) {
   }
 
   return canonical_uri;
+}
+
+static inline const string calc_v4_payload_hash(const string& payload)
+{
+  ceph::crypto::SHA256* sha256_hash = calc_hash_sha256_open_stream();
+  calc_hash_sha256_update_stream(sha256_hash, payload.c_str(), payload.length());
+  const auto payload_hash = calc_hash_sha256_close_stream(&sha256_hash);
+  return payload_hash;
 }
 
 static inline const char* get_v4_exp_payload_hash(const req_info& info)

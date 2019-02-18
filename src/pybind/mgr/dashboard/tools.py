@@ -181,6 +181,11 @@ class ViewCache(object):
             self.exception = None
             self.lock = threading.Lock()
 
+        def reset(self):
+            with self.lock:
+                self.value_when = None
+                self.value = None
+
         def run(self, fn, args, kwargs):
             """
             If data less than `stale_period` old is available, return it
@@ -220,7 +225,7 @@ class ViewCache(object):
                         # pylint: disable=raising-bad-type
                         raise self.exception
                     return ViewCache.VALUE_OK, self.value
-                elif self.value_when is not None:
+                if self.value_when is not None:
                     # We have some data, but it doesn't meet freshness requirements
                     return ViewCache.VALUE_STALE, self.value
                 # We have no data, not even stale data
@@ -237,7 +242,12 @@ class ViewCache(object):
                 rvc = ViewCache.RemoteViewCache(self.timeout)
                 self.cache_by_args[args] = rvc
             return rvc.run(fn, args, kwargs)
+        wrapper.reset = self.reset
         return wrapper
+
+    def reset(self):
+        for _, rvc in self.cache_by_args.items():
+            rvc.reset()
 
 
 class NotificationQueue(threading.Thread):
@@ -636,11 +646,107 @@ class Task(object):
             self.lock.release()
 
 
+def is_valid_ip_address(addr):
+    """
+    Validate the given IPv4 or IPv6 address.
+
+    >>> is_valid_ip_address('2001:0db8::1234')
+    True
+
+    >>> is_valid_ip_address('192.168.121.1')
+    True
+
+    >>> is_valid_ip_address('1:::1')
+    False
+
+    >>> is_valid_ip_address('8.1.0')
+    False
+
+    >>> is_valid_ip_address('260.1.0.1')
+    False
+
+    :param addr:
+    :type addr: str
+    :return: Returns ``True`` if the IP address is valid,
+        otherwise ``False``.
+    :rtype: bool
+    """
+    return is_valid_ipv4_address(addr) or is_valid_ipv6_address(addr)
+
+
+def is_valid_ipv4_address(addr):
+    """
+    Validate the given IPv4 address.
+
+    >>> is_valid_ipv4_address('0.0.0.0')
+    True
+
+    >>> is_valid_ipv4_address('192.168.121.1')
+    True
+
+    >>> is_valid_ipv4_address('a.b.c.d')
+    False
+
+    >>> is_valid_ipv4_address('172.1.0.a')
+    False
+
+    >>> is_valid_ipv4_address('2001:0db8::1234')
+    False
+
+    >>> is_valid_ipv4_address(None)
+    False
+
+    >>> is_valid_ipv4_address(123456)
+    False
+
+    :param addr:
+    :type addr: str
+    :return: Returns ``True`` if the IPv4 address is valid,
+        otherwise ``False``.
+    :rtype: bool
+    """
+    try:
+        socket.inet_pton(socket.AF_INET, addr)
+        return True
+    except (socket.error, TypeError):
+        return False
+
+
 def is_valid_ipv6_address(addr):
+    """
+    Validate the given IPv6 address.
+
+    >>> is_valid_ipv6_address('2001:0db8::1234')
+    True
+
+    >>> is_valid_ipv6_address('fe80::bc6c:66b0:5af8:f44')
+    True
+
+    >>> is_valid_ipv6_address('192.168.121.1')
+    False
+
+    >>> is_valid_ipv6_address('a:x::1')
+    False
+
+    >>> is_valid_ipv6_address('1200:0000:AB00:1234:O000:2552:7777:1313')
+    False
+
+    >>> is_valid_ipv6_address(None)
+    False
+
+    >>> is_valid_ipv6_address(123456)
+    False
+
+    :param addr:
+    :type addr: str
+    :return: Returns ``True`` if the IPv6 address is valid,
+        otherwise ``False``.
+    :rtype: bool
+    """
     try:
         socket.inet_pton(socket.AF_INET6, addr)
         return True
-    except socket.error:
+    except (socket.error, TypeError):
         return False
 
 
@@ -726,6 +832,7 @@ def getargspec(func):
             func = func.__wrapped__
     except AttributeError:
         pass
+    # pylint: disable=deprecated-method
     return _getargspec(func)
 
 
@@ -772,3 +879,31 @@ def get_request_body_params(request):
         params.update(request.json.items())
 
     return params
+
+
+def find_object_in_list(key, value, iterable):
+    """
+    Get the first occurrence of an object within a list with
+    the specified key/value.
+
+    >>> find_object_in_list('name', 'bar', [{'name': 'foo'}, {'name': 'bar'}])
+    {'name': 'bar'}
+
+    >>> find_object_in_list('name', 'xyz', [{'name': 'foo'}, {'name': 'bar'}]) is None
+    True
+
+    >>> find_object_in_list('foo', 'bar', [{'xyz': 4815162342}]) is None
+    True
+
+    >>> find_object_in_list('foo', 'bar', []) is None
+    True
+
+    :param key: The name of the key.
+    :param value: The value to search for.
+    :param iterable: The list to process.
+    :return: Returns the found object or None.
+    """
+    for obj in iterable:
+        if key in obj and obj[key] == value:
+            return obj
+    return None

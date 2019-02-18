@@ -1,8 +1,10 @@
 import { NgModule } from '@angular/core';
 import { ActivatedRouteSnapshot, RouterModule, Routes } from '@angular/router';
 
+import { IscsiTargetFormComponent } from './ceph/block/iscsi-target-form/iscsi-target-form.component';
+import { IscsiTargetListComponent } from './ceph/block/iscsi-target-list/iscsi-target-list.component';
 import { IscsiComponent } from './ceph/block/iscsi/iscsi.component';
-import { MirroringComponent } from './ceph/block/mirroring/mirroring.component';
+import { OverviewComponent as RbdMirroringComponent } from './ceph/block/mirroring/overview/overview.component';
 import { RbdFormComponent } from './ceph/block/rbd-form/rbd-form.component';
 import { RbdImagesComponent } from './ceph/block/rbd-images/rbd-images.component';
 import { CephfsListComponent } from './ceph/cephfs/cephfs-list/cephfs-list.component';
@@ -10,9 +12,13 @@ import { ConfigurationFormComponent } from './ceph/cluster/configuration/configu
 import { ConfigurationComponent } from './ceph/cluster/configuration/configuration.component';
 import { CrushmapComponent } from './ceph/cluster/crushmap/crushmap.component';
 import { HostsComponent } from './ceph/cluster/hosts/hosts.component';
+import { LogsComponent } from './ceph/cluster/logs/logs.component';
 import { MonitorComponent } from './ceph/cluster/monitor/monitor.component';
 import { OsdListComponent } from './ceph/cluster/osd/osd-list/osd-list.component';
+import { PrometheusListComponent } from './ceph/cluster/prometheus/prometheus-list/prometheus-list.component';
 import { DashboardComponent } from './ceph/dashboard/dashboard/dashboard.component';
+import { NfsFormComponent } from './ceph/nfs/nfs-form/nfs-form.component';
+import { NfsListComponent } from './ceph/nfs/nfs-list/nfs-list.component';
 import { PerformanceCounterComponent } from './ceph/performance-counter/performance-counter/performance-counter.component';
 import { PoolFormComponent } from './ceph/pool/pool-form/pool-form.component';
 import { PoolListComponent } from './ceph/pool/pool-list/pool-list.component';
@@ -25,12 +31,16 @@ import { RgwUserListComponent } from './ceph/rgw/rgw-user-list/rgw-user-list.com
 import { LoginComponent } from './core/auth/login/login.component';
 import { RoleFormComponent } from './core/auth/role-form/role-form.component';
 import { RoleListComponent } from './core/auth/role-list/role-list.component';
+import { SsoNotFoundComponent } from './core/auth/sso/sso-not-found/sso-not-found.component';
 import { UserFormComponent } from './core/auth/user-form/user-form.component';
 import { UserListComponent } from './core/auth/user-list/user-list.component';
 import { ForbiddenComponent } from './core/forbidden/forbidden.component';
+import { MgrModulesListComponent } from './core/mgr-modules/mgr-modules-list/mgr-modules-list.component';
+import { TelemetryComponent } from './core/mgr-modules/telemetry/telemetry.component';
 import { NotFoundComponent } from './core/not-found/not-found.component';
 import { BreadcrumbsResolver, IBreadcrumb } from './shared/models/breadcrumbs';
 import { AuthGuardService } from './shared/services/auth-guard.service';
+import { FeatureTogglesGuardService } from './shared/services/feature-toggles-guard.service';
 import { ModuleStatusGuardService } from './shared/services/module-status-guard.service';
 
 export class PerformanceCounterBreadcrumbsResolver extends BreadcrumbsResolver {
@@ -103,12 +113,35 @@ const routes: Routes = [
     data: { breadcrumbs: 'Cluster/CRUSH map' }
   },
   {
+    path: 'logs',
+    component: LogsComponent,
+    canActivate: [AuthGuardService],
+    data: { breadcrumbs: 'Cluster/Logs' }
+  },
+  {
+    path: 'alerts',
+    component: PrometheusListComponent,
+    canActivate: [AuthGuardService],
+    data: { breadcrumbs: 'Cluster/Alerts' }
+  },
+  {
     path: 'perf_counters/:type/:id',
     component: PerformanceCounterComponent,
     canActivate: [AuthGuardService],
     data: {
       breadcrumbs: PerformanceCounterBreadcrumbsResolver
     }
+  },
+  // Mgr modules
+  {
+    path: 'mgr-modules',
+    canActivate: [AuthGuardService],
+    canActivateChild: [AuthGuardService],
+    data: { breadcrumbs: 'Cluster/Manager Modules' },
+    children: [
+      { path: '', component: MgrModulesListComponent },
+      { path: 'edit/telemetry', component: TelemetryComponent, data: { breadcrumbs: 'Telemetry' } }
+    ]
   },
   // Pools
   {
@@ -136,6 +169,7 @@ const routes: Routes = [
       },
       {
         path: 'rbd',
+        canActivate: [FeatureTogglesGuardService],
         data: { breadcrumbs: 'Images' },
         children: [
           { path: '', component: RbdImagesComponent },
@@ -156,17 +190,48 @@ const routes: Routes = [
       },
       {
         path: 'mirroring',
-        component: MirroringComponent,
+        component: RbdMirroringComponent,
+        canActivate: [FeatureTogglesGuardService],
         data: { breadcrumbs: 'Mirroring' }
       },
-      { path: 'iscsi', component: IscsiComponent, data: { breadcrumbs: 'iSCSI' } }
+      // iSCSI
+      {
+        path: 'iscsi',
+        canActivate: [FeatureTogglesGuardService],
+        data: { breadcrumbs: 'iSCSI' },
+        children: [
+          {
+            path: '',
+            redirectTo: 'overview',
+            pathMatch: 'full'
+          },
+          {
+            path: 'overview',
+            data: { breadcrumbs: 'Overview' },
+            children: [{ path: '', component: IscsiComponent }]
+          },
+          {
+            path: 'targets',
+            data: { breadcrumbs: 'Targets' },
+            children: [
+              { path: '', component: IscsiTargetListComponent },
+              { path: 'add', component: IscsiTargetFormComponent, data: { breadcrumbs: 'Add' } },
+              {
+                path: 'edit/:target_iqn',
+                component: IscsiTargetFormComponent,
+                data: { breadcrumbs: 'Edit' }
+              }
+            ]
+          }
+        ]
+      }
     ]
   },
   // Filesystems
   {
     path: 'cephfs',
     component: CephfsListComponent,
-    canActivate: [AuthGuardService],
+    canActivate: [FeatureTogglesGuardService, AuthGuardService],
     data: { breadcrumbs: 'Filesystems' }
   },
   // Object Gateway
@@ -178,7 +243,7 @@ const routes: Routes = [
   },
   {
     path: 'rgw',
-    canActivateChild: [ModuleStatusGuardService, AuthGuardService],
+    canActivateChild: [FeatureTogglesGuardService, ModuleStatusGuardService, AuthGuardService],
     data: {
       moduleStatusGuardConfig: {
         apiPath: 'rgw',
@@ -205,7 +270,7 @@ const routes: Routes = [
         children: [
           { path: '', component: RgwBucketListComponent },
           { path: 'add', component: RgwBucketFormComponent, data: { breadcrumbs: 'Add' } },
-          { path: 'edit/:bucket', component: RgwBucketFormComponent, data: { breadcrumbs: 'Edit' } }
+          { path: 'edit/:bid', component: RgwBucketFormComponent, data: { breadcrumbs: 'Edit' } }
         ]
       }
     ]
@@ -242,6 +307,24 @@ const routes: Routes = [
       }
     ]
   },
+  // NFS
+  {
+    path: 'nfs',
+    canActivate: [AuthGuardService],
+    canActivateChild: [AuthGuardService],
+    data: { breadcrumbs: 'NFS' },
+    children: [
+      { path: '', component: NfsListComponent },
+      { path: 'add', component: NfsFormComponent, data: { breadcrumbs: 'Add' } },
+      {
+        path: 'edit/:cluster_id/:export_id',
+        component: NfsFormComponent,
+        data: { breadcrumbs: 'Edit' }
+      }
+    ]
+  },
+  // Single Sign-On (SSO)
+  { path: 'sso/404', component: SsoNotFoundComponent },
   // System
   { path: 'login', component: LoginComponent },
   { path: 'logout', children: [] },

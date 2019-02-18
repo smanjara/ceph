@@ -1195,21 +1195,31 @@ void OSDMap::set_epoch(epoch_t e)
     pool.second.last_change = e;
 }
 
-bool OSDMap::is_blacklisted(const entity_addr_t& a) const
+bool OSDMap::is_blacklisted(const entity_addr_t& orig) const
 {
-  if (blacklist.empty())
+  if (blacklist.empty()) {
     return false;
+  }
+
+  // all blacklist entries are type ANY for nautilus+
+  // FIXME: avoid this copy!
+  entity_addr_t a = orig;
+  if (require_osd_release < CEPH_RELEASE_NAUTILUS) {
+    a.set_type(entity_addr_t::TYPE_LEGACY);
+  } else {
+    a.set_type(entity_addr_t::TYPE_ANY);
+  }
 
   // this specific instance?
-  if (blacklist.count(a))
+  if (blacklist.count(a)) {
     return true;
+  }
 
   // is entire ip blacklisted?
   if (a.is_ip()) {
-    entity_addr_t b = a;
-    b.set_port(0);
-    b.set_nonce(0);
-    if (blacklist.count(b)) {
+    a.set_port(0);
+    a.set_nonce(0);
+    if (blacklist.count(a)) {
       return true;
     }
   }
@@ -1223,18 +1233,8 @@ bool OSDMap::is_blacklisted(const entity_addrvec_t& av) const
     return false;
 
   for (auto& a : av.v) {
-    // this specific instance?
-    if (blacklist.count(a))
+    if (is_blacklisted(a)) {
       return true;
-
-    // is entire ip blacklisted?
-    if (a.is_ip()) {
-      entity_addr_t b = a;
-      b.set_port(0);
-      b.set_nonce(0);
-      if (blacklist.count(b)) {
-	return true;
-      }
     }
   }
 
@@ -1755,12 +1755,43 @@ void OSDMap::maybe_remove_pg_upmaps(CephContext *cct,
     to_check.insert(p.first);
   }
   for (auto& pg : to_check) {
-    auto crush_rule = nextmap.get_pg_pool_crush_rule(pg);
-    if (crush_rule < 0) {
-      lderr(cct) << __func__ << " unable to load crush-rule of pg "
-                 << pg << dendl;
+    const pg_pool_t *pi = nextmap.get_pg_pool(pg.pool());
+    if (!pi || pg.ps() >= pi->get_pg_num_pending()) {
+      ldout(cct, 0) << __func__ << " pg " << pg << " is gone or merge source"
+		    << dendl;
+      to_cancel.insert(pg);
       continue;
     }
+    if (pi->is_pending_merge(pg, nullptr)) {
+      ldout(cct, 0) << __func__ << " pg " << pg << " is pending merge"
+		    << dendl;
+      to_cancel.insert(pg);
+      continue;
+    }
+    vector<int> raw_up;
+    int primary;
+    nextmap.pg_to_raw_up(pg, &raw_up, &primary);
+    vector<int> up;
+    up.reserve(raw_up.size());
+    for (auto osd : raw_up) {
+      // skip non-existent/down osd for erasure-coded PGs
+      if (osd == CRUSH_ITEM_NONE)
+        continue;
+      up.push_back(osd);
+    }
+    auto crush_rule = nextmap.get_pg_pool_crush_rule(pg);
+    auto r = nextmap.crush->verify_upmap(cct,
+                                         crush_rule,
+                                         nextmap.get_pg_pool_size(pg),
+                                         up);
+    if (r < 0) {
+      ldout(cct, 0) << __func__ << " verify_upmap of pg " << pg
+                    << " returning " << r
+                    << dendl;
+      to_cancel.insert(pg);
+      continue;
+    }
+    // below we check against crush-topology changing..
     map<int, float> weight_map;
     auto it = rule_weight_map.find(crush_rule);
     if (it == rule_weight_map.end()) {
@@ -1774,40 +1805,10 @@ void OSDMap::maybe_remove_pg_upmaps(CephContext *cct,
     } else {
       weight_map = it->second;
     }
-    auto type = nextmap.crush->get_rule_failure_domain(crush_rule);
-    if (type < 0) {
-      lderr(cct) << __func__ << " unable to load failure-domain-type of pg "
-                 << pg << dendl;
-      continue;
-    }
     ldout(cct, 10) << __func__ << " pg " << pg
-                   << " crush-rule-id " << crush_rule
                    << " weight_map " << weight_map
-                   << " failure-domain-type " << type
                    << dendl;
-    vector<int> raw;
-    int primary;
-    nextmap.pg_to_raw_up(pg, &raw, &primary);
-    set<int> parents;
-    for (auto osd : raw) {
-      if (type > 0) {
-        auto parent = nextmap.crush->get_parent_of_type(osd, type, crush_rule);
-        if (parent < 0) {
-          auto r = parents.insert(parent);
-          if (!r.second) {
-            // two up-set osds come from same parent
-            to_cancel.insert(pg);
-            break;
-          }
-        } else {
-          lderr(cct) << __func__ << " unable to get parent of raw osd."
-                     << osd << " of pg " << pg
-                     << dendl;
-          // continue to do checks below
-        }
-      }
-      // the above check validates collision only
-      // below we continue to check against crush-topology changing..
+    for (auto osd : up) {
       auto it = weight_map.find(osd);
       if (it == weight_map.end()) {
         // osd is gone or has been moved out of the specific crush-tree
@@ -1859,6 +1860,7 @@ void OSDMap::maybe_remove_pg_upmaps(CephContext *cct,
       }
     }
   }
+  nextmap.clean_pg_upmaps(cct, pending_inc);
 }
 
 int OSDMap::apply_incremental(const Incremental &inc)
@@ -2106,6 +2108,12 @@ int OSDMap::apply_incremental(const Incremental &inc)
     }
   }
 
+  if (inc.new_require_osd_release >= 0) {
+    require_osd_release = inc.new_require_osd_release;
+    if (require_osd_release >= CEPH_RELEASE_NAUTILUS) {
+      flags |= CEPH_OSDMAP_PGLOG_HARDLIMIT;
+    }
+  }
   // do new crush map last (after up/down stuff)
   if (inc.crush.length()) {
     bufferlist bl(inc.crush);
@@ -2396,6 +2404,17 @@ void OSDMap::pg_to_raw_osds(pg_t pg, vector<int> *raw, int *primary) const
   }
   _pg_to_raw_osds(*pool, pg, raw, NULL);
   *primary = _pick_primary(*raw);
+}
+
+void OSDMap::pg_to_raw_upmap(pg_t pg, vector<int> *raw_upmap) const
+{
+  auto pool = get_pg_pool(pg.pool());
+  if (!pool) {
+    raw_upmap->clear();
+    return;
+  }
+  _pg_to_raw_osds(*pool, pg, raw_upmap, NULL);
+  _apply_upmap(*pool, pg, raw_upmap);
 }
 
 void OSDMap::pg_to_raw_up(pg_t pg, vector<int> *up, int *primary) const
@@ -3080,6 +3099,9 @@ void OSDMap::decode(bufferlist::const_iterator& bl)
     if (struct_v >= 5) {
       decode(require_min_compat_client, bl);
       decode(require_osd_release, bl);
+      if (require_osd_release >= CEPH_RELEASE_NAUTILUS) {
+	flags |= CEPH_OSDMAP_PGLOG_HARDLIMIT;
+      }
       if (require_osd_release >= CEPH_RELEASE_LUMINOUS) {
 	flags &= ~(CEPH_OSDMAP_LEGACY_REQUIRE_FLAGS);
 	flags |= CEPH_OSDMAP_RECOVERY_DELETES;
@@ -3218,12 +3240,17 @@ void OSDMap::dump(Formatter *f) const
       f->dump_float("weight", get_weightf(i));
       f->dump_float("primary_affinity", get_primary_affinityf(i));
       get_info(i).dump(f);
-      f->dump_stream("public_addr") << get_addrs(i).legacy_addr();
       f->dump_object("public_addrs", get_addrs(i));
-      f->dump_stream("cluster_addr") << get_cluster_addrs(i).legacy_addr();
       f->dump_object("cluster_addrs", get_cluster_addrs(i));
       f->dump_object("heartbeat_back_addrs", get_hb_back_addrs(i));
-      f->dump_object("heartbeat_front_addr", get_hb_front_addrs(i));
+      f->dump_object("heartbeat_front_addrs", get_hb_front_addrs(i));
+      // compat
+      f->dump_stream("public_addr") << get_addrs(i).get_legacy_str();
+      f->dump_stream("cluster_addr") << get_cluster_addrs(i).get_legacy_str();
+      f->dump_stream("heartbeat_back_addr")
+	<< get_hb_back_addrs(i).get_legacy_str();
+      f->dump_stream("heartbeat_front_addr")
+	<< get_hb_front_addrs(i).get_legacy_str();
 
       set<string> st;
       get_state(i, st);
@@ -3402,6 +3429,8 @@ string OSDMap::get_flag_string(unsigned f)
     s += ",recovery_deletes";
   if (f & CEPH_OSDMAP_PURGED_SNAPDIRS)
     s += ",purged_snapdirs";
+  if (f & CEPH_OSDMAP_PGLOG_HARDLIMIT)
+    s += ",pglog_hardlimit";
   if (s.length())
     s.erase(0, 1);
   return s;
@@ -3845,7 +3874,8 @@ int OSDMap::build_simple_optioned(CephContext *cct, epoch_t e, uuid_d &fsid,
       if (cct->_conf->osd_pool_default_flag_nosizechange)
 	pools[pool].set_flag(pg_pool_t::FLAG_NOSIZECHANGE);
       pools[pool].size = cct->_conf.get_val<uint64_t>("osd_pool_default_size");
-      pools[pool].min_size = cct->_conf.get_osd_pool_default_min_size();
+      pools[pool].min_size = cct->_conf.get_osd_pool_default_min_size(
+                                 pools[pool].size);
       pools[pool].crush_rule = default_replicated_rule;
       pools[pool].object_hash = CEPH_STR_HASH_RJENKINS;
       pools[pool].set_pg_num(poolbase << pg_bits);
@@ -3855,6 +3885,9 @@ int OSDMap::build_simple_optioned(CephContext *cct, epoch_t e, uuid_d &fsid,
       pools[pool].last_change = epoch;
       pools[pool].application_metadata.insert(
         {pg_pool_t::APPLICATION_NAME_RBD, {}});
+      auto m = pg_pool_t::get_pg_autoscale_mode_by_name(
+        cct->_conf.get_val<string>("osd_pool_default_pg_autoscale_mode"));
+      pools[pool].pg_autoscale_mode = m >= 0 ? m : 0;
       pool_name[pool] = plname;
       name_pool[plname] = pool;
     }
@@ -4186,7 +4219,7 @@ int OSDMap::summarize_mapping_stats(
 
 int OSDMap::clean_pg_upmaps(
   CephContext *cct,
-  Incremental *pending_inc)
+  Incremental *pending_inc) const
 {
   ldout(cct, 10) << __func__ << dendl;
   int changed = 0;
@@ -4207,9 +4240,16 @@ int OSDMap::clean_pg_upmaps(
     pg_to_raw_osds(p.first, &raw, &primary);
     mempool::osdmap::vector<pair<int,int>> newmap;
     for (auto& q : p.second) {
-      if (std::find(raw.begin(), raw.end(), q.first) != raw.end()) {
-	newmap.push_back(q);
+      if (std::find(raw.begin(), raw.end(), q.first) == raw.end()) {
+        // cancel mapping if source osd does not exist anymore
+        continue;
       }
+      if (q.second != CRUSH_ITEM_NONE && q.second < max_osd &&
+          q.second >= 0 && osd_weight[q.second] == 0) {
+        // cancel mapping if target osd is out
+        continue;
+      }
+      newmap.push_back(q);
     }
     if (newmap.empty()) {
       ldout(cct, 10) << " removing no-op pg_upmap_items " << p.first << " "
@@ -4241,9 +4281,6 @@ bool OSDMap::try_pg_upmap(
 			      pool->get_size());
   if (rule < 0)
     return false;
-
-  // get original mapping
-  _pg_to_raw_osds(*pool, pg, orig, NULL);
 
   // make sure there is something there to remap
   bool any = false;
@@ -4278,6 +4315,7 @@ int OSDMap::calc_pg_upmaps(
   const set<int64_t>& only_pools_orig,
   OSDMap::Incremental *pending_inc)
 {
+  ldout(cct, 10) << __func__ << " pools " << only_pools_orig  << dendl;
   set<int64_t> only_pools;
   if (only_pools_orig.empty()) {
     for (auto& i : pools) {
@@ -4288,8 +4326,6 @@ int OSDMap::calc_pg_upmaps(
   }
   OSDMap tmp;
   tmp.deepish_copy_from(*this);
-  float start_deviation = 0;
-  float end_deviation = 0;
   int num_changed = 0;
   map<int,set<pg_t>> pgs_by_osd;
   int total_pgs = 0;
@@ -4311,17 +4347,17 @@ int OSDMap::calc_pg_upmaps(
 
     map<int,float> pmap;
     int ruleno = tmp.crush->find_rule(i.second.get_crush_rule(),
-					i.second.get_type(),
-					i.second.get_size());
+				      i.second.get_type(),
+				      i.second.get_size());
     tmp.crush->get_rule_weight_osd_map(ruleno, &pmap);
     ldout(cct,30) << __func__ << " pool " << i.first << " ruleno " << ruleno << dendl;
     for (auto p : pmap) {
-	auto adjusted_weight = tmp.get_weightf(p.first) * p.second;
+      auto adjusted_weight = tmp.get_weightf(p.first) * p.second;
       if (adjusted_weight == 0) {
         continue;
       }
-	osd_weight[p.first] += adjusted_weight;
-	osd_weight_total += adjusted_weight;
+      osd_weight[p.first] += adjusted_weight;
+      osd_weight_total += adjusted_weight;
     }
   }
   for (auto& i : osd_weight) {
@@ -4342,142 +4378,411 @@ int OSDMap::calc_pg_upmaps(
   ldout(cct, 10) << " osd_weight_total " << osd_weight_total << dendl;
   ldout(cct, 10) << " pgs_per_weight " << pgs_per_weight << dendl;
 
-  while (true) {
-    // osd deviation
-    float total_deviation = 0;
-    map<int,float> osd_deviation;       // osd, deviation(pgs)
-    multimap<float,int> deviation_osd;  // deviation(pgs), osd
+  if (max <= 0) {
+    lderr(cct) << __func__ << " abort due to max <= 0" << dendl;
+    return 0;
+  }
+  float decay_factor = 1.0 / float(max);
+  float stddev = 0;
+  map<int,float> osd_deviation;       // osd, deviation(pgs)
+  multimap<float,int> deviation_osd;  // deviation(pgs), osd
+  for (auto& i : pgs_by_osd) {
+    // make sure osd is still there (belongs to this crush-tree)
+    ceph_assert(osd_weight.count(i.first));
+    float target = osd_weight[i.first] * pgs_per_weight;
+    float deviation = (float)i.second.size() - target;
+    ldout(cct, 20) << " osd." << i.first
+                   << "\tpgs " << i.second.size()
+                   << "\ttarget " << target
+                   << "\tdeviation " << deviation
+                   << dendl;
+    osd_deviation[i.first] = deviation;
+    deviation_osd.insert(make_pair(deviation, i.first));
+    stddev += deviation * deviation;
+  }
+  if (stddev <= cct->_conf.get_val<double>("osd_calc_pg_upmaps_max_stddev")) {
+    ldout(cct, 10) << __func__ << " distribution is almost perfect"
+                   << dendl;
+    return 0;
+  }
+  bool skip_overfull = false;
+  auto aggressive =
+    cct->_conf.get_val<bool>("osd_calc_pg_upmaps_aggressively");
+  auto local_fallback_retries =
+    cct->_conf.get_val<uint64_t>("osd_calc_pg_upmaps_local_fallback_retries");
+  while (max--) {
+    // build overfull and underfull
     set<int> overfull;
-    for (auto& i : pgs_by_osd) {
+    vector<int> underfull;
+    float decay = 0;
+    int decay_count = 0;
+    while (overfull.empty()) {
+      for (auto i = deviation_osd.rbegin(); i != deviation_osd.rend(); i++) {
+        if (i->first >= (1.0 - decay))
+          overfull.insert(i->second);
+      }
+      if (!overfull.empty())
+        break;
+      decay_count++;
+      decay = decay_factor * decay_count;
+      if (decay >= 1.0)
+        break;
+      ldout(cct, 30) << " decay_factor = " << decay_factor
+                     << " decay_count = " << decay_count
+                     << " decay (overfull) = " << decay
+                     << dendl;
+    }
+    if (overfull.empty()) {
+      lderr(cct) << __func__ << " failed to build overfull" << dendl;
+      break;
+    }
+
+    decay = 0;
+    decay_count = 0;
+    while (underfull.empty()) {
+      for (auto i = deviation_osd.begin(); i != deviation_osd.end(); i++) {
+        if (i->first >= (-.999 + decay))
+          break;
+        underfull.push_back(i->second);
+      }
+      if (!underfull.empty())
+        break;
+      decay_count++;
+      decay = decay_factor * decay_count;
+      if (decay >= .999)
+        break;
+      ldout(cct, 30) << " decay_factor = " << decay_factor
+                     << " decay_count = " << decay_count
+                     << " decay (underfull) = " << decay
+                     << dendl;
+    }
+    if (underfull.empty()) {
+      lderr(cct) << __func__ << " failed to build underfull" << dendl;
+      break;
+    }
+
+    ldout(cct, 10) << " overfull " << overfull
+                   << " underfull " << underfull
+                   << dendl;
+    set<pg_t> to_skip;
+    uint64_t local_fallback_retried = 0;
+
+  retry:
+
+    set<pg_t> to_unmap;
+    map<pg_t, mempool::osdmap::vector<pair<int32_t,int32_t>>> to_upmap;
+    auto temp_pgs_by_osd = pgs_by_osd;
+    // always start with fullest, break if we find any changes to make
+    for (auto p = deviation_osd.rbegin(); p != deviation_osd.rend(); ++p) {
+      if (skip_overfull) {
+        ldout(cct, 10) << " skipping overfull " << dendl;
+        break; // fall through to check underfull
+      }
+      int osd = p->second;
+      float deviation = p->first;
+      float target = osd_weight[osd] * pgs_per_weight;
+      ceph_assert(target > 0);
+      float deviation_ratio = deviation / target;
+      if (deviation_ratio < max_deviation_ratio) {
+	ldout(cct, 10) << " osd." << osd
+                       << " target " << target
+                       << " deviation " << deviation
+                       << " -> ratio " << deviation_ratio
+                       << " < max ratio " << max_deviation_ratio
+                       << dendl;
+	break;
+      }
+
+      vector<pg_t> pgs;
+      pgs.reserve(pgs_by_osd[osd].size());
+      for (auto& pg : pgs_by_osd[osd]) {
+        if (to_skip.count(pg))
+          continue;
+        pgs.push_back(pg);
+      }
+      if (aggressive) {
+        // shuffle PG list so they all get equal (in)attention
+        std::random_device rd;
+        std::default_random_engine rng{rd()};
+        std::shuffle(pgs.begin(), pgs.end(), rng);
+      }
+      // look for remaps we can un-remap
+      for (auto pg : pgs) {
+	auto p = tmp.pg_upmap_items.find(pg);
+        if (p == tmp.pg_upmap_items.end())
+          continue;
+        mempool::osdmap::vector<pair<int32_t,int32_t>> new_upmap_items;
+        for (auto q : p->second) {
+	  if (q.second == osd) {
+            ldout(cct, 10) << " will try dropping existing"
+                           << " remapping pair "
+                           << q.first << " -> " << q.second
+                           << " which remapped " << pg
+                           << " into overfull osd." << osd
+                           << dendl;
+            temp_pgs_by_osd[q.second].erase(pg);
+            temp_pgs_by_osd[q.first].insert(pg);
+          } else {
+            new_upmap_items.push_back(q);
+          }
+        }
+        if (new_upmap_items.empty()) {
+          // drop whole item
+          ldout(cct, 10) << " existing pg_upmap_items " << p->second
+                         << " remapped " << pg << " into overfull osd." << osd
+                         << ", will try cancelling it entirely"
+                         << dendl;
+          to_unmap.insert(pg);
+          goto test_change;
+        } else if (new_upmap_items.size() != p->second.size()) {
+          // drop single remapping pair, updating
+          ceph_assert(new_upmap_items.size() < p->second.size());
+          ldout(cct, 10) << " existing pg_upmap_items " << p->second
+                         << " remapped " << pg << " into overfull osd." << osd
+                         << ", new_pg_upmap_items now " << new_upmap_items
+                         << dendl;
+          to_upmap[pg] = new_upmap_items;
+          goto test_change;
+        }
+      }
+
+      // try upmap
+      for (auto pg : pgs) {
+        auto temp_it = tmp.pg_upmap.find(pg);
+        if (temp_it != tmp.pg_upmap.end()) {
+          // leave pg_upmap alone
+          // it must be specified by admin since balancer does not
+          // support pg_upmap yet
+	  ldout(cct, 10) << " " << pg << " already has pg_upmap "
+                         << temp_it->second << ", skipping"
+                         << dendl;
+	  continue;
+	}
+        auto pg_pool_size = tmp.get_pg_pool_size(pg);
+        mempool::osdmap::vector<pair<int32_t,int32_t>> new_upmap_items;
+        set<int> existing;
+        auto it = tmp.pg_upmap_items.find(pg);
+        if (it != tmp.pg_upmap_items.end() &&
+            it->second.size() >= (size_t)pg_pool_size) {
+          ldout(cct, 10) << " " << pg << " already has full-size pg_upmap_items "
+                         << it->second << ", skipping"
+                         << dendl;
+          continue;
+        } else if (it != tmp.pg_upmap_items.end()) {
+          ldout(cct, 10) << " " << pg << " already has pg_upmap_items "
+                         << it->second
+                         << dendl;
+          new_upmap_items = it->second;
+          // build existing too (for dedup)
+          for (auto i : it->second) {
+            existing.insert(i.first);
+            existing.insert(i.second);
+          }
+          // fall through
+          // to see if we can append more remapping pairs
+        }
+	ldout(cct, 10) << " trying " << pg << dendl;
+	vector<int> orig, out;
+        tmp.pg_to_raw_upmap(pg, &orig); // including existing upmaps too
+	if (!try_pg_upmap(cct, pg, overfull, underfull, &orig, &out)) {
+	  continue;
+	}
+	ldout(cct, 10) << " " << pg << " " << orig << " -> " << out << dendl;
+	if (orig.size() != out.size()) {
+	  continue;
+	}
+	ceph_assert(orig != out);
+	for (unsigned i = 0; i < out.size(); ++i) {
+          if (orig[i] == out[i])
+            continue; // skip invalid remappings
+          if (existing.count(orig[i]) || existing.count(out[i]))
+            continue; // we want new remappings only!
+          ldout(cct, 10) << " will try adding new remapping pair "
+                         << orig[i] << " -> " << out[i] << " for " << pg
+                         << dendl;
+          existing.insert(orig[i]);
+          existing.insert(out[i]);
+          temp_pgs_by_osd[orig[i]].erase(pg);
+          temp_pgs_by_osd[out[i]].insert(pg);
+          ceph_assert(new_upmap_items.size() < (size_t)pg_pool_size);
+          new_upmap_items.push_back(make_pair(orig[i], out[i]));
+          // append new remapping pairs slowly
+          // This way we can make sure that each tiny change will
+          // definitely make distribution of PGs converging to
+          // the perfect status.
+          to_upmap[pg] = new_upmap_items;
+          goto test_change;
+	}
+      }
+    }
+
+    ceph_assert(!(to_unmap.size() || to_upmap.size()));
+    ldout(cct, 10) << " failed to find any changes for overfull osds"
+                   << dendl;
+    for (auto& p : deviation_osd) {
+      if (std::find(underfull.begin(), underfull.end(), p.second) ==
+                    underfull.end())
+        break;
+      int osd = p.second;
+      float deviation = p.first;
+      float target = osd_weight[osd] * pgs_per_weight;
+      ceph_assert(target > 0);
+      float deviation_ratio = abs(deviation / target);
+      if (deviation_ratio < max_deviation_ratio) {
+        // respect max_deviation_ratio too
+        ldout(cct, 10) << " osd." << osd
+                       << " target " << target
+                       << " deviation " << deviation
+                       << " -> absolute ratio " << deviation_ratio
+                       << " < max ratio " << max_deviation_ratio
+                       << dendl;
+        break;
+      }
+      // look for remaps we can un-remap
+      vector<pair<pg_t,
+        mempool::osdmap::vector<pair<int32_t,int32_t>>>> candidates;
+      for (auto& i : tmp.pg_upmap_items) {
+        if (to_skip.count(i.first))
+          continue;
+        candidates.push_back(make_pair(i.first, i.second));
+      }
+      if (aggressive) {
+        // shuffle candidates so they all get equal (in)attention
+        std::random_device rd;
+        std::default_random_engine rng{rd()};
+        std::shuffle(candidates.begin(), candidates.end(), rng);
+      }
+      for (auto& i : candidates) {
+        auto pg = i.first;
+        mempool::osdmap::vector<pair<int32_t,int32_t>> new_upmap_items;
+        for (auto& j : i.second) {
+          if (j.first == osd) {
+            ldout(cct, 10) << " will try dropping existing"
+                           << " remapping pair "
+                           << j.first << " -> " << j.second
+                           << " which remapped " << pg
+                           << " out from underfull osd." << osd
+                           << dendl;
+            temp_pgs_by_osd[j.second].erase(pg);
+            temp_pgs_by_osd[j.first].insert(pg);
+          } else {
+            new_upmap_items.push_back(j);
+          }
+        }
+        if (new_upmap_items.empty()) {
+          // drop whole item
+          ldout(cct, 10) << " existing pg_upmap_items " << i.second
+                         << " remapped " << pg
+                         << " out from underfull osd." << osd
+                         << ", will try cancelling it entirely"
+                         << dendl;
+          to_unmap.insert(pg);
+          goto test_change;
+        } else if (new_upmap_items.size() != i.second.size()) {
+          // drop single remapping pair, updating
+          ceph_assert(new_upmap_items.size() < i.second.size());
+          ldout(cct, 10) << " existing pg_upmap_items " << i.second
+                         << " remapped " << pg
+                         << " out from underfull osd." << osd
+                         << ", new_pg_upmap_items now " << new_upmap_items
+                         << dendl;
+          to_upmap[pg] = new_upmap_items;
+          goto test_change;
+        }
+      }
+    }
+
+    ceph_assert(!(to_unmap.size() || to_upmap.size()));
+    ldout(cct, 10) << " failed to find any changes for underfull osds"
+                   << dendl;
+    if (!aggressive) {
+      ldout(cct, 10) << " break due to aggressive mode not enabled" << dendl;
+      break;
+    } else if (!skip_overfull) {
+      // safe to quit because below here we know
+      // we've done checking both overfull and underfull osds..
+      ldout(cct, 10) << " break due to not being able to find any"
+                     << " further optimizations"
+                     << dendl;
+      break;
+    }
+    // restart with fullest and do exhaustive searching
+    skip_overfull = false;
+    continue;
+
+  test_change:
+
+    // test change, apply if change is good
+    ceph_assert(to_unmap.size() || to_upmap.size());
+    float new_stddev = 0;
+    map<int,float> temp_osd_deviation;
+    multimap<float,int> temp_deviation_osd;
+    for (auto& i : temp_pgs_by_osd) {
       // make sure osd is still there (belongs to this crush-tree)
       ceph_assert(osd_weight.count(i.first));
       float target = osd_weight[i.first] * pgs_per_weight;
       float deviation = (float)i.second.size() - target;
       ldout(cct, 20) << " osd." << i.first
-		     << "\tpgs " << i.second.size()
-		     << "\ttarget " << target
-		     << "\tdeviation " << deviation
-		     << dendl;
-      osd_deviation[i.first] = deviation;
-      deviation_osd.insert(make_pair(deviation, i.first));
-      if (deviation >= 1.0)
-	overfull.insert(i.first);
-      total_deviation += abs(deviation);
+                     << "\tpgs " << i.second.size()
+                     << "\ttarget " << target
+                     << "\tdeviation " << deviation
+                     << dendl;
+      temp_osd_deviation[i.first] = deviation;
+      temp_deviation_osd.insert(make_pair(deviation, i.first));
+      new_stddev += deviation * deviation;
     }
-    if (num_changed == 0) {
-      start_deviation = total_deviation;
-    }
-    end_deviation = total_deviation;
-
-    // build underfull, sorted from least-full to most-average
-    vector<int> underfull;
-    for (auto i = deviation_osd.begin();
-	 i != deviation_osd.end();
-	 ++i) {
-      if (i->first >= -.999)
-	break;
-      underfull.push_back(i->second);
-    }
-    ldout(cct, 10) << " total_deviation " << total_deviation
-		   << " overfull " << overfull
-		   << " underfull " << underfull << dendl;
-    if (overfull.empty() || underfull.empty())
-      break;
-
-    // pick fullest
-    bool restart = false;
-    for (auto p = deviation_osd.rbegin(); p != deviation_osd.rend(); ++p) {
-      int osd = p->second;
-      float deviation = p->first;
-      float target = osd_weight[osd] * pgs_per_weight;
-      ceph_assert(target > 0);
-      if (deviation/target < max_deviation_ratio) {
-	ldout(cct, 10) << " osd." << osd
-		       << " target " << target
-		       << " deviation " << deviation
-		       << " -> ratio " << deviation/target
-		       << " < max ratio " << max_deviation_ratio << dendl;
-	break;
+    ldout(cct, 10) << " stddev " << stddev << " -> " << new_stddev << dendl;
+    if (new_stddev >= stddev) {
+      if (!aggressive) {
+        ldout(cct, 10) << " break because stddev is not decreasing"
+                       << " and aggressive mode is not enabled"
+                       << dendl;
+        break;
       }
-      int num_to_move = deviation;
-      ldout(cct, 10) << " osd." << osd << " move " << num_to_move << dendl;
-      if (num_to_move < 1)
-	break;
-
-      set<pg_t>& pgs = pgs_by_osd[osd];
-
-      // look for remaps we can un-remap
-      for (auto pg : pgs) {
-	auto p = tmp.pg_upmap_items.find(pg);
-	if (p != tmp.pg_upmap_items.end()) {
-	  for (auto q : p->second) {
-	    if (q.second == osd) {
-	      ldout(cct, 10) << "  dropping pg_upmap_items " << pg
-			     << " " << p->second << dendl;
-              for (auto i : p->second) {
-                pgs_by_osd[i.second].erase(pg);
-                pgs_by_osd[i.first].insert(pg);
-              }
-	      tmp.pg_upmap_items.erase(p);
-	      pending_inc->old_pg_upmap_items.insert(pg);
-	      ++num_changed;
-	      restart = true;
-	    }
-	  }
-	}
-	if (restart)
-	  break;
-      } // pg loop
-      if (restart)
-	break;
-
-      for (auto pg : pgs) {
-	if (tmp.pg_upmap.count(pg) ||
-	    tmp.pg_upmap_items.count(pg)) {
-	  ldout(cct, 20) << "  already remapped " << pg << dendl;
-	  continue;
-	}
-	ldout(cct, 10) << "  trying " << pg << dendl;
-	vector<int> orig, out;
-	if (!try_pg_upmap(cct, pg, overfull, underfull, &orig, &out)) {
-	  continue;
-	}
-	ldout(cct, 10) << "  " << pg << " " << orig << " -> " << out << dendl;
-	if (orig.size() != out.size()) {
-	  continue;
-	}
-	ceph_assert(orig != out);
-	auto& rmi = tmp.pg_upmap_items[pg];
-	for (unsigned i = 0; i < out.size(); ++i) {
-	  if (orig[i] != out[i]) {
-	    rmi.push_back(make_pair(orig[i], out[i]));
-	  }
-	}
-        for (auto i : rmi) {
-          pgs_by_osd[i.first].erase(pg);
-          pgs_by_osd[i.second].insert(pg);
-        }
-	pending_inc->new_pg_upmap_items[pg] = rmi;
-	ldout(cct, 10) << "  " << pg << " pg_upmap_items " << rmi << dendl;
-	restart = true;
-	++num_changed;
-	break;
-      } // pg loop
-      if (restart)
-	break;
-    } // osd loop
-
-    if (!restart) {
-      ldout(cct, 10) << " failed to find any changes to make" << dendl;
-      break;
+      local_fallback_retried++;
+      if (local_fallback_retried >= local_fallback_retries) {
+        // does not make progress
+        // flip *skip_overfull* so both overfull and underfull
+        // get equal (in)attention
+        skip_overfull = !skip_overfull;
+        ldout(cct, 10) << " hit local_fallback_retries "
+                       << local_fallback_retries
+                       << dendl;
+        continue;
+      }
+      for (auto& i : to_unmap)
+        to_skip.insert(i);
+      for (auto& i : to_upmap)
+        to_skip.insert(i.first);
+      ldout(cct, 20) << " local_fallback_retried " << local_fallback_retried
+                     << " to_skip " << to_skip
+                     << dendl;
+      goto retry;
     }
-    if (--max == 0) {
-      ldout(cct, 10) << " hit max iterations, stopping" << dendl;
-      break;
+
+    // ready to go
+    ceph_assert(new_stddev < stddev);
+    stddev = new_stddev;
+    pgs_by_osd = temp_pgs_by_osd;
+    osd_deviation = temp_osd_deviation;
+    deviation_osd = temp_deviation_osd;
+    for (auto& i : to_unmap) {
+      ldout(cct, 10) << " unmap pg " << i << dendl;
+      ceph_assert(tmp.pg_upmap_items.count(i));
+      tmp.pg_upmap_items.erase(i);
+      pending_inc->old_pg_upmap_items.insert(i);
+      ++num_changed;
+    }
+    for (auto& i : to_upmap) {
+      ldout(cct, 10) << " upmap pg " << i.first
+                     << " new pg_upmap_items " << i.second
+                     << dendl;
+      tmp.pg_upmap_items[i.first] = i.second;
+      pending_inc->new_pg_upmap_items[i.first] = i.second;
+      ++num_changed;
     }
   }
-  ldout(cct, 10) << " start deviation " << start_deviation << dendl;
-  ldout(cct, 10) << " end deviation " << end_deviation << dendl;
+  ldout(cct, 10) << " num_changed = " << num_changed << dendl;
   return num_changed;
 }
 
@@ -4613,12 +4918,13 @@ protected:
 			   int64_t* kb_avail) const {
     const osd_stat_t *p = pgmap.get_osd_stat(id);
     if (!p) return false;
-    *kb = p->kb;
-    *kb_used = p->kb_used;
-    *kb_used_data = p->kb_used_data;
-    *kb_used_omap = p->kb_used_omap;
-    *kb_used_meta = p->kb_used_meta;
-    *kb_avail = p->kb_avail;
+    *kb = p->statfs.kb();
+    *kb_used = p->statfs.kb_used_raw();
+    *kb_used_data = p->statfs.kb_used_data();
+    *kb_used_omap = p->statfs.kb_used_omap();
+    *kb_used_meta = p->statfs.kb_used_internal_metadata();
+    *kb_avail = p->statfs.kb_avail();
+    
     return *kb > 0;
   }
 
@@ -4692,7 +4998,7 @@ public:
     tbl->define_column("WEIGHT", TextTable::LEFT, TextTable::RIGHT);
     tbl->define_column("REWEIGHT", TextTable::LEFT, TextTable::RIGHT);
     tbl->define_column("SIZE", TextTable::LEFT, TextTable::RIGHT);
-    tbl->define_column("USE", TextTable::LEFT, TextTable::RIGHT);
+    tbl->define_column("RAW USE", TextTable::LEFT, TextTable::RIGHT);
     tbl->define_column("DATA", TextTable::LEFT, TextTable::RIGHT);
     tbl->define_column("OMAP", TextTable::LEFT, TextTable::RIGHT);
     tbl->define_column("META", TextTable::LEFT, TextTable::RIGHT);
@@ -4711,12 +5017,12 @@ public:
     *tbl << ""
 	 << ""
 	 << "" << "TOTAL"
-	 << byte_u_t(pgmap.get_osd_sum().kb << 10)
-	 << byte_u_t(pgmap.get_osd_sum().kb_used << 10)
-	 << byte_u_t(pgmap.get_osd_sum().kb_used_data << 10)
-	 << byte_u_t(pgmap.get_osd_sum().kb_used_omap << 10)
-	 << byte_u_t(pgmap.get_osd_sum().kb_used_meta << 10)
-	 << byte_u_t(pgmap.get_osd_sum().kb_avail << 10)
+	 << byte_u_t(pgmap.get_osd_sum().statfs.total)
+	 << byte_u_t(pgmap.get_osd_sum().statfs.get_used_raw())
+	 << byte_u_t(pgmap.get_osd_sum().statfs.allocated)
+	 << byte_u_t(pgmap.get_osd_sum().statfs.omap_allocated)
+	 << byte_u_t(pgmap.get_osd_sum().statfs.internal_metadata)
+	 << byte_u_t(pgmap.get_osd_sum().statfs.available)
 	 << lowprecision_t(average_util)
 	 << ""
 	 << TextTable::endrow;
@@ -4872,13 +5178,14 @@ protected:
 public:
   void summary(Formatter *f) {
     f->open_object_section("summary");
-    auto& s = pgmap.get_osd_sum();
-    f->dump_int("total_kb", s.kb);
-    f->dump_int("total_kb_used", s.kb_used);
-    f->dump_int("total_kb_used_data", s.kb_used_data);
-    f->dump_int("total_kb_used_omap", s.kb_used_omap);
-    f->dump_int("total_kb_used_meta", s.kb_used_meta);
-    f->dump_int("total_kb_avail", s.kb_avail);
+    auto& s = pgmap.get_osd_sum().statfs;
+
+    f->dump_int("total_kb", s.kb());
+    f->dump_int("total_kb_used", s.kb_used_raw());
+    f->dump_int("total_kb_used_data", s.kb_used_data());
+    f->dump_int("total_kb_used_omap", s.kb_used_omap());
+    f->dump_int("total_kb_used_meta", s.kb_used_internal_metadata());
+    f->dump_int("total_kb_avail", s.kb_avail());
     f->dump_float("average_utilization", average_util);
     f->dump_float("min_var", min_var);
     f->dump_float("max_var", max_var);
@@ -5348,3 +5655,34 @@ void OSDMap::get_random_up_osds_by_subtree(int n,     // whoami
   }
 }
 
+float OSDMap::pool_raw_used_rate(int64_t poolid) const
+{
+  const pg_pool_t *pool = get_pg_pool(poolid);
+  assert(pool != nullptr);
+
+  switch (pool->get_type()) {
+  case pg_pool_t::TYPE_REPLICATED:
+    return pool->get_size();
+    break;
+  case pg_pool_t::TYPE_ERASURE:
+  {
+    auto& ecp =
+      get_erasure_code_profile(pool->erasure_code_profile);
+    auto pm = ecp.find("m");
+    auto pk = ecp.find("k");
+    if (pm != ecp.end() && pk != ecp.end()) {
+      int k = atoi(pk->second.c_str());
+      int m = atoi(pm->second.c_str());
+      int mk = m + k;
+      ceph_assert(mk != 0);
+      ceph_assert(k != 0);
+      return (float)mk / k;
+    } else {
+      return 0.0;
+    }
+  }
+  break;
+  default:
+    ceph_abort_msg("unrecognized pool type");
+  }
+}

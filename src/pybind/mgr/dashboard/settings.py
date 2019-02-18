@@ -40,6 +40,13 @@ class Options(object):
     GRAFANA_API_USERNAME = ('admin', str)
     GRAFANA_API_PASSWORD = ('admin', str)
 
+    # NFS Ganesha settings
+    GANESHA_CLUSTERS_RADOS_POOL_NAMESPACE = ('', str)
+
+    # Prometheus settings
+    PROMETHEUS_API_HOST = ('', str)  # Not in use ATM
+    ALERTMANAGER_API_HOST = ('', str)
+
     @staticmethod
     def has_default_value(name):
         return getattr(Settings, name, None) is None or \
@@ -49,22 +56,23 @@ class Options(object):
 class SettingsMeta(type):
     def __getattr__(cls, attr):
         default, stype = getattr(Options, attr)
-        if stype == bool and str(mgr.get_config(attr,
-                                                default)).lower() == 'false':
+        if stype == bool and str(mgr.get_module_option(
+                attr,
+                default)).lower() == 'false':
             value = False
         else:
-            value = stype(mgr.get_config(attr, default))
+            value = stype(mgr.get_module_option(attr, default))
         return value
 
     def __setattr__(cls, attr, value):
         if not attr.startswith('_') and hasattr(Options, attr):
-            mgr.set_config(attr, str(value))
+            mgr.set_module_option(attr, str(value))
         else:
             setattr(SettingsMeta, attr, value)
 
-    def __delattr__(self, attr):
+    def __delattr__(cls, attr):
         if not attr.startswith('_') and hasattr(Options, attr):
-            mgr.set_config(attr, None)
+            mgr.set_module_option(attr, None)
 
 
 # pylint: disable=no-init

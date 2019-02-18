@@ -35,6 +35,7 @@
 #include "osd/PGLog.h"
 #include "osd/OSD.h"
 #include "osd/PG.h"
+#include "osd/ECUtil.h"
 
 #include "json_spirit/json_spirit_value.h"
 #include "json_spirit/json_spirit_reader.h"
@@ -534,7 +535,7 @@ int do_trim_pg_log(ObjectStore *store, const coll_t &coll,
     ObjectMap::ObjectMapIterator p = store->get_omap_iterator(ch, oid);
     if (!p)
       break;
-    for (p->seek_to_first(); p->valid(); p->next(false)) {
+    for (p->seek_to_first(); p->valid(); p->next()) {
       if (p->key()[0] == '_')
 	continue;
       if (p->key() == "can_rollback_to")
@@ -1710,7 +1711,8 @@ int ObjectStoreTool::do_import(ObjectStore *store, OSDSuperblock& sb,
 	auto p = pg_num_history.pg_nums.find(pgid.pgid.m_pool);
 	if (p != pg_num_history.pg_nums.end() &&
 	    !p->second.empty()) {
-	  unsigned pg_num = ms.osdmap.get_pg_num(pgid.pgid.pool());
+	  unsigned start_pg_num = ms.osdmap.get_pg_num(pgid.pgid.pool());
+	  unsigned pg_num = start_pg_num;
 	  for (auto q = p->second.lower_bound(ms.map_epoch);
 	       q != p->second.end();
 	       ++q) {
@@ -1733,7 +1735,8 @@ int ObjectStoreTool::do_import(ObjectStore *store, OSDSuperblock& sb,
 
 	    // check for split children
 	    set<spg_t> children;
-	    if (pgid.is_split(pg_num, new_pg_num, &children)) {
+	    if (pgid.is_split(start_pg_num, new_pg_num, &children)) {
+	      cerr << " children are " << children << std::endl;
 	      for (auto child : children) {
 		coll_t coll(child);
 		if (store->collection_exists(coll)) {
@@ -2417,6 +2420,22 @@ int print_obj_info(ObjectStore *store, coll_t coll, ghobject_t &ghobj, Formatter
       formatter->close_section();
     }
   }
+  bufferlist hattr;
+  gr = store->getattr(ch, ghobj, ECUtil::get_hinfo_key(), hattr);
+  if (gr == 0) {
+    ECUtil::HashInfo hinfo;
+    auto hp = hattr.cbegin();
+    try {
+      decode(hinfo, hp);
+      formatter->open_object_section("hinfo");
+      hinfo.dump(formatter);
+      formatter->close_section();
+    } catch (...) {
+      r = -EINVAL;
+      cerr << "Error decoding hinfo on : " << make_pair(coll, ghobj) << ", "
+           << cpp_strerror(r) << std::endl;
+    }
+  }
   formatter->close_section();
   formatter->flush(cout);
   cout << std::endl;
@@ -2552,6 +2571,42 @@ int set_size(
       encode(ss, snapattr);
       t.setattr(coll, head, SS_ATTR, snapattr);
     }
+    auto ch = store->open_collection(coll);
+    r = store->queue_transaction(ch, std::move(t));
+    if (r < 0) {
+      cerr << "Error writing object info: " << make_pair(coll, ghobj) << ", "
+         << cpp_strerror(r) << std::endl;
+      return r;
+    }
+  }
+  return 0;
+}
+
+int clear_data_digest(ObjectStore *store, coll_t coll, ghobject_t &ghobj) {
+  auto ch = store->open_collection(coll);
+  bufferlist attr;
+  int r = store->getattr(ch, ghobj, OI_ATTR, attr);
+  if (r < 0) {
+    cerr << "Error getting attr on : " << make_pair(coll, ghobj) << ", "
+       << cpp_strerror(r) << std::endl;
+    return r;
+  }
+  object_info_t oi;
+  auto bp = attr.cbegin();
+  try {
+    decode(oi, bp);
+  } catch (...) {
+    r = -EINVAL;
+    cerr << "Error getting attr on : " << make_pair(coll, ghobj) << ", "
+         << cpp_strerror(r) << std::endl;
+    return r;
+  }
+  if (!dry_run) {
+    attr.clear();
+    oi.clear_data_digest();
+    encode(oi, attr, -1); /* fixme: using full features */
+    ObjectStore::Transaction t;
+    t.setattr(coll, ghobj, OI_ATTR, attr);
     auto ch = store->open_collection(coll);
     r = store->queue_transaction(ch, std::move(t));
     if (r < 0) {
@@ -2892,6 +2947,7 @@ void usage(po::options_description &desc)
     cerr << "ceph-objectstore-tool ... <object> remove|removeall" << std::endl;
     cerr << "ceph-objectstore-tool ... <object> dump" << std::endl;
     cerr << "ceph-objectstore-tool ... <object> set-size" << std::endl;
+    cerr << "ceph-objectstore-tool ... <object> clear-data-digest" << std::endl;
     cerr << "ceph-objectstore-tool ... <object> remove-clone-metadata <cloneid>" << std::endl;
     cerr << std::endl;
     cerr << "<object> can be a JSON object description as displayed" << std::endl;
@@ -3983,6 +4039,9 @@ int main(int argc, char **argv)
 	uint64_t size = atoll(arg1.c_str());
 	ret = set_size(fs, coll, ghobj, size, formatter, corrupt);
 	goto out;
+      } else if (objcmd == "clear-data-digest") {
+        ret = clear_data_digest(fs, coll, ghobj);
+        goto out;
       } else if (objcmd == "clear-snapset") {
         // UNDOCUMENTED: For testing zap SnapSet
         // IGNORE extra args since not in usage anyway

@@ -6,12 +6,11 @@
 
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <iostream>
 #include <list>
 #include <map>
-#include <mutex>
 
+#include "common/ceph_mutex.h"
 #include "include/Context.h"
 #include "common/ThrottleInterface.h"
 #include "common/Timer.h"
@@ -50,7 +49,7 @@ private:
        (c >= m && cur > m));     // except for large c
   }
 
-  bool _wait(int64_t c, UNIQUE_LOCK_T(lock)& l);
+  bool _wait(int64_t c, std::unique_lock<std::mutex>& l);
 
 public:
   /**
@@ -122,7 +121,7 @@ public:
     return _should_wait(c);
   }
   void reset_max(int64_t m) {
-    auto l = ceph::uniquely_lock(lock);
+    std::lock_guard l(lock);
     _reset_max(m);
   }
 };
@@ -199,14 +198,14 @@ class BackoffThrottle {
   uint64_t max = 0;
   uint64_t current = 0;
 
-  std::chrono::duration<double> _get_delay(uint64_t c) const;
+  ceph::timespan _get_delay(uint64_t c) const;
 
 public:
   /**
    * set_params
    *
    * Sets params.  If the params are invalid, returns false
-   * and populates errstream (if non-null) with a user compreshensible
+   * and populates errstream (if non-null) with a user comprehensible
    * explanation.
    */
   bool set_params(
@@ -218,8 +217,8 @@ public:
     uint64_t throttle_max,
     ostream *errstream);
 
-  std::chrono::duration<double> get(uint64_t c = 1);
-  std::chrono::duration<double> wait() {
+  ceph::timespan get(uint64_t c = 1);
+  ceph::timespan wait() {
     return get(0);
   }
   uint64_t put(uint64_t c = 1);
@@ -328,7 +327,7 @@ private:
 
   TidResult m_tid_result;
 
-  void complete_pending_ops(UNIQUE_LOCK_T(m_lock)& l);
+  void complete_pending_ops(std::unique_lock<std::mutex>& l);
   uint32_t waiters = 0;
 };
 
@@ -358,6 +357,7 @@ class TokenBucketThrottle {
   };
 
   CephContext *m_cct;
+  const std::string m_name;
   Bucket m_throttle;
   uint64_t m_avg = 0;
   uint64_t m_burst = 0;
@@ -407,10 +407,15 @@ class TokenBucketThrottle {
   double m_schedule_tick = 1.0;
 
 public:
-  TokenBucketThrottle(CephContext *cct, uint64_t capacity, uint64_t avg,
+  TokenBucketThrottle(CephContext *cct, const std::string &name,
+                      uint64_t capacity, uint64_t avg,
                       SafeTimer *timer, Mutex *timer_lock);
   
   ~TokenBucketThrottle();
+
+  const std::string &get_name() {
+    return m_name;
+  }
 
   template <typename T, typename I, void(T::*MF)(int, I*, uint64_t)>
   void add_blocker(uint64_t c, T *handler, I *item, uint64_t flag) {
@@ -422,16 +427,19 @@ public:
   
   template <typename T, typename I, void(T::*MF)(int, I*, uint64_t)>
   bool get(uint64_t c, T *handler, I *item, uint64_t flag) {
-    if (0 == m_avg)
+    if (0 == c)
       return false;
-  
+
     bool wait = false;
     uint64_t got = 0;
-    std::lock_guard<Mutex> lock(m_lock);
+    std::lock_guard lock(m_lock);
     if (!m_blockers.empty()) {
       // Keep the order of requests, add item after previous blocked requests.
       wait = true;
     } else {
+      if (0 == m_throttle.max || 0 == m_avg)
+        return false;
+  
       got = m_throttle.get(c);
       if (got < c) {
         // Not enough tokens, add a blocker for it.

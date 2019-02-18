@@ -204,9 +204,9 @@ public:
     pair<uint64_t,uint64_t> read_avg() const {
       uint64_t sum, count;
       do {
-	count = avgcount;
+	count = avgcount2;
 	sum = u64;
-      } while (avgcount2 != count);
+      } while (avgcount != count);
       return make_pair(sum, count);
     }
   };
@@ -282,13 +282,11 @@ private:
   int m_lower_bound;
   int m_upper_bound;
   std::string m_name;
-#ifndef WITH_SEASTAR
-  const std::string m_lock_name;
-#endif
 
   int prio_adjust = 0;
 
 #ifndef WITH_SEASTAR
+  const std::string m_lock_name;
   /** Protects m_data */
   ceph::mutex m_lock;
 #endif

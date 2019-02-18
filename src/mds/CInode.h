@@ -95,7 +95,7 @@ public:
   bool is_file() const    { return inode.is_file(); }
   bool is_symlink() const { return inode.is_symlink(); }
   bool is_dir() const     { return inode.is_dir(); }
-  static object_t get_object_name(inodeno_t ino, frag_t fg, const char *suffix);
+  static object_t get_object_name(inodeno_t ino, frag_t fg, std::string_view suffix);
 
   /* Full serialization for use in ".inode" root inode objects */
   void encode(bufferlist &bl, uint64_t features, const bufferlist *snap_blob=NULL) const;
@@ -176,7 +176,7 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
   static const int PIN_DIRWAITER =        24;
   static const int PIN_SCRUBQUEUE =       25;
 
-  const char *pin_name(int p) const override {
+  std::string_view pin_name(int p) const override {
     switch (p) {
     case PIN_DIRFRAG: return "dirfrag";
     case PIN_CAPS: return "caps";
@@ -285,7 +285,7 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
   class scrub_info_t : public scrub_stamp_info_t {
   public:
     CDentry *scrub_parent = nullptr;
-    MDSInternalContextBase *on_finish = nullptr;
+    MDSContext *on_finish = nullptr;
 
     bool last_scrub_dirty = false; /// are our stamps dirty with respect to disk state?
     bool scrub_in_progress = false; /// are we currently scrubbing?
@@ -326,7 +326,7 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
    */
   void scrub_initialize(CDentry *scrub_parent,
 			ScrubHeaderRef& header,
-			MDSInternalContextBase *f);
+			MDSContext *f);
   /**
    * Get the next dirfrag to scrub. Gives you a frag_t in output param which
    * you must convert to a CDir (and possibly load off disk).
@@ -343,7 +343,7 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
    * been returned from scrub_dirfrag_next but not sent back
    * via scrub_dirfrag_finished.
    */
-  void scrub_dirfrags_scrubbing(list<frag_t> *out_dirfrags);
+  void scrub_dirfrags_scrubbing(frag_vec_t *out_dirfrags);
   /**
    * Report to the CInode that a dirfrag it owns has been scrubbed. Call
    * this for every frag_t returned from scrub_dirfrag_next().
@@ -357,14 +357,17 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
    * @param c An out param which is filled in with a Context* that must
    * be complete()ed.
    */
-  void scrub_finished(MDSInternalContextBase **c);
+  void scrub_finished(MDSContext **c);
+
+  void scrub_aborted(MDSContext **c);
+
   /**
    * Report to the CInode that alldirfrags it owns have been scrubbed.
    */
   void scrub_children_finished() {
     scrub_infop->children_scrubbed = true;
   }
-  void scrub_set_finisher(MDSInternalContextBase *c) {
+  void scrub_set_finisher(MDSContext *c) {
     ceph_assert(!scrub_infop->on_finish);
     scrub_infop->on_finish = c;
   }
@@ -750,7 +753,7 @@ public:
   void set_ambiguous_auth() {
     state_set(STATE_AMBIGUOUSAUTH);
   }
-  void clear_ambiguous_auth(MDSInternalContextBase::vec& finished);
+  void clear_ambiguous_auth(MDSContext::vec& finished);
   void clear_ambiguous_auth();
 
   inodeno_t ino() const { return inode.ino; }
@@ -758,6 +761,7 @@ public:
   int d_type() const { return IFTODT(inode.mode); }
 
   mempool_inode& get_inode() { return inode; }
+  const mempool_inode& get_inode() const { return inode; }
   CDentry* get_parent_dn() { return parent; }
   const CDentry* get_parent_dn() const { return parent; }
   CDentry* get_projected_parent_dn() { return !projected_parent.empty() ? projected_parent.back() : parent; }
@@ -794,7 +798,7 @@ public:
   void mark_dirty(version_t projected_dirv, LogSegment *ls);
   void mark_clean();
 
-  void store(MDSInternalContextBase *fin);
+  void store(MDSContext *fin);
   void _stored(int r, version_t cv, Context *fin);
   /**
    * Flush a CInode to disk. This includes the backtrace, the parent
@@ -803,13 +807,13 @@ public:
    * @pre can_auth_pin()
    * @param fin The Context to call when the flush is completed.
    */
-  void flush(MDSInternalContextBase *fin);
-  void fetch(MDSInternalContextBase *fin);
+  void flush(MDSContext *fin);
+  void fetch(MDSContext *fin);
   void _fetched(bufferlist& bl, bufferlist& bl2, Context *fin);  
 
 
   void build_backtrace(int64_t pool, inode_backtrace_t& bt);
-  void store_backtrace(MDSInternalContextBase *fin, int op_prio=-1);
+  void store_backtrace(MDSContext *fin, int op_prio=-1);
   void _stored_backtrace(int r, version_t v, Context *fin);
   void fetch_backtrace(Context *fin, bufferlist *backtrace);
 protected:
@@ -858,15 +862,15 @@ public:
 
   // -- waiting --
 protected:
-  mempool::mds_co::compact_map<frag_t, MDSInternalContextBase::vec > waiting_on_dir;
+  mempool::mds_co::compact_map<frag_t, MDSContext::vec > waiting_on_dir;
 public:
-  void add_dir_waiter(frag_t fg, MDSInternalContextBase *c);
-  void take_dir_waiting(frag_t fg, MDSInternalContextBase::vec& ls);
+  void add_dir_waiter(frag_t fg, MDSContext *c);
+  void take_dir_waiting(frag_t fg, MDSContext::vec& ls);
   bool is_waiting_for_dir(frag_t fg) {
     return waiting_on_dir.count(fg);
   }
-  void add_waiter(uint64_t tag, MDSInternalContextBase *c) override;
-  void take_waiting(uint64_t tag, MDSInternalContextBase::vec& ls) override;
+  void add_waiter(uint64_t tag, MDSContext *c) override;
+  void take_waiting(uint64_t tag, MDSContext::vec& ls) override;
 
   // -- encode/decode helpers --
   void _encode_base(bufferlist& bl, uint64_t features);
@@ -876,7 +880,7 @@ public:
   void _encode_locks_state_for_replica(bufferlist& bl, bool need_recover);
   void _encode_locks_state_for_rejoin(bufferlist& bl, int rep);
   void _decode_locks_state(bufferlist::const_iterator& p, bool is_new);
-  void _decode_locks_rejoin(bufferlist::const_iterator& p, MDSInternalContextBase::vec& waiters,
+  void _decode_locks_rejoin(bufferlist::const_iterator& p, MDSContext::vec& waiters,
 			    std::list<SimpleLock*>& eval_locks, bool survivor);
 
   // -- import/export --
@@ -1075,7 +1079,7 @@ public:
   /* Freeze the inode. auth_pin_allowance lets the caller account for any
    * auth_pins it is itself holding/responsible for. */
   bool freeze_inode(int auth_pin_allowance=0);
-  void unfreeze_inode(MDSInternalContextBase::vec& finished);
+  void unfreeze_inode(MDSContext::vec& finished);
   void unfreeze_inode();
 
   void freeze_auth_pin();
@@ -1202,7 +1206,7 @@ public:
    * @param fin Context to call back on completion (or NULL)
    */
   void validate_disk_state(validated_data *results,
-                           MDSInternalContext *fin);
+                           MDSContext *fin);
   static void dump_validation_results(const validated_data& results,
                                       Formatter *f);
 private:

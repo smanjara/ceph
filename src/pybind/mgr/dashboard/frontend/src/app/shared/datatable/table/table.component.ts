@@ -1,5 +1,6 @@
 import {
   AfterContentChecked,
+  ChangeDetectorRef,
   Component,
   EventEmitter,
   Input,
@@ -47,6 +48,8 @@ export class TableComponent implements AfterContentChecked, OnInit, OnChanges, O
   perSecondTpl: TemplateRef<any>;
   @ViewChild('executingTpl')
   executingTpl: TemplateRef<any>;
+  @ViewChild('classAddingTpl')
+  classAddingTpl: TemplateRef<any>;
 
   // This is the array with the items to be shown.
   @Input()
@@ -99,6 +102,10 @@ export class TableComponent implements AfterContentChecked, OnInit, OnChanges, O
 
   @Input()
   autoSave = true;
+
+  // Only needed to set if the classAddingTpl is used
+  @Input()
+  customCss?: { [css: string]: number | string | ((any) => boolean) };
 
   /**
    * Should be a function to update the input data if undefined nothing will be triggered
@@ -153,7 +160,7 @@ export class TableComponent implements AfterContentChecked, OnInit, OnChanges, O
   // table columns after the browser window has been resized.
   private currentWidth: number;
 
-  constructor(private ngZone: NgZone) {}
+  constructor(private ngZone: NgZone, private cdRef: ChangeDetectorRef) {}
 
   ngOnInit() {
     this._addTemplates();
@@ -193,7 +200,7 @@ export class TableComponent implements AfterContentChecked, OnInit, OnChanges, O
     }
     if (_.isInteger(this.autoReload) && this.autoReload > 0) {
       this.ngZone.runOutsideAngular(() => {
-        this.reloadSubscriber = observableTimer(0, this.autoReload).subscribe((x) => {
+        this.reloadSubscriber = observableTimer(0, this.autoReload).subscribe(() => {
           this.ngZone.run(() => {
             return this.reloadData();
           });
@@ -311,6 +318,19 @@ export class TableComponent implements AfterContentChecked, OnInit, OnChanges, O
     this.cellTemplates.routerLink = this.routerLinkTpl;
     this.cellTemplates.perSecond = this.perSecondTpl;
     this.cellTemplates.executing = this.executingTpl;
+    this.cellTemplates.classAdding = this.classAddingTpl;
+  }
+
+  useCustomClass(value: any): string {
+    if (!this.customCss) {
+      throw new Error('Custom classes are not set!');
+    }
+    const classes = Object.keys(this.customCss);
+    const css = Object.values(this.customCss)
+      .map((v, i) => ((_.isFunction(v) && v(value)) || v === value) && classes[i])
+      .filter((x) => x)
+      .join(' ');
+    return _.isEmpty(css) ? undefined : css;
   }
 
   ngOnChanges(changes) {
@@ -432,6 +452,7 @@ export class TableComponent implements AfterContentChecked, OnInit, OnChanges, O
       this.table.onColumnSort({ sorts: this.userConfig.sorts });
     }
     this.table.recalculate();
+    this.cdRef.detectChanges();
   }
 
   createSortingDefinition(prop: TableColumnProp): SortPropDir[] {

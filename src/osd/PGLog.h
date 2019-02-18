@@ -60,19 +60,6 @@ struct PGLog : DoutPrefixProvider {
     virtual ~LogEntryHandler() {}
   };
 
-  /* Exceptions */
-  class read_log_and_missing_error : public buffer::error {
-  public:
-    explicit read_log_and_missing_error(const char *what) {
-      snprintf(buf, sizeof(buf), "read_log_and_missing_error: %s", what);
-    }
-    const char *what() const throw () override {
-      return buf;
-    }
-  private:
-    char buf[512];
-  };
-
 public:
   /**
    * IndexLog - adds in-memory index of the log, by oid.
@@ -1339,7 +1326,7 @@ public:
     list<pg_log_entry_t> entries;
     list<pg_log_dup_t> dups;
     if (p) {
-      for (p->seek_to_first(); p->valid() ; p->next(false)) {
+      for (p->seek_to_first(); p->valid() ; p->next()) {
 	// non-log pgmeta_oid keys are prefixed with _; skip those
 	if (p->key()[0] == '_')
 	  continue;

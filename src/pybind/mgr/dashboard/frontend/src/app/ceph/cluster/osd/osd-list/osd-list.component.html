@@ -8,20 +8,41 @@
               (updateSelection)="updateSelection($event)"
               [updateSelectionOnRefresh]="'never'">
       <div class="table-actions btn-toolbar">
-        <cd-table-actions [permission]="permission"
+        <cd-table-actions [permission]="permissions.osd"
                           [selection]="selection"
                           class="btn-group"
                           [tableActions]="tableActions">
         </cd-table-actions>
 
-        <button class="btn btn-sm btn-default btn-label tc_configureCluster"
-                type="button"
-                (click)="configureClusterAction()">
-          <i class="fa fa-fw fa-cog"
-             aria-hidden="true">
-          </i>
-          <ng-container i18n>Set Cluster-wide OSD Flags</ng-container>
-        </button>
+        <div class="btn-group"
+             dropdown>
+          <button type="button"
+                  class="btn btn-sm btn-default btn-label tc_configureCluster"
+                  (click)="configureClusterAction()">
+            <i class="fa fa-fw fa-cog"
+               aria-hidden="true">
+            </i>
+            <ng-container i18n>Set Cluster-wide Flags</ng-container>
+          </button>
+          <button type="button"
+                  dropdownToggle
+                  class="btn btn-sm btn-default dropdown-toggle dropdown-toggle-split">
+            <span class="caret caret-black"></span>
+          </button>
+          <ul *dropdownMenu
+              class="dropdown-menu"
+              role="menu">
+            <li role="menuitem">
+              <a class="dropdown-item"
+                 (click)="configureQosParamsAction()">
+                <i class="fa fa-fw fa-cog"
+                   aria-hidden="true">
+                </i>
+                <ng-container i18n>Set Cluster-wide Recovery Priority</ng-container>
+              </a>
+            </li>
+          </ul>
+        </div>
       </div>
 
       <cd-osd-details cdTableDetail
@@ -46,18 +67,14 @@
     </ng-template>
   </tab>
   <tab i18n-heading
+       *ngIf="permissions.grafana.read"
        heading="Overall Performance">
-    <cd-grafana [grafanaPath]="'lo02I1Aiz/osd-overview?'"
+    <cd-grafana [grafanaPath]="'osd-overview?'"
+                uid="lo02I1Aiz"
                 grafanaStyle="three">
     </cd-grafana>
   </tab>
 </tabset>
-
-<ng-template #osdUsageTpl
-             let-row="row">
-  <cd-usage-bar [totalBytes]="row.stats.stat_bytes"
-                [usedBytes]="row.stats.stat_bytes_used"></cd-usage-bar>
-</ng-template>
 
 <ng-template #markOsdConfirmationTpl
              let-markActionDescription="markActionDescription">
@@ -68,11 +85,9 @@
 <ng-template #criticalConfirmationTpl
              let-safeToDestroyResult="result"
              let-actionDescription="actionDescription">
-  <div *ngIf="!safeToDestroyResult['safe-to-destroy']"
+  <div *ngIf="!safeToDestroyResult['is_safe_to_destroy']"
        class="danger">
-    <cd-warning-panel>
-      {{ safeToDestroyResult.message }}
-    </cd-warning-panel>
+    <cd-warning-panel i18n>The OSD is not safe to destroy!</cd-warning-panel>
   </div>
   <ng-container i18n><strong>OSD {{ selection.first().id }}</strong> will be
   <strong>{{ actionDescription }}</strong> if you proceed.</ng-container>

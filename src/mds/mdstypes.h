@@ -1268,7 +1268,6 @@ struct string_snap_t {
   snapid_t snapid;
   string_snap_t() {}
   string_snap_t(std::string_view n, snapid_t s) : name(n), snapid(s) {}
-  string_snap_t(const char *n, snapid_t s) : name(n), snapid(s) {}
 
   void encode(bufferlist& bl) const;
   void decode(bufferlist::const_iterator& p);
@@ -1391,6 +1390,26 @@ struct cap_reconnect_t {
 };
 WRITE_CLASS_ENCODER(cap_reconnect_t)
 
+struct snaprealm_reconnect_t {
+  mutable ceph_mds_snaprealm_reconnect realm;
+
+  snaprealm_reconnect_t() {
+    memset(&realm, 0, sizeof(realm));
+  }
+  snaprealm_reconnect_t(inodeno_t ino, snapid_t seq, inodeno_t parent) {
+    realm.ino = ino;
+    realm.seq = seq;
+    realm.parent = parent;
+  }
+  void encode(bufferlist& bl) const;
+  void decode(bufferlist::const_iterator& bl);
+  void encode_old(bufferlist& bl) const;
+  void decode_old(bufferlist::const_iterator& bl);
+
+  void dump(Formatter *f) const;
+  static void generate_test_instances(list<snaprealm_reconnect_t*>& ls);
+};
+WRITE_CLASS_ENCODER(snaprealm_reconnect_t)
 
 // compat for pre-FLOCK feature
 struct old_ceph_mds_cap_reconnect {

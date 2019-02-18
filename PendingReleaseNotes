@@ -1,6 +1,91 @@
 14.0.1
 ------
 
+* ceph pg stat output has been modified in json
+  format to match ceph df output:
+  * "raw_bytes" field renamed to "total_bytes"
+  * "raw_bytes_avail" field renamed to "total_bytes_avail"
+  * "raw_bytes_avail" field renamed to "total_bytes_avail"
+  * "raw_bytes_used" field renamed to "total_bytes_raw_used"
+  * "total_bytes_used" field added to represent the space (accumulated over
+    all OSDs) allocated purely for data objects kept at block(slow) device
+  
+* ceph df [detail] output (GLOBAL section) has been modified in plain
+  format:
+  * new 'USED' column shows the space (accumulated over all OSDs) allocated
+    purely for data objects kept at block(slow) device.
+  * 'RAW USED' is now a sum of 'USED' space and space allocated/reserved at
+     block device for Ceph purposes, e.g. BlueFS part for BlueStore.
+
+* ceph df [detail] output (GLOBAL section) has been modified in json
+  format:
+  * 'total_used_bytes' column now shows the space (accumulated over all OSDs)
+    allocated purely for data objects kept at block(slow) device
+  * new 'total_used_raw_bytes' column shows a sum of 'USED' space and space
+    allocated/reserved at block device for Ceph purposes, e.g. BlueFS part for
+    BlueStore.
+
+* ceph df [detail] output (POOLS section) has been modified in plain
+  format:
+  * 'BYTES USED' column renamed to 'STORED'. Represents amount of data
+    stored by the user.
+  * 'USED' column now represent amount of space allocated purely for data
+    by all OSD nodes in KB.
+  * 'QUOTA BYTES', 'QUOTA OBJECTS' aren't showed anumore in non-detailed mode.
+  * new column 'USED COMPR' - amount of space allocated for compressed
+    data. I.e. comrpessed data plus all the allocation, replication and erasure
+    coding overhead.
+  * new column 'UNDER COMPR' - amount of data passed through compression
+   (summed over all replicas) and beneficial enough to be stored in a
+    compressed form.
+  * Some columns reordering
+
+* ceph df [detail] output (POOLS section) has been modified in json
+  format:
+  * 'bytes used' column renamed to 'stored'. Represents amount of data
+    stored by the user.
+  * 'raw bytes used' column renamed to "stored_raw". Totals of user data
+     over all OSD excluding degraded.
+  * new 'bytes_used' column now represent amount of space allocated by 
+    all OSD nodes.
+  * 'kb_used' column - the same as 'bytes_used' but in KB.
+  * new column 'compress_bytes_used' - amount of space allocated for compressed
+    data. I.e. comrpessed data plus all the allocation, replication and erasure
+    coding overhead.
+  * new column 'compress_under_bytes' amount of data passed through compression
+   (summed over all replicas) and beneficial enough to be stored in a
+    compressed form.
+
+* rados df [detail] output (POOLS section) has been modified in plain
+  format:
+  * 'USED' column now shows the space (accumulated over all OSDs) allocated
+    purely for data objects kept at block(slow) device.
+  * new column 'USED COMPR' - amount of space allocated for compressed
+    data. I.e. comrpessed data plus all the allocation, replication and erasure
+    coding overhead.
+  * new column 'UNDER COMPR' - amount of data passed through compression
+   (summed over all replicas) and beneficial enough to be stored in a
+    compressed form.
+
+* rados df [detail] output (POOLS section) has been modified in json
+  format:
+  * 'size_bytes' and 'size_kb' columns now show the space (accumulated
+    over all OSDs) allocated purely for data objects kept at block
+    device.
+  * new column 'compress_bytes_used' - amount of space allocated for compressed
+    data. I.e. comrpessed data plus all the allocation, replication and erasure
+    coding overhead.
+  * new column 'compress_under_bytes' amount of data passed through compression
+   (summed over all replicas) and beneficial enough to be stored in a
+    compressed form.
+
+* ceph pg dump output (totals section) has been modified in json
+  format:
+  * new 'USED' column shows the space (accumulated over all OSDs) allocated
+    purely for data objects kept at block(slow) device.
+  * 'USED_RAW' is now a sum of 'USED' space and space allocated/reserved at
+     block device for Ceph purposes, e.g. BlueFS part for BlueStore.
+
 * The 'ceph osd rm' command has been deprecated.  Users should use
   'ceph osd destroy' or 'ceph osd purge' (but after first confirming it is
   safe to do so via the 'ceph osd safe-to-destroy' command).
@@ -65,6 +150,40 @@
 
 * The `ceph` command line tool now accepts keyword arguments in
   the format "--arg=value" or "--arg value".
+
+* librados::IoCtx::nobjects_begin() and librados::NObjectIterator now communicate
+  errors by throwing a std::system_error exception instead of std::runtime_error.
+
+* the callback function passed to LibRGWFS.readdir() now accepts a ``flags``
+  parameter. it will be the last parameter passed to  ``readdir()` method.
+
+* The 'cephfs-data-scan scan_links' now automatically repair inotables and
+  snaptable.
+
+* Configuration values mon_warn_not_scrubbed/mon_warn_not_deep_scrubbed have been
+  renamed.  They are now mon_warn_pg_not_scrubbed_ratio/mon_warn_pg_not_deep_scrubbed_ratio
+  respectively.  This is to clarify that these warnings are related to pg scrubbing
+  and are a ratio of the related interval.  These options are now enabled by default.
+
+* The MDS cache trimming is now throttled. Dropping the MDS cache
+  via the `ceph tell mds.<foo> cache drop` command or large reductions in the
+  cache size will no longer cause service unavailability.
+
+* The CephFS MDS behavior with recalling caps has been significantly improved
+  to not attempt recalling too many caps at once, leading to instability.
+  MDS with a large cache (64GB+) should be more stable.
+
+* MDS now provides a config option "mds_max_caps_per_client" (default: 1M) to
+  limit the number of caps a client session may hold. Long running client
+  sessions with a large number of caps have been a source of instability in the
+  MDS when all of these caps need to be processed during certain session
+  events. It is recommended to not unnecessarily increase this value.
+
+* The MDS config mds_recall_state_timeout has been removed. Late client recall
+  warnings are now generated based on the number of caps the MDS has recalled
+  which have not been released. The new configs mds_recall_warning_threshold
+  (default: 32K) and mds_recall_warning_decay_rate (default: 60s) sets the
+  threshold for this warning.
 
 >=13.1.0
 --------
@@ -138,6 +257,40 @@
   option, you will need to adjust your config to set the new global option
   or revert to the default of .05 (5%).
 
+* By default, Ceph no longer issues a health warning when there are
+  misplaced objects (objects that are fully replicated but not stored
+  on the intended OSDs).  You can reenable the old warning by setting
+  ``mon_warn_on_misplaced`` to ``true``.
+
+* The ``ceph-create-keys`` tool is now obsolete.  The monitors
+  automatically create these keys on their own.  For now the script
+  prints a warning message and exits, but it will be removed in the
+  next release.  Note that ``ceph-create-keys`` would also write the
+  admin and bootstrap keys to /etc/ceph and /var/lib/ceph, but this
+  script no longer does that.  Any deployment tools that relied on
+  this behavior should instead make use of the ``ceph auth export
+  <entity-name>`` command for whichever key(s) they need.
+
+* The ``mon_osd_pool_ec_fast_read`` option has been renamed
+  ``osd_pool_default_ec_fast_read`` to be more consistent with other
+  ``osd_pool_default_*`` options that affect default values for newly
+  created RADOS pools.
+
+* The ``mon addr`` configuration option is now deprecated.  It can
+  still be used to specify an address for each monitor in the
+  ``ceph.conf`` file, but it only affects cluster creation and
+  bootstrapping, and it does not support listing multiple addresses
+  (e.g., both a v2 and v1 protocol address).  We strongly recommend
+  the option be removed and instead a single ``mon host`` option be
+  specified in the ``[global]`` section to allow daemons and clients
+  to discover the monitors.
+
+* New command `fs fail` has been added to quickly bring down a file
+  system. This is a single command that unsets the joinable flag on the file
+  system and brings down all of its ranks.
+
+* The `cache drop` admin socket command has been removed. The `ceph tell mds.X
+  cache drop` remains.
 
 Upgrading from Luminous
 -----------------------

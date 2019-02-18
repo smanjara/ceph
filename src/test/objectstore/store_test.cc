@@ -1048,6 +1048,7 @@ void StoreTest::doCompressionTest()
   //force fsck
   ch.reset();
   EXPECT_EQ(store->umount(), 0);
+  ASSERT_EQ(store->fsck(false), 0); // do fsck explicitly
   EXPECT_EQ(store->mount(), 0);
   ch = store->open_collection(cid);
   auto settingsBookmark = BookmarkSettings();
@@ -1069,6 +1070,7 @@ void StoreTest::doCompressionTest()
   //force fsck
   ch.reset();
   EXPECT_EQ(store->umount(), 0);
+  ASSERT_EQ(store->fsck(false), 0); // do fsck explicitly
   EXPECT_EQ(store->mount(), 0);
   ch = store->open_collection(cid);
   {
@@ -1312,6 +1314,7 @@ TEST_P(StoreTest, SimpleObjectTest) {
 }
 
 #if defined(WITH_BLUESTORE)
+
 TEST_P(StoreTestSpecificAUSize, BluestoreStatFSTest) {
   if(string(GetParam()) != "bluestore")
     return;
@@ -1319,11 +1322,17 @@ TEST_P(StoreTestSpecificAUSize, BluestoreStatFSTest) {
   SetVal(g_conf(), "bluestore_compression_mode", "force");
   // just a big number to disble gc
   SetVal(g_conf(), "bluestore_gc_enable_total_threshold", "100000");
+  SetVal(g_conf(), "bluestore_fsck_on_umount", "true");
   g_conf().apply_changes(nullptr);
   int r;
 
-  coll_t cid;
-  ghobject_t hoid(hobject_t(sobject_t("Object 1", CEPH_NOSNAP)));
+  int poolid = 4373;
+  coll_t cid = coll_t(spg_t(pg_t(0, poolid), shard_id_t::NO_SHARD));
+  ghobject_t hoid(hobject_t(sobject_t("Object 1", CEPH_NOSNAP),
+                            string(),
+			    0,
+			    poolid,
+			    string()));
   ghobject_t hoid2 = hoid;
   hoid2.hobj.snap = 1;
   {
@@ -1359,9 +1368,17 @@ TEST_P(StoreTestSpecificAUSize, BluestoreStatFSTest) {
     ASSERT_EQ( 0u, statfs.data_stored);
     ASSERT_EQ(g_conf()->bluestore_block_size, statfs.total);
     ASSERT_TRUE(statfs.available > 0u && statfs.available < g_conf()->bluestore_block_size);
+
+    struct store_statfs_t statfs_pool;
+    r = store->pool_statfs(poolid, &statfs_pool);
+    ASSERT_EQ(r, 0);
+    ASSERT_EQ( 0u, statfs_pool.allocated);
+    ASSERT_EQ( 0u, statfs_pool.data_stored);
+
     //force fsck
     ch.reset();
     EXPECT_EQ(store->umount(), 0);
+    ASSERT_EQ(store->fsck(false), 0); // do fsck explicitly
     EXPECT_EQ(store->mount(), 0);
     ch = store->open_collection(cid);
   }
@@ -1382,9 +1399,29 @@ TEST_P(StoreTestSpecificAUSize, BluestoreStatFSTest) {
     ASSERT_EQ(0, statfs.data_compressed);
     ASSERT_EQ(0, statfs.data_compressed_original);
     ASSERT_EQ(0, statfs.data_compressed_allocated);
+
+    struct store_statfs_t statfs_pool;
+    r = store->pool_statfs(poolid, &statfs_pool);
+    ASSERT_EQ(r, 0);
+    ASSERT_EQ(5, statfs_pool.data_stored);
+    ASSERT_EQ(0x10000, statfs_pool.allocated);
+    ASSERT_EQ(0, statfs_pool.data_compressed);
+    ASSERT_EQ(0, statfs_pool.data_compressed_original);
+    ASSERT_EQ(0, statfs_pool.data_compressed_allocated);
+
+    // accessing unknown pool
+    r = store->pool_statfs(poolid + 1, &statfs_pool);
+    ASSERT_EQ(r, 0);
+    ASSERT_EQ(0, statfs_pool.data_stored);
+    ASSERT_EQ(0, statfs_pool.allocated);
+    ASSERT_EQ(0, statfs_pool.data_compressed);
+    ASSERT_EQ(0, statfs_pool.data_compressed_original);
+    ASSERT_EQ(0, statfs_pool.data_compressed_allocated);
+
     //force fsck
     ch.reset();
     EXPECT_EQ(store->umount(), 0);
+    ASSERT_EQ(store->fsck(false), 0); // do fsck explicitly
     EXPECT_EQ(store->mount(), 0);
     ch = store->open_collection(cid);
   }
@@ -1406,9 +1443,19 @@ TEST_P(StoreTestSpecificAUSize, BluestoreStatFSTest) {
     ASSERT_LE(statfs.data_compressed, 0x10000);
     ASSERT_EQ(0x20000, statfs.data_compressed_original);
     ASSERT_EQ(statfs.data_compressed_allocated, 0x10000);
+
+    struct store_statfs_t statfs_pool;
+    r = store->pool_statfs(poolid, &statfs_pool);
+    ASSERT_EQ(r, 0);
+    ASSERT_EQ(0x30005, statfs_pool.data_stored);
+    ASSERT_EQ(0x30000, statfs_pool.allocated);
+    ASSERT_LE(statfs_pool.data_compressed, 0x10000);
+    ASSERT_EQ(0x20000, statfs_pool.data_compressed_original);
+    ASSERT_EQ(statfs_pool.data_compressed_allocated, 0x10000);
     //force fsck
     ch.reset();
     EXPECT_EQ(store->umount(), 0);
+    ASSERT_EQ(store->fsck(false), 0); // do fsck explicitly
     EXPECT_EQ(store->mount(), 0);
     ch = store->open_collection(cid);
   }
@@ -1428,9 +1475,19 @@ TEST_P(StoreTestSpecificAUSize, BluestoreStatFSTest) {
     ASSERT_LE(statfs.data_compressed, 0x10000);
     ASSERT_EQ(0x20000 - 9, statfs.data_compressed_original);
     ASSERT_EQ(statfs.data_compressed_allocated, 0x10000);
+
+    struct store_statfs_t statfs_pool;
+    r = store->pool_statfs(poolid, &statfs_pool);
+    ASSERT_EQ(r, 0);
+    ASSERT_EQ(0x30005 - 3 - 9, statfs_pool.data_stored);
+    ASSERT_EQ(0x30000, statfs_pool.allocated);
+    ASSERT_LE(statfs_pool.data_compressed, 0x10000);
+    ASSERT_EQ(0x20000 - 9, statfs_pool.data_compressed_original);
+    ASSERT_EQ(statfs_pool.data_compressed_allocated, 0x10000);
     //force fsck
     ch.reset();
     EXPECT_EQ(store->umount(), 0);
+    ASSERT_EQ(store->fsck(false), 0); // do fsck explicitly
     EXPECT_EQ(store->mount(), 0);
     ch = store->open_collection(cid);
   }
@@ -1453,9 +1510,19 @@ TEST_P(StoreTestSpecificAUSize, BluestoreStatFSTest) {
     ASSERT_LE(statfs.data_compressed, 0x10000);
     ASSERT_EQ(0x20000 - 9 - 0x1000, statfs.data_compressed_original);
     ASSERT_EQ(statfs.data_compressed_allocated, 0x10000);
+
+    struct store_statfs_t statfs_pool;
+    r = store->pool_statfs(poolid, &statfs_pool);
+    ASSERT_EQ(r, 0);
+    ASSERT_EQ(0x30001 - 9 + 0x1000, statfs_pool.data_stored);
+    ASSERT_EQ(0x40000, statfs_pool.allocated);
+    ASSERT_LE(statfs_pool.data_compressed, 0x10000);
+    ASSERT_EQ(0x20000 - 9 - 0x1000, statfs_pool.data_compressed_original);
+    ASSERT_EQ(statfs_pool.data_compressed_allocated, 0x10000);
     //force fsck
     ch.reset();
     EXPECT_EQ(store->umount(), 0);
+    ASSERT_EQ(store->fsck(false), 0); // do fsck explicitly
     EXPECT_EQ(store->mount(), 0);
     ch = store->open_collection(cid);
   }
@@ -1479,9 +1546,19 @@ TEST_P(StoreTestSpecificAUSize, BluestoreStatFSTest) {
     ASSERT_LE(statfs.data_compressed, 0);
     ASSERT_EQ(0, statfs.data_compressed_original);
     ASSERT_EQ(0, statfs.data_compressed_allocated);
+
+    struct store_statfs_t statfs_pool;
+    r = store->pool_statfs(poolid, &statfs_pool);
+    ASSERT_EQ(r, 0);
+    ASSERT_EQ(0x30000 + 0x1001, statfs_pool.data_stored);
+    ASSERT_EQ(0x40000, statfs_pool.allocated);
+    ASSERT_LE(statfs_pool.data_compressed, 0);
+    ASSERT_EQ(0, statfs_pool.data_compressed_original);
+    ASSERT_EQ(0, statfs_pool.data_compressed_allocated);
     //force fsck
     ch.reset();
     EXPECT_EQ(store->umount(), 0);
+    ASSERT_EQ(store->fsck(false), 0); // do fsck explicitly
     EXPECT_EQ(store->mount(), 0);
     ch = store->open_collection(cid);
   }
@@ -1499,9 +1576,19 @@ TEST_P(StoreTestSpecificAUSize, BluestoreStatFSTest) {
     ASSERT_EQ(0u, statfs.data_compressed_original);
     ASSERT_EQ(0u, statfs.data_compressed);
     ASSERT_EQ(0u, statfs.data_compressed_allocated);
+
+    struct store_statfs_t statfs_pool;
+    r = store->pool_statfs(poolid, &statfs_pool);
+    ASSERT_EQ(r, 0);
+    ASSERT_EQ(0u, statfs_pool.allocated);
+    ASSERT_EQ(0u, statfs_pool.data_stored);
+    ASSERT_EQ(0u, statfs_pool.data_compressed_original);
+    ASSERT_EQ(0u, statfs_pool.data_compressed);
+    ASSERT_EQ(0u, statfs_pool.data_compressed_allocated);
     //force fsck
     ch.reset();
     EXPECT_EQ(store->umount(), 0);
+    ASSERT_EQ(store->fsck(false), 0); // do fsck explicitly
     EXPECT_EQ(store->mount(), 0);
     ch = store->open_collection(cid);
   }
@@ -1525,15 +1612,29 @@ TEST_P(StoreTestSpecificAUSize, BluestoreStatFSTest) {
     ASSERT_LE(statfs.data_compressed, 0x10000);
     ASSERT_EQ(0x20000, statfs.data_compressed_original);
     ASSERT_EQ(0x10000, statfs.data_compressed_allocated);
+
+    struct store_statfs_t statfs_pool;
+    r = store->pool_statfs(poolid, &statfs_pool);
+    ASSERT_EQ(r, 0);
+    ASSERT_EQ(0x40000 - 2, statfs_pool.data_stored);
+    ASSERT_EQ(0x30000, statfs_pool.allocated);
+    ASSERT_LE(statfs_pool.data_compressed, 0x10000);
+    ASSERT_EQ(0x20000, statfs_pool.data_compressed_original);
+    ASSERT_EQ(0x10000, statfs_pool.data_compressed_allocated);
     //force fsck
     ch.reset();
     EXPECT_EQ(store->umount(), 0);
+    ASSERT_EQ(store->fsck(false), 0); // do fsck explicitly
     EXPECT_EQ(store->mount(), 0);
     ch = store->open_collection(cid);
   }
   {
     struct store_statfs_t statfs;
     r = store->statfs(&statfs);
+    ASSERT_EQ(r, 0);
+
+    struct store_statfs_t statfs_pool;
+    r = store->pool_statfs(poolid, &statfs_pool);
     ASSERT_EQ(r, 0);
 
     ObjectStore::Transaction t;
@@ -1549,6 +1650,156 @@ TEST_P(StoreTestSpecificAUSize, BluestoreStatFSTest) {
     ASSERT_GT(statfs2.data_compressed, statfs.data_compressed);
     ASSERT_GT(statfs2.data_compressed_original, statfs.data_compressed_original);
     ASSERT_EQ(statfs2.data_compressed_allocated, statfs.data_compressed_allocated);
+
+    struct store_statfs_t statfs2_pool;
+    r = store->pool_statfs(poolid, &statfs2_pool);
+    ASSERT_EQ(r, 0);
+    ASSERT_GT(statfs2_pool.data_stored, statfs_pool.data_stored);
+    ASSERT_EQ(statfs2_pool.allocated, statfs_pool.allocated);
+    ASSERT_GT(statfs2_pool.data_compressed, statfs_pool.data_compressed);
+    ASSERT_GT(statfs2_pool.data_compressed_original,
+      statfs_pool.data_compressed_original);
+    ASSERT_EQ(statfs2_pool.data_compressed_allocated,
+      statfs_pool.data_compressed_allocated);
+  }
+
+  {
+    // verify no
+    auto poolid2 = poolid + 1;
+    coll_t cid2 = coll_t(spg_t(pg_t(20, poolid2), shard_id_t::NO_SHARD));
+    ghobject_t hoid(hobject_t(sobject_t("Object 2", CEPH_NOSNAP),
+                              string(),
+			      0,
+			      poolid2,
+			      string()));
+    auto ch = store->create_new_collection(cid2);
+
+    {
+
+      struct store_statfs_t statfs1_pool;
+      int r = store->pool_statfs(poolid, &statfs1_pool);
+      ASSERT_EQ(r, 0);
+
+      cerr << "Creating second collection " << cid2 << std::endl;
+      ObjectStore::Transaction t;
+      t.create_collection(cid2, 0);
+      r = queue_transaction(store, ch, std::move(t));
+      ASSERT_EQ(r, 0);
+
+      t = ObjectStore::Transaction();
+      bufferlist bl;
+      bl.append("abcde");
+      t.write(cid2, hoid, 0, 5, bl);
+      r = queue_transaction(store, ch, std::move(t));
+      ASSERT_EQ(r, 0);
+
+      struct store_statfs_t statfs2_pool;
+      r = store->pool_statfs(poolid2, &statfs2_pool);
+      ASSERT_EQ(r, 0);
+      ASSERT_EQ(5, statfs2_pool.data_stored);
+      ASSERT_EQ(0x10000, statfs2_pool.allocated);
+      ASSERT_EQ(0, statfs2_pool.data_compressed);
+      ASSERT_EQ(0, statfs2_pool.data_compressed_original);
+      ASSERT_EQ(0, statfs2_pool.data_compressed_allocated);
+
+      struct store_statfs_t statfs1_pool_again;
+      r = store->pool_statfs(poolid, &statfs1_pool_again);
+      ASSERT_EQ(r, 0);
+      // adjust 'available' since it has changed
+      statfs1_pool_again.available = statfs1_pool.available;
+      ASSERT_EQ(statfs1_pool_again, statfs1_pool);
+
+      t = ObjectStore::Transaction();
+      t.remove(cid2, hoid);
+      t.remove_collection(cid2);
+      cerr << "Cleaning" << std::endl;
+      r = queue_transaction(store, ch, std::move(t));
+      ASSERT_EQ(r, 0);
+    }
+  }
+
+  {
+    // verify ops on temporary object
+
+    auto poolid3 = poolid + 2;
+    coll_t cid3 = coll_t(spg_t(pg_t(20, poolid3), shard_id_t::NO_SHARD));
+    ghobject_t hoid3(hobject_t(sobject_t("Object 3", CEPH_NOSNAP),
+			       string(),
+			       0,
+			       poolid3,
+			       string()));
+    ghobject_t hoid3_temp;
+    hoid3_temp.hobj = hoid3.hobj.make_temp_hobject("Object 3 temp");
+    auto ch3 = store->create_new_collection(cid3);
+    {
+      struct store_statfs_t statfs1_pool;
+      int r = store->pool_statfs(poolid, &statfs1_pool);
+      ASSERT_EQ(r, 0);
+
+      cerr << "Creating third collection " << cid3 << std::endl;
+      ObjectStore::Transaction t;
+      t.create_collection(cid3, 0);
+      r = queue_transaction(store, ch3, std::move(t));
+      ASSERT_EQ(r, 0);
+
+      t = ObjectStore::Transaction();
+      bufferlist bl;
+      bl.append("abcde");
+      t.write(cid3, hoid3_temp, 0, 5, bl);
+      r = queue_transaction(store, ch3, std::move(t));
+      ASSERT_EQ(r, 0);
+
+      struct store_statfs_t statfs3_pool;
+      r = store->pool_statfs(poolid3, &statfs3_pool);
+      ASSERT_EQ(r, 0);
+      ASSERT_EQ(5, statfs3_pool.data_stored);
+      ASSERT_EQ(0x10000, statfs3_pool.allocated);
+      ASSERT_EQ(0, statfs3_pool.data_compressed);
+      ASSERT_EQ(0, statfs3_pool.data_compressed_original);
+      ASSERT_EQ(0, statfs3_pool.data_compressed_allocated);
+
+      struct store_statfs_t statfs1_pool_again;
+      r = store->pool_statfs(poolid, &statfs1_pool_again);
+      ASSERT_EQ(r, 0);
+      // adjust 'available' since it has changed
+      statfs1_pool_again.available = statfs1_pool.available;
+      ASSERT_EQ(statfs1_pool_again, statfs1_pool);
+
+      //force fsck
+      ch.reset();
+      ch3.reset();
+      EXPECT_EQ(store->umount(), 0);
+      EXPECT_EQ(store->mount(), 0);
+      ch = store->open_collection(cid);
+      ch3 = store->open_collection(cid3);
+
+      t = ObjectStore::Transaction();
+      t.collection_move_rename(
+	cid3, hoid3_temp,
+	cid3, hoid3);
+      r = queue_transaction(store, ch3, std::move(t));
+      ASSERT_EQ(r, 0);
+
+      struct store_statfs_t statfs3_pool_again;
+      r = store->pool_statfs(poolid3, &statfs3_pool_again);
+      ASSERT_EQ(r, 0);
+      ASSERT_EQ(statfs3_pool_again, statfs3_pool);
+
+      //force fsck
+      ch.reset();
+      ch3.reset();
+      EXPECT_EQ(store->umount(), 0);
+      EXPECT_EQ(store->mount(), 0);
+      ch = store->open_collection(cid);
+      ch3 = store->open_collection(cid3);
+
+      t = ObjectStore::Transaction();
+      t.remove(cid3, hoid3);
+      t.remove_collection(cid3);
+      cerr << "Cleaning" << std::endl;
+      r = queue_transaction(store, ch3, std::move(t));
+      ASSERT_EQ(r, 0);
+    }
   }
 
   {
@@ -1568,6 +1819,15 @@ TEST_P(StoreTestSpecificAUSize, BluestoreStatFSTest) {
     ASSERT_EQ( 0u, statfs.data_compressed_original);
     ASSERT_EQ( 0u, statfs.data_compressed);
     ASSERT_EQ( 0u, statfs.data_compressed_allocated);
+
+    struct store_statfs_t statfs_pool;
+    r = store->pool_statfs(poolid, &statfs_pool);
+    ASSERT_EQ(r, 0);
+    ASSERT_EQ( 0u, statfs_pool.allocated);
+    ASSERT_EQ( 0u, statfs_pool.data_stored);
+    ASSERT_EQ( 0u, statfs_pool.data_compressed_original);
+    ASSERT_EQ( 0u, statfs_pool.data_compressed);
+    ASSERT_EQ( 0u, statfs_pool.data_compressed_allocated);
   }
 }
 
@@ -1654,6 +1914,7 @@ TEST_P(StoreTestSpecificAUSize, BluestoreFragmentedBlobTest) {
   //force fsck
   ch.reset();
   EXPECT_EQ(store->umount(), 0);
+  ASSERT_EQ(store->fsck(false), 0); // do fsck explicitly
   EXPECT_EQ(store->mount(), 0);
   ch = store->open_collection(cid);
 
@@ -1687,6 +1948,7 @@ TEST_P(StoreTestSpecificAUSize, BluestoreFragmentedBlobTest) {
   //force fsck
   ch.reset();
   EXPECT_EQ(store->umount(), 0);
+  ASSERT_EQ(store->fsck(false), 0); // do fsck explicitly
   EXPECT_EQ(store->mount(), 0);
   ch = store->open_collection(cid);
 
@@ -1752,6 +2014,7 @@ TEST_P(StoreTestSpecificAUSize, BluestoreFragmentedBlobTest) {
   //force fsck
   ch.reset();
   EXPECT_EQ(store->umount(), 0);
+  ASSERT_EQ(store->fsck(false), 0); // do fsck explicitly
   EXPECT_EQ(store->mount(), 0);
   ch = store->open_collection(cid);
 
@@ -3010,7 +3273,7 @@ TEST_P(StoreTest, OmapSimple) {
   {
     map<string,bufferlist> r;
     ObjectMap::ObjectMapIterator iter = store->get_omap_iterator(ch, hoid);
-    for (iter->seek_to_first(); iter->valid(); iter->next(false)) {
+    for (iter->seek_to_first(); iter->valid(); iter->next()) {
       r[iter->key()] = iter->value();
     }
     cout << "r: " << r << std::endl;
@@ -3020,7 +3283,7 @@ TEST_P(StoreTest, OmapSimple) {
   {
     map<string,bufferlist> r;
     ObjectMap::ObjectMapIterator iter = store->get_omap_iterator(ch, hoid);
-    for (iter->lower_bound(string()); iter->valid(); iter->next(false)) {
+    for (iter->lower_bound(string()); iter->valid(); iter->next()) {
       r[iter->key()] = iter->value();
     }
     cout << "r: " << r << std::endl;
@@ -4311,6 +4574,41 @@ void StoreTest::doSyntheticTest(
 
 TEST_P(StoreTest, Synthetic) {
   doSyntheticTest(10000, 400*1024, 40*1024, 0);
+}
+
+TEST_P(StoreTestSpecificAUSize, BlueFSExtenderTest) {
+  if(string(GetParam()) != "bluestore")
+    return;
+
+  SetVal(g_conf(), "bluestore_block_db_size", "0");
+  SetVal(g_conf(), "bluestore_block_wal_size", "0");
+  SetVal(g_conf(), "bluestore_bluefs_min", "12582912");
+  SetVal(g_conf(), "bluestore_bluefs_min_free", "4194304");
+  SetVal(g_conf(), "bluestore_bluefs_gift_ratio", "0");
+  SetVal(g_conf(), "bluestore_bluefs_min_ratio", "0");
+  SetVal(g_conf(), "bluestore_bluefs_balance_interval", "100000");
+  SetVal(g_conf(), "bluestore_bluefs_db_compatibility", "false");
+
+  g_conf().apply_changes(nullptr);
+
+  StartDeferred(4096);
+
+  doSyntheticTest(10000, 400*1024, 40*1024, 0);
+
+  BlueStore* bstore = NULL;
+  EXPECT_NO_THROW(bstore = dynamic_cast<BlueStore*> (store.get()));
+
+  // verify downgrades are broken and repair that
+  bstore->umount();
+  ASSERT_EQ(bstore->fsck(false), 0);
+
+  SetVal(g_conf(), "bluestore_bluefs_db_compatibility", "true");
+  g_conf().apply_changes(nullptr);
+
+  ASSERT_EQ(bstore->fsck(false), 1);
+  ASSERT_EQ(bstore->repair(false), 0);
+  ASSERT_EQ(bstore->fsck(false), 0);
+  bstore->mount();
 }
 
 #if defined(WITH_BLUESTORE)
@@ -7013,17 +7311,20 @@ namespace {
     return ghobject_t{hobject_t{soid, "", hash, pool, ""}};
   }
 }
-TEST_P(StoreTest, BluestoreRepairTest) {
+
+TEST_P(StoreTestSpecificAUSize, BluestoreRepairTest) {
   if (string(GetParam()) != "bluestore")
     return;
   const size_t offs_base = 65536 / 2;
 
   SetVal(g_conf(), "bluestore_fsck_on_mount", "false");
   SetVal(g_conf(), "bluestore_fsck_on_umount", "false");
-  SetVal(g_conf(), "bluestore_max_blob_size",
+  SetVal(g_conf(), "bluestore_max_blob_size", 
     stringify(2 * offs_base).c_str());
   SetVal(g_conf(), "bluestore_extent_map_shard_max_size", "12000");
-  g_ceph_context->_conf.apply_changes(nullptr);
+  SetVal(g_conf(), "bluestore_no_per_pool_stats_tolerance", "enforce");
+
+  StartDeferred(0x10000);
 
   BlueStore* bstore = dynamic_cast<BlueStore*> (store.get());
 
@@ -7092,7 +7393,7 @@ TEST_P(StoreTest, BluestoreRepairTest) {
   statfs.allocated += 0x10000;
   statfs.data_stored += 0x10000;
   ASSERT_FALSE(statfs0 == statfs);
-  bstore->inject_statfs(statfs);
+  bstore->inject_statfs("bluestore_statfs", statfs);
   bstore->umount();
 
   ASSERT_EQ(bstore->fsck(false), 1);
@@ -7159,14 +7460,22 @@ TEST_P(StoreTest, BluestoreRepairTest) {
     ASSERT_EQ(bstore->fsck(false), 3);
     ASSERT_LE(bstore->repair(false), 0);
     ASSERT_EQ(bstore->fsck(false), 0);
-    SetVal(g_conf(), "bluestore_debug_inject_bug21040", "true");
-    g_ceph_context->_conf.apply_changes(nullptr);
   }
 
+  // enable per-pool stats collection hence causing fsck to fail
+  cerr << "per-pool statfs" << std::endl;
+  SetVal(g_conf(), "bluestore_no_per_pool_stats_tolerance", "until_fsck");
+  g_ceph_context->_conf.apply_changes(nullptr);
+
+  ASSERT_EQ(bstore->fsck(false), 2);
+  ASSERT_EQ(bstore->repair(false), 0);
+  ASSERT_EQ(bstore->fsck(false), 0);
 
   cerr << "Completing" << std::endl;
   bstore->mount();
+
 }
+
 TEST_P(StoreTest, BluestoreStatistics) {
   if (string(GetParam()) != "bluestore")
     return;
@@ -7327,11 +7636,11 @@ TEST_P(StoreTest, allocateBlueFSTest) {
 
   uint64_t to_alloc = g_conf().get_val<Option::size_t>("bluefs_alloc_size");
 
-  int r = bstore->allocate_bluefs_freespace(to_alloc);
+  int r = bstore->allocate_bluefs_freespace(to_alloc, nullptr);
   ASSERT_EQ(r, 0);
-  r = bstore->allocate_bluefs_freespace(statfs.total);
+  r = bstore->allocate_bluefs_freespace(statfs.total, nullptr);
   ASSERT_EQ(r, -ENOSPC);
-  r = bstore->allocate_bluefs_freespace(to_alloc * 16);
+  r = bstore->allocate_bluefs_freespace(to_alloc * 16, nullptr);
   ASSERT_EQ(r, 0);
   store->umount();
   ASSERT_EQ(store->fsck(false), 0); // do fsck explicitly

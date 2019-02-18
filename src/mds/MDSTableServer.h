@@ -33,7 +33,7 @@ private:
     set<mds_rank_t> notify_ack_gather;
     mds_rank_t mds;
     MMDSTableRequest::ref reply;
-    MDSInternalContextBase *onfinish;
+    MDSContext *onfinish;
     notify_info_t() : reply(NULL), onfinish(NULL) {}
   };
   map<version_t, notify_info_t> pending_notifies;
@@ -93,6 +93,11 @@ public:
   MDSTableServer(MDSRank *m, int tab) :
     MDSTable(m, get_mdstable_name(tab), false), table(tab), recovered(false) {}
   ~MDSTableServer() override {}
+
+  void reset_state() override {
+    pending_for_mds.clear();
+    ++version;
+  }
 
   void handle_request(const MMDSTableRequest::const_ref &m);
   void do_server_update(bufferlist& bl);

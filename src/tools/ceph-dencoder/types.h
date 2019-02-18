@@ -1,3 +1,5 @@
+#include "acconfig.h"
+
 #include "ceph_time.h"
 TYPE(real_time_wrapper)
 TYPE(coarse_real_time_wrapper)
@@ -204,6 +206,7 @@ TYPE(FSSuperblock)
 TYPE(kstore_cnode_t)
 TYPE(kstore_onode_t)
 
+#ifdef WITH_CEPHFS
 #include "mds/JournalPointer.h"
 TYPE(JournalPointer)
 
@@ -313,6 +316,7 @@ TYPE_FEATUREFUL_NOCOPY(ETableServer)
 
 #include "mds/events/EUpdate.h"
 TYPE_FEATUREFUL_NOCOPY(EUpdate)
+#endif // WITH_CEPHFS
 
 #ifdef WITH_RBD
 #include "librbd/journal/Types.h"
@@ -506,6 +510,7 @@ TYPE(cls_refcount_put_op)
 TYPE(cls_refcount_set_op)
 TYPE(cls_refcount_read_op)
 TYPE(cls_refcount_read_ret)
+TYPE(obj_refcount)
 
 #include "journal/Entry.h"
 TYPE(journal::Entry)

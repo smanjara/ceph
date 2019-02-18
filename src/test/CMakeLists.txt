@@ -1,6 +1,7 @@
 include(AddCephTest)
 
-set(UNITTEST_LIBS GMock::Main GMock::GMock GTest::GTest ${CMAKE_THREAD_LIBS_INIT} ${CMAKE_DL_LIBS})
+set(UNITTEST_LIBS GMock::Main GMock::GMock GTest::GTest ${CMAKE_THREAD_LIBS_INIT} 
+    ${GSSAPI_LIBRARIES} ${OPENLDAP_LIBRARIES} ${CMAKE_DL_LIBS})
 
 add_library(unit-main OBJECT unit.cc)
 target_include_directories(unit-main PRIVATE
@@ -38,7 +39,9 @@ if(WITH_RBD)
   add_subdirectory(librbd)
 endif(WITH_RBD)
 add_subdirectory(messenger)
-add_subdirectory(mds)
+if (WITH_CEPHFS)
+  add_subdirectory(mds)
+endif()
 add_subdirectory(mon)
 add_subdirectory(mgr)
 add_subdirectory(msgr)
@@ -485,7 +488,6 @@ add_dependencies(tests
   crushtool
   ceph-conf
   rados
-  ceph-mds
   monmaptool
   ceph-osd
   ceph-dencoder
@@ -500,6 +502,9 @@ add_dependencies(tests
   ceph_erasure_code_non_regression
   ceph_erasure_code
   cython${PY_BINDING_INFIX}_modules)
+if (WITH_CEPHFS)
+  add_dependencies(tests ceph-mds)
+endif()
 if(WITH_MGR)
   add_dependencies(tests ceph-mgr)
 endif()
@@ -530,7 +535,6 @@ add_ceph_test(test_objectstore_memstore.sh ${CMAKE_CURRENT_SOURCE_DIR}/test_obje
 #add_ceph_test(test_pidfile.sh ${CMAKE_CURRENT_SOURCE_DIR}/test_pidfile.sh)
 
 add_ceph_test(smoke.sh ${CMAKE_CURRENT_SOURCE_DIR}/smoke.sh)
-add_ceph_test(unittest_bufferlist.sh ${CMAKE_SOURCE_DIR}/src/unittest_bufferlist.sh)
 
 # XXX are these safe to remove? they used to be around for ceph-disk tox testing
 set(env_vars_for_tox_tests
@@ -555,6 +559,16 @@ if(WITH_MGR)
   list(APPEND tox_tests run-tox-mgr-insights)
   set(MGR_INSIGHTS_VIRTUALENV ${CEPH_BUILD_VIRTUALENV}/mgr-insights-virtualenv)
   list(APPEND env_vars_for_tox_tests MGR_INSIGHTS_VIRTUALENV=${MGR_INSIGHTS_VIRTUALENV})
+
+  add_test(NAME run-tox-mgr-ansible COMMAND bash ${CMAKE_SOURCE_DIR}/src/pybind/mgr/ansible/run-tox.sh)
+  list(APPEND tox_tests run-tox-mgr-ansible)
+  set(MGR_ANSIBLE_VIRTUALENV ${CEPH_BUILD_VIRTUALENV}/mgr-ansible-virtualenv)
+  list(APPEND env_vars_for_tox_tests MGR_ANSIBLE_VIRTUALENV=${MGR_ANSIBLE_VIRTUALENV})
+
+  add_test(NAME run-tox-mgr-orchestrator_cli COMMAND bash ${CMAKE_SOURCE_DIR}/src/pybind/mgr/orchestrator_cli/run-tox.sh)
+  list(APPEND tox_tests run-tox-mgr-orchestrator_cli)
+  set(MGR_ORCHESTRATOR_CLI_VIRTUALENV ${CEPH_BUILD_VIRTUALENV}/mgr-orchestrator_cli-virtualenv)
+  list(APPEND env_vars_for_tox_tests MGR_ORCHESTRATOR_CLI_VIRTUALENV=${MGR_ORCHESTRATOR_CLI_VIRTUALENV})
 endif()
 
 set_property(

@@ -121,6 +121,8 @@ public:
 
   int bindv(const entity_addrvec_t& bind_addrs) override;
 
+  bool should_use_msgr2() override;
+
   /** @} Configuration functions */
 
   /**
@@ -137,11 +139,7 @@ public:
    * @defgroup Messaging
    * @{
    */
-  int send_to(Message *m, int type, const entity_addrvec_t& addrs) override {
-    Mutex::Locker l(lock);
-
-    return _send_to(m, type, addrs);
-  }
+  int send_to(Message *m, int type, const entity_addrvec_t& addrs) override;
 
   /** @} // Messaging */
 
@@ -216,9 +214,11 @@ private:
   void submit_message(Message *m, AsyncConnectionRef con,
                       const entity_addrvec_t& dest_addrs, int dest_type);
 
-  int _send_to(Message *m, int type, const entity_addrvec_t& addrs);
   void _finish_bind(const entity_addrvec_t& bind_addrs,
 		    const entity_addrvec_t& listen_addrs);
+
+  entity_addrvec_t _filter_addrs(int type,
+				 const entity_addrvec_t& addrs);
 
  private:
   static const uint64_t ReapDeadConnectionThreshold = 5;
@@ -350,32 +350,17 @@ public:
     return _lookup_conn(k);
   }
 
-  int accept_conn(AsyncConnectionRef conn) {
-    Mutex::Locker l(lock);
-    auto it = conns.find(conn->peer_addrs);
-    if (it != conns.end()) {
-      AsyncConnectionRef existing = it->second;
-
-      // lazy delete, see "deleted_conns"
-      // If conn already in, we will return 0
-      Mutex::Locker l(deleted_lock);
-      if (deleted_conns.erase(existing)) {
-        existing->get_perf_counter()->dec(l_msgr_active_connections);
-        conns.erase(it);
-      } else if (conn != existing) {
-        return -1;
-      }
-    }
-    conns[conn->peer_addrs] = conn;
-    conn->get_perf_counter()->inc(l_msgr_active_connections);
-    accepting_conns.erase(conn);
-    return 0;
-  }
-
-  void learned_addr(const entity_addr_t &peer_addr_for_me);
-  void add_accept(Worker *w, ConnectedSocket cli_socket, entity_addr_t &addr);
+  int accept_conn(AsyncConnectionRef conn);
+  bool learned_addr(const entity_addr_t &peer_addr_for_me);
+  void add_accept(Worker *w, ConnectedSocket cli_socket,
+		  const entity_addr_t &listen_addr,
+		  const entity_addr_t &peer_addr);
   NetworkStack *get_stack() {
     return stack;
+  }
+
+  uint64_t get_nonce() const {
+    return nonce;
   }
 
   /**

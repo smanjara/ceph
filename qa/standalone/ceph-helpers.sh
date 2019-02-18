@@ -256,7 +256,9 @@ function kill_daemon() {
     local send_signal=$2
     local delays=${3:-0.1 0.2 1 1 1 2 3 5 5 5 10 10 20 60 60 60 120}
     local exit_code=1
-    for try in $delays ; do
+    # In order to try after the last large sleep add 0 at the end so we check
+    # one last time before dropping out of the loop
+    for try in $delays 0 ; do
          if kill -$send_signal $pid 2> /dev/null ; then
             exit_code=1
          else
@@ -390,6 +392,17 @@ function test_kill_daemons() {
     kill_daemons $dir TERM || return 1
     ! timeout 5 ceph status || return 1
     teardown $dir || return 1
+}
+
+#
+# return a random TCP port which is not used yet
+#
+# please note, there could be racing if we use this function for
+# a free port, and then try to bind on this port.
+#
+function get_unused_port() {
+    local ip=127.0.0.1
+    python3 -c "import socket; s=socket.socket(); s.bind(('$ip', 0)); print(s.getsockname()[1]); s.close()"
 }
 
 #######################################################################
@@ -1137,6 +1150,35 @@ function test_get_not_primary() {
 
 #######################################################################
 
+function _objectstore_tool_nodown() {
+    local dir=$1
+    shift
+    local id=$1
+    shift
+    local osd_data=$dir/$id
+
+    local journal_args
+    if [ "$objectstore_type" == "filestore" ]; then
+	journal_args=" --journal-path $osd_data/journal"
+    fi
+    ceph-objectstore-tool \
+        --data-path $osd_data \
+        $journal_args \
+        "$@" || return 1
+}
+
+function _objectstore_tool_nowait() {
+    local dir=$1
+    shift
+    local id=$1
+    shift
+
+    kill_daemons $dir TERM osd.$id >&2 < /dev/null || return 1
+
+    _objectstore_tool_nodown $dir $id "$@" || return 1
+    activate_osd $dir $id $ceph_osd_args >&2 || return 1
+}
+
 ##
 # Run ceph-objectstore-tool against the OSD **id** using the data path
 # **dir**. The OSD is killed with TERM prior to running
@@ -1158,21 +1200,8 @@ function objectstore_tool() {
     shift
     local id=$1
     shift
-    local osd_data=$dir/$id
 
-    local osd_type=$(cat $osd_data/type)
-
-    kill_daemons $dir TERM osd.$id >&2 < /dev/null || return 1
-
-    local journal_args
-    if [ "$objectstore_type" == "filestore" ]; then
-	journal_args=" --journal-path $osd_data/journal"
-    fi
-    ceph-objectstore-tool \
-        --data-path $osd_data \
-        $journal_args \
-        "$@" || return 1
-    activate_osd $dir $id $ceph_osd_args >&2 || return 1
+    _objectstore_tool_nowait $dir $id "$@" || return 1
     wait_for_clean >&2
 }
 
@@ -1482,6 +1511,7 @@ function test_get_timeout_delays() {
 # @return 0 if the cluster is clean, 1 otherwise
 #
 function wait_for_clean() {
+    local cmd=$1
     local num_active_clean=-1
     local cur_active_clean
     local -a delays=($(get_timeout_delays $WAIT_FOR_CLEAN_TIMEOUT .1))
@@ -1507,6 +1537,8 @@ function wait_for_clean() {
             ceph report
             return 1
         fi
+	# eval is a no-op if cmd is empty
+        eval $cmd
         sleep ${delays[$loop]}
         loop+=1
     done
@@ -1568,6 +1600,7 @@ function test_wait_for_health_ok() {
     run_mgr $dir x --mon_pg_warn_min_per_osd=0 || return 1
     run_osd $dir 0 || return 1
     kill_daemons $dir TERM osd || return 1
+    ceph osd down 0 || return 1
     ! TIMEOUT=1 wait_for_health_ok || return 1
     activate_osd $dir 0 || return 1
     wait_for_health_ok || return 1
@@ -1933,10 +1966,10 @@ function test_flush_pg_stats()
     rados -p rbd put obj /etc/group
     flush_pg_stats || return 1
     local jq_filter='.pools | .[] | select(.name == "rbd") | .stats'
-    raw_bytes_used=`ceph df detail --format=json | jq "$jq_filter.raw_bytes_used"`
-    bytes_used=`ceph df detail --format=json | jq "$jq_filter.bytes_used"`
-    test $raw_bytes_used -gt 0 || return 1
-    test $raw_bytes_used == $bytes_used || return 1
+    stored=`ceph df detail --format=json | jq "$jq_filter.stored"`
+    stored_raw=`ceph df detail --format=json | jq "$jq_filter.stored_raw"`
+    test $stored -gt 0 || return 1
+    test $stored == $stored_raw || return 1
     teardown $dir
 }
 

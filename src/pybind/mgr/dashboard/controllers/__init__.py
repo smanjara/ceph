@@ -24,6 +24,7 @@ from ..security import Scope, Permission
 from ..tools import wraps, getargspec, TaskManager, get_request_body_params
 from ..exceptions import ScopeNotValid, PermissionNotValid
 from ..services.auth import AuthManager, JwtManager
+from ..plugins import PLUGIN_MANAGER
 
 
 class Controller(object):
@@ -177,6 +178,9 @@ def load_controllers():
                     continue
                 controllers.append(cls)
 
+    for clist in PLUGIN_MANAGER.hook.get_controllers() or []:
+        controllers.extend(clist)
+
     return controllers
 
 
@@ -282,7 +286,7 @@ class Task(object):
     def __init__(self, name, metadata, wait_for=5.0, exception_handler=None):
         self.name = name
         if isinstance(metadata, list):
-            self.metadata = dict([(e[1:-1], e) for e in metadata])
+            self.metadata = {e[1:-1]: e for e in metadata}
         else:
             self.metadata = metadata
         self.wait_for = wait_for
@@ -300,7 +304,7 @@ class Task(object):
                 if param['name'] in kwargs:
                     arg_map[param['name']] = kwargs[param['name']]
                 else:
-                    assert not param['required']
+                    assert not param['required'], "{0} is required".format(param['name'])
                     arg_map[param['name']] = param['default']
 
             if param['name'] in arg_map:
@@ -321,7 +325,13 @@ class Task(object):
                         pos = int(param)
                         md[k] = arg_map[pos]
                     except ValueError:
-                        md[k] = arg_map[v[1:-1]]
+                        if param.find('.') == -1:
+                            md[k] = arg_map[param]
+                        else:
+                            path = param.split('.')
+                            md[k] = arg_map[path[0]]
+                            for i in range(1, len(path)):
+                                md[k] = md[k][path[i]]
                 else:
                     md[k] = v
             task = TaskManager.run(self.name, md, func, args, kwargs,
@@ -602,7 +612,7 @@ class RESTController(BaseController):
     # should be overridden by subclasses.
     # to specify a composite id (two parameters) use '/'. e.g., "param1/param2".
     # If subclasses don't override this property we try to infer the structure
-    # of the resourse ID.
+    # of the resource ID.
     RESOURCE_ID = None
 
     _permission_map = {

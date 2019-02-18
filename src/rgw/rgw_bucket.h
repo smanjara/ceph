@@ -34,7 +34,8 @@ extern int rgw_bucket_parse_bucket_instance(const string& bucket_instance, strin
 extern int rgw_bucket_parse_bucket_key(CephContext *cct, const string& key,
                                        rgw_bucket* bucket, int *shard_id);
 
-extern int rgw_bucket_instance_remove_entry(RGWRados *store, string& entry, RGWObjVersionTracker *objv_tracker);
+extern int rgw_bucket_instance_remove_entry(RGWRados *store, const string& entry,
+					    RGWObjVersionTracker *objv_tracker);
 extern void rgw_bucket_instance_key_to_oid(string& key);
 extern void rgw_bucket_instance_oid_to_key(string& oid);
 
@@ -139,7 +140,7 @@ public:
   /**
    * Remove a bucket from the user's list by name.
    */
-  void remove(string& name) {
+  void remove(const string& name) {
     map<string, RGWBucketEnt>::iterator iter;
     iter = buckets.find(name);
     if (iter != buckets.end()) {
@@ -162,6 +163,27 @@ public:
 WRITE_CLASS_ENCODER(RGWUserBuckets)
 
 class RGWMetadataManager;
+class RGWMetadataHandler;
+
+class RGWBucketMetaHandlerAllocator {
+public:
+  static RGWMetadataHandler *alloc();
+};
+
+class RGWBucketInstanceMetaHandlerAllocator {
+public:
+  static RGWMetadataHandler *alloc();
+};
+
+class RGWArchiveBucketMetaHandlerAllocator {
+public:
+  static RGWMetadataHandler *alloc();
+};
+
+class RGWArchiveBucketInstanceMetaHandlerAllocator {
+public:
+  static RGWMetadataHandler *alloc();
+};
 
 extern void rgw_bucket_init(RGWMetadataManager *mm);
 /**
@@ -337,6 +359,12 @@ public:
 			 RGWFormatterFlusher& flusher,
 			 bool warnings_only = false);
   static int set_quota(RGWRados *store, RGWBucketAdminOpState& op_state);
+
+  static int list_stale_instances(RGWRados *store, RGWBucketAdminOpState& op_state,
+				  RGWFormatterFlusher& flusher);
+
+  static int clear_stale_instances(RGWRados *store, RGWBucketAdminOpState& op_state,
+				   RGWFormatterFlusher& flusher);
 };
 
 

@@ -24,6 +24,7 @@
 #include <sys/uio.h>
 
 #include "include/buffer.h"
+#include "include/buffer_raw.h"
 #include "include/utime.h"
 #include "include/coredumpctl.h"
 #include "include/encoding.h"
@@ -44,67 +45,33 @@
 static char cmd[128];
 
 TEST(Buffer, constructors) {
-  bool ceph_buffer_track = get_env_bool("CEPH_BUFFER_TRACK");
   unsigned len = 17;
-  uint64_t history_alloc_bytes = 0;
-  uint64_t history_alloc_num = 0;
   //
   // buffer::create
   //
-  if (ceph_buffer_track) {
-    EXPECT_EQ(0, buffer::get_total_alloc());
-  }
-  
   {
     bufferptr ptr(buffer::create(len));
-    history_alloc_bytes += len;
-    history_alloc_num++;
     EXPECT_EQ(len, ptr.length());
-    if (ceph_buffer_track) {
-      EXPECT_EQ(len, (unsigned)buffer::get_total_alloc());
-      EXPECT_EQ(history_alloc_bytes, buffer::get_history_alloc_bytes());
-      EXPECT_EQ(history_alloc_num, buffer::get_history_alloc_num());
-    }
   }
   //
   // buffer::claim_char
   //
-  if (ceph_buffer_track) {
-    EXPECT_EQ(0, buffer::get_total_alloc());
-  }
-  
   {
     char* str = new char[len];
     ::memset(str, 'X', len);
     bufferptr ptr(buffer::claim_char(len, str));
-    if (ceph_buffer_track) {
-      EXPECT_EQ(len, (unsigned)buffer::get_total_alloc());
-      EXPECT_EQ(history_alloc_bytes, buffer::get_history_alloc_bytes());
-      EXPECT_EQ(history_alloc_num, buffer::get_history_alloc_num());
-    }
     EXPECT_EQ(len, ptr.length());
     EXPECT_EQ(str, ptr.c_str());
     bufferptr clone = ptr.clone();
-    history_alloc_bytes += len;
-    history_alloc_num++;
     EXPECT_EQ(0, ::memcmp(clone.c_str(), ptr.c_str(), len));
     delete [] str;
   }
   //
   // buffer::create_static
   //
-  if (ceph_buffer_track) {
-    EXPECT_EQ(0, buffer::get_total_alloc());
-  }
-  
   {
     char* str = new char[len];
     bufferptr ptr(buffer::create_static(len, str));
-    if (ceph_buffer_track) {
-      EXPECT_EQ(0, buffer::get_total_alloc());
-      EXPECT_EQ(history_alloc_bytes, buffer::get_history_alloc_bytes());
-      EXPECT_EQ(history_alloc_num, buffer::get_history_alloc_num());
-    }
     EXPECT_EQ(len, ptr.length());
     EXPECT_EQ(str, ptr.c_str());
     delete [] str;
@@ -112,19 +79,8 @@ TEST(Buffer, constructors) {
   //
   // buffer::create_malloc
   //
-  if (ceph_buffer_track) {
-    EXPECT_EQ(0, buffer::get_total_alloc());
-  }
-  
   {
     bufferptr ptr(buffer::create_malloc(len));
-    history_alloc_bytes += len;
-    history_alloc_num++;
-    if (ceph_buffer_track) {
-      EXPECT_EQ(len, (unsigned)buffer::get_total_alloc());
-      EXPECT_EQ(history_alloc_bytes, buffer::get_history_alloc_bytes());
-      EXPECT_EQ(history_alloc_num, buffer::get_history_alloc_num());
-    }
     EXPECT_EQ(len, ptr.length());
     // this doesn't throw on my x86_64 wheezy box --sage
     //EXPECT_THROW(buffer::create_malloc((unsigned)ULLONG_MAX), buffer::bad_alloc);
@@ -132,79 +88,37 @@ TEST(Buffer, constructors) {
   //
   // buffer::claim_malloc
   //
-  if (ceph_buffer_track) {
-    EXPECT_EQ(0, buffer::get_total_alloc());
-  }
-  
   {
     char* str = (char*)malloc(len);
     ::memset(str, 'X', len);
     bufferptr ptr(buffer::claim_malloc(len, str));
-    if (ceph_buffer_track) {
-      EXPECT_EQ(len, (unsigned)buffer::get_total_alloc());
-      EXPECT_EQ(history_alloc_bytes, buffer::get_history_alloc_bytes());
-      EXPECT_EQ(history_alloc_num, buffer::get_history_alloc_num());
-    }
     EXPECT_EQ(len, ptr.length());
     EXPECT_EQ(str, ptr.c_str());
     bufferptr clone = ptr.clone();
-    history_alloc_bytes += len;
-    history_alloc_num++;
     EXPECT_EQ(0, ::memcmp(clone.c_str(), ptr.c_str(), len));
   }
   //
   // buffer::copy
   //
-  if (ceph_buffer_track) {
-    EXPECT_EQ(0, buffer::get_total_alloc());
-  }
-  
   {
     const std::string expected(len, 'X');
     bufferptr ptr(buffer::copy(expected.c_str(), expected.size()));
-    history_alloc_bytes += len;
-    history_alloc_num++;
-    if (ceph_buffer_track) {
-      EXPECT_EQ(len, (unsigned)buffer::get_total_alloc());
-      EXPECT_EQ(history_alloc_bytes, buffer::get_history_alloc_bytes());
-      EXPECT_EQ(history_alloc_num, buffer::get_history_alloc_num());
-    }
     EXPECT_NE(expected.c_str(), ptr.c_str());
     EXPECT_EQ(0, ::memcmp(expected.c_str(), ptr.c_str(), len));
   }
   //
   // buffer::create_page_aligned
   //
-  if (ceph_buffer_track) {
-    EXPECT_EQ(0, buffer::get_total_alloc());
-  }
-  
   {
     bufferptr ptr(buffer::create_page_aligned(len));
-    history_alloc_bytes += len;
-    history_alloc_num++;
     ::memset(ptr.c_str(), 'X', len);
-    if (ceph_buffer_track) {
-      EXPECT_EQ(len, (unsigned)buffer::get_total_alloc());
-      EXPECT_EQ(history_alloc_bytes, buffer::get_history_alloc_bytes());
-      EXPECT_EQ(history_alloc_num, buffer::get_history_alloc_num());
-    }
     // doesn't throw on my x86_64 wheezy box --sage
     //EXPECT_THROW(buffer::create_page_aligned((unsigned)ULLONG_MAX), buffer::bad_alloc);
 #ifndef DARWIN
     ASSERT_TRUE(ptr.is_page_aligned());
 #endif // DARWIN 
     bufferptr clone = ptr.clone();
-    history_alloc_bytes += len;
-    history_alloc_num++;
     EXPECT_EQ(0, ::memcmp(clone.c_str(), ptr.c_str(), len));
-    if (ceph_buffer_track) {
-      EXPECT_EQ(history_alloc_bytes, buffer::get_history_alloc_bytes());
-      EXPECT_EQ(history_alloc_num, buffer::get_history_alloc_num());
-    }
-  }
-  if (ceph_buffer_track) {
-    EXPECT_EQ(0, buffer::get_total_alloc());
   }
 }
 
@@ -462,20 +376,6 @@ TEST(BufferPtr, have_raw) {
     bufferptr ptr(1);
     EXPECT_TRUE(ptr.have_raw());
   }
-}
-
-TEST(BufferPtr, at_buffer_head) {
-  bufferptr ptr(2);
-  EXPECT_TRUE(ptr.at_buffer_head());
-  ptr.set_offset(1);
-  EXPECT_FALSE(ptr.at_buffer_head());
-}
-
-TEST(BufferPtr, at_buffer_tail) {
-  bufferptr ptr(2);
-  EXPECT_TRUE(ptr.at_buffer_tail());
-  ptr.set_length(1);
-  EXPECT_FALSE(ptr.at_buffer_tail());
 }
 
 TEST(BufferPtr, is_n_page_sized) {
@@ -929,6 +829,53 @@ TEST(BufferListIterator, advance) {
   }
 }
 
+TEST(BufferListIterator, iterate_with_empties) {
+  ceph::bufferlist bl;
+  EXPECT_EQ(bl.get_num_buffers(), 0u);
+
+  bl.push_back(ceph::buffer::create(0));
+  EXPECT_EQ(bl.length(), 0u);
+  EXPECT_EQ(bl.get_num_buffers(), 1u);
+
+  encode(42l, bl);
+  EXPECT_EQ(bl.get_num_buffers(), 2u);
+
+  bl.push_back(ceph::buffer::create(0));
+  EXPECT_EQ(bl.get_num_buffers(), 3u);
+
+  // append bufferlist with single, 0-sized ptr inside
+  {
+    ceph::bufferlist bl_with_empty_ptr;
+    bl_with_empty_ptr.push_back(ceph::buffer::create(0));
+    EXPECT_EQ(bl_with_empty_ptr.length(), 0u);
+    EXPECT_EQ(bl_with_empty_ptr.get_num_buffers(), 1u);
+
+    bl.append(bl_with_empty_ptr);
+  }
+
+  encode(24l, bl);
+  EXPECT_EQ(bl.get_num_buffers(), 5u);
+
+  auto i = bl.cbegin();
+  long val;
+  decode(val, i);
+  EXPECT_EQ(val, 42l);
+
+  decode(val, i);
+  EXPECT_EQ(val, 24l);
+
+  val = 0;
+  i.seek(sizeof(long));
+  decode(val, i);
+  EXPECT_EQ(val, 24l);
+  EXPECT_TRUE(i == bl.end());
+
+  i.seek(0);
+  decode(val, i);
+  EXPECT_EQ(val, 42);
+  EXPECT_FALSE(i == bl.end());
+}
+
 TEST(BufferListIterator, get_ptr_and_advance)
 {
   bufferptr a("one", 3);
@@ -1294,7 +1241,7 @@ void bench_bufferlist_alloc(int size, int num, int per)
   for (int i=0; i<num; ++i) {
     bufferlist bl;
     for (int j=0; j<per; ++j)
-      bl.append(buffer::create(size));
+      bl.push_back(buffer::ptr_node::create(buffer::create(size)));
   }
   utime_t end = ceph_clock_now();
   cout << num << " alloc of size " << size
@@ -2714,6 +2661,59 @@ TEST(BufferList, EmptyAppend) {
   ASSERT_EQ(bl.begin().end(), 1);
 }
 
+TEST(BufferList, InternalCarriage) {
+  ceph::bufferlist bl;
+  EXPECT_EQ(bl.get_num_buffers(), 0u);
+
+  encode(42l, bl);
+  EXPECT_EQ(bl.get_num_buffers(), 1u);
+
+  {
+    ceph::bufferlist bl_with_foo;
+    bl_with_foo.append("foo", 3);
+    EXPECT_EQ(bl_with_foo.length(), 3u);
+    EXPECT_EQ(bl_with_foo.get_num_buffers(), 1u);
+
+    bl.append(bl_with_foo);
+    EXPECT_EQ(bl.get_num_buffers(), 2u);
+  }
+
+  encode(24l, bl);
+  EXPECT_EQ(bl.get_num_buffers(), 3u);
+}
+
+TEST(BufferList, ContiguousAppender) {
+  ceph::bufferlist bl;
+  EXPECT_EQ(bl.get_num_buffers(), 0u);
+
+  // we expect a flush in ~contiguous_appender
+  {
+    auto ap = bl.get_contiguous_appender(100);
+
+    denc(42l, ap);
+    EXPECT_EQ(bl.get_num_buffers(), 1u);
+
+    // append bufferlist with single ptr inside. This should
+    // commit changes to bl::_len and the underlying bp::len.
+    {
+      ceph::bufferlist bl_with_foo;
+      bl_with_foo.append("foo", 3);
+      EXPECT_EQ(bl_with_foo.length(), 3u);
+      EXPECT_EQ(bl_with_foo.get_num_buffers(), 1u);
+
+      ap.append(bl_with_foo);
+      // 3 as the ap::append(const bl&) splits the bp with free
+      // space.
+      EXPECT_EQ(bl.get_num_buffers(), 3u);
+    }
+
+    denc(24l, ap);
+    EXPECT_EQ(bl.get_num_buffers(), 3u);
+    EXPECT_EQ(bl.length(), sizeof(long) + 3u);
+  }
+  EXPECT_EQ(bl.length(), 2u * sizeof(long) + 3u);
+}
+
 TEST(BufferList, TestPtrAppend) {
   bufferlist bl;
   char correct[MAX_TEST];
@@ -2930,7 +2930,7 @@ TEST(BufferHash, all) {
 /*
  * Local Variables:
  * compile-command: "cd .. ; make unittest_bufferlist && 
- *    ulimit -s unlimited ; CEPH_BUFFER_TRACK=true valgrind \
+ *    ulimit -s unlimited ; valgrind \
  *    --max-stackframe=20000000 --tool=memcheck \
  *    ./unittest_bufferlist # --gtest_filter=BufferList.constructors"
  * End:

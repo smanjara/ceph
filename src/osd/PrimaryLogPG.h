@@ -314,7 +314,7 @@ public:
     GenContext<ThreadPool::TPHandle&> *c) override;
     
   void send_message(int to_osd, Message *m) override {
-    osd->send_message_osd_cluster(to_osd, m, get_osdmap()->get_epoch());
+    osd->send_message_osd_cluster(to_osd, m, get_osdmap_epoch());
   }
   void queue_transaction(ObjectStore::Transaction&& t,
 			 OpRequestRef op) override {
@@ -323,9 +323,6 @@ public:
   void queue_transactions(vector<ObjectStore::Transaction>& tls,
 			  OpRequestRef op) override {
     osd->store->queue_transactions(ch, tls, op, NULL);
-  }
-  epoch_t get_epoch() const override {
-    return get_osdmap()->get_epoch();
   }
   epoch_t get_interval_start_epoch() const override {
     return info.history.same_interval_since;
@@ -371,7 +368,7 @@ public:
   bool pgb_is_primary() const override {
     return is_primary();
   }
-  OSDMapRef pgb_get_osdmap() const override final {
+  const OSDMapRef& pgb_get_osdmap() const override final {
     return get_osdmap();
   }
   epoch_t pgb_get_osdmap_epoch() const override final {
@@ -403,6 +400,22 @@ public:
 
   void release_locks(ObcLockManager &manager) override {
     release_object_locks(manager);
+  }
+
+  bool pg_is_remote_backfilling() override {
+    return is_remote_backfilling();
+  }
+  void pg_add_local_num_bytes(int64_t num_bytes) override {
+    add_local_num_bytes(num_bytes);
+  }
+  void pg_sub_local_num_bytes(int64_t num_bytes) override {
+    sub_local_num_bytes(num_bytes);
+  }
+  void pg_add_num_bytes(int64_t num_bytes) override {
+    add_num_bytes(num_bytes);
+  }
+  void pg_sub_num_bytes(int64_t num_bytes) override {
+    sub_num_bytes(num_bytes);
   }
 
   void pgb_set_object_snap_mapping(
@@ -468,9 +481,6 @@ public:
   }
   pg_shard_t primary_shard() const override {
     return primary;
-  }
-  uint64_t min_peer_features() const override {
-    return get_min_peer_features();
   }
 
   void send_message_osd_cluster(
@@ -1353,6 +1363,7 @@ protected:
   void apply_and_flush_repops(bool requeue);
 
   void calc_trim_to() override;
+  void calc_trim_to_aggressive() override;
   int do_xattr_cmp_u64(int op, __u64 v1, bufferlist& xattr);
   int do_xattr_cmp_str(int op, string& v1s, bufferlist& xattr);
 
@@ -1484,9 +1495,9 @@ private:
   hobject_t get_temp_recovery_object(const hobject_t& target,
 				     eversion_t version) override;
   int get_recovery_op_priority() const {
-      int pri = 0;
-      pool.info.opts.get(pool_opts_t::RECOVERY_OP_PRIORITY, &pri);
-      return  pri > 0 ? pri : cct->_conf->osd_recovery_op_priority;
+    int64_t pri = 0;
+    pool.info.opts.get(pool_opts_t::RECOVERY_OP_PRIORITY, &pri);
+    return  pri > 0 ? pri : cct->_conf->osd_recovery_op_priority;
   }
   void log_missing(unsigned missing,
 			const boost::optional<hobject_t> &head,
@@ -1622,7 +1633,7 @@ private:
 	std::lock_guard l(pg->osd->sleep_lock);
 	wakeup = pg->osd->sleep_timer.add_event_after(
 	  pg->cct->_conf->osd_snap_trim_sleep,
-	  new OnTimer{pg, pg->get_osdmap()->get_epoch()});
+	  new OnTimer{pg, pg->get_osdmap_epoch()});
       } else {
 	post_event(SnapTrimTimerReady());
       }

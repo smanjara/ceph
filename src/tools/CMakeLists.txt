@@ -62,7 +62,9 @@ if(WITH_TESTS)
 endif(WITH_TESTS)
 endif(WITH_LIBCEPHFS)
 
-add_executable(ceph-kvstore-tool ceph_kvstore_tool.cc)
+add_executable(ceph-kvstore-tool
+  kvstore_tool.cc
+  ceph_kvstore_tool.cc)
 target_link_libraries(ceph-kvstore-tool os global)
 install(TARGETS ceph-kvstore-tool DESTINATION bin)
 
@@ -97,6 +99,11 @@ set(ceph_authtool_srcs ceph_authtool.cc)
 add_executable(ceph-authtool ${ceph_authtool_srcs})
 target_link_libraries(ceph-authtool global ${EXTRALIBS} ${CRYPTO_LIBS})
 install(TARGETS ceph-authtool DESTINATION bin)
+
+set(cephdeduptool_srcs ceph_dedup_tool.cc)
+add_executable(cephdeduptool ${cephdeduptool_srcs})
+target_link_libraries(cephdeduptool librados-cxx global cls_cas_client)
+install(TARGETS cephdeduptool DESTINATION bin)
 
 if(WITH_CEPHFS)
   add_subdirectory(cephfs)

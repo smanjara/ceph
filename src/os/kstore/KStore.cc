@@ -1083,10 +1083,13 @@ void KStore::_sync()
   dout(10) << __func__ << " done" << dendl;
 }
 
-int KStore::statfs(struct store_statfs_t* buf0)
+int KStore::statfs(struct store_statfs_t* buf0, osd_alert_list_t* alerts)
 {
   struct statfs buf;
   buf0->reset();
+  if (alerts) {
+    alerts->clear(); // returns nothing for now
+  }
   if (::statfs(basedir.c_str(), &buf) < 0) {
     int r = -errno;
     ceph_assert(r != -ENOENT);
@@ -1099,7 +1102,6 @@ int KStore::statfs(struct store_statfs_t* buf0)
   return 0;
 }
 
-
 ObjectStore::CollectionHandle KStore::open_collection(const coll_t& cid)
 {
   return _get_collection(cid);
@@ -1111,6 +1113,11 @@ ObjectStore::CollectionHandle KStore::create_new_collection(const coll_t& cid)
   RWLock::WLocker l(coll_lock);
   new_coll_map[cid] = c;
   return c;
+}
+
+int KStore::pool_statfs(uint64_t pool_id, struct store_statfs_t *buf)
+{
+  return -ENOTSUP;
 }
 
 // ---------------
@@ -1636,7 +1643,7 @@ bool KStore::OmapIteratorImpl::valid()
   }
 }
 
-int KStore::OmapIteratorImpl::next(bool validate)
+int KStore::OmapIteratorImpl::next()
 {
   RWLock::RLocker l(c->lock);
   if (o->onode.omap_head) {

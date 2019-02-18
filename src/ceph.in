@@ -38,12 +38,6 @@ CEPH_RELEASE = "@CEPH_RELEASE@"
 CEPH_RELEASE_NAME = "@CEPH_RELEASE_NAME@"
 CEPH_RELEASE_TYPE = "@CEPH_RELEASE_TYPE@"
 
-# Flags from src/mon/Monitor.h
-FLAG_NOFORWARD = (1 << 0)
-FLAG_OBSOLETE = (1 << 1)
-FLAG_DEPRECATED = (1 << 2)
-FLAG_POLL = (1 << 4)
-
 # priorities from src/common/perf_counters.h
 PRIO_CRITICAL = 10
 PRIO_INTERESTING = 8
@@ -144,6 +138,7 @@ import signal
 import string
 import subprocess
 
+import ceph_argparse
 from ceph_argparse import \
     concise_sig, descsort_key, parse_json_funcsigs, \
     validate_command, find_cmd_target, \
@@ -169,7 +164,7 @@ else:
 
 def raw_write(buf):
     sys.stdout.flush()
-    raw_stdout.write(buf)
+    raw_stdout.write(rados.cstr(buf, ''))
 
 
 def osdids():
@@ -463,8 +458,6 @@ def wrap(s, width, indent):
 
             yield result
 
-    raise StopIteration
-
 
 def format_help(cmddict, partial=None):
     """
@@ -479,7 +472,7 @@ def format_help(cmddict, partial=None):
         if not cmd['help']:
             continue
         flags = cmd.get('flags', 0)
-        if flags & (FLAG_OBSOLETE | FLAG_DEPRECATED):
+        if flags & (ceph_argparse.FLAG_OBSOLETE | ceph_argparse.FLAG_DEPRECATED | ceph_argparse.FLAG_HIDDEN):
             continue
         concise = concise_sig(cmd['sig'])
         if partial and not concise.startswith(partial):

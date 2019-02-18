@@ -1372,11 +1372,9 @@ int FileJournal::write_aio_bl(off64_t& pos, bufferlist& bl, uint64_t seq)
     iovec *iov = new iovec[max];
     int n = 0;
     unsigned len = 0;
-    for (std::list<buffer::ptr>::const_iterator p = bl.buffers().begin();
-	 n < max;
-	 ++p, ++n) {
-      ceph_assert(p != bl.buffers().end());
-      iov[n].iov_base = (void *)p->c_str();
+    for (auto p = std::cbegin(bl.buffers()); n < max; ++p, ++n) {
+      ceph_assert(p != std::cend(bl.buffers()));
+      iov[n].iov_base = const_cast<void*>(static_cast<const void*>(p->c_str()));
       iov[n].iov_len = p->length();
       len += p->length();
     }
@@ -2184,4 +2182,31 @@ off64_t FileJournal::get_journal_size_estimate()
   }
   dout(20) << __func__ << " journal size=" << size << dendl;
   return size;
+}
+
+void FileJournal::get_devices(set<string> *ls)
+{
+  string dev_node;
+  BlkDev blkdev(fd);
+  if (int rc = blkdev.wholedisk(&dev_node); rc) {
+    return;
+  }
+  get_raw_devices(dev_node, ls);
+}
+
+void FileJournal::collect_metadata(map<string,string> *pm)
+{
+  BlkDev blkdev(fd);
+  char partition_path[PATH_MAX];
+  char dev_node[PATH_MAX];
+  if (blkdev.partition(partition_path, PATH_MAX)) {
+    (*pm)["backend_filestore_journal_partition_path"] = "unknown";
+  } else {
+    (*pm)["backend_filestore_journal_partition_path"] = string(partition_path);
+  }
+  if (blkdev.wholedisk(dev_node, PATH_MAX)) {
+    (*pm)["backend_filestore_journal_dev_node"] = "unknown";
+  } else {
+    (*pm)["backend_filestore_journal_dev_node"] = string(dev_node);
+  }
 }

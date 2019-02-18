@@ -118,6 +118,12 @@ void BlueFS::_init_logger()
   b.add_u64_counter(l_bluefs_bytes_written_slow, "bytes_written_slow",
 		    "Bytes written to WAL/SSTs at slow device", NULL,
 		    PerfCountersBuilder::PRIO_USEFUL, unit_t(UNIT_BYTES));
+  b.add_u64_counter(l_bluefs_max_bytes_wal, "max_bytes_wal",
+		    "Maximum bytes allocated from WAL");
+  b.add_u64_counter(l_bluefs_max_bytes_db, "max_bytes_db",
+		    "Maximum bytes allocated from DB");
+  b.add_u64_counter(l_bluefs_max_bytes_slow, "max_bytes_slow",
+		    "Maximum bytes allocated from SLOW");
   logger = b.create_perf_counters();
   cct->get_perfcounters_collection()->add(logger);
 }
@@ -151,12 +157,17 @@ void BlueFS::_update_logger_stats()
   }
 }
 
-int BlueFS::add_block_device(unsigned id, const string& path, bool trim)
+int BlueFS::add_block_device(unsigned id, const string& path, bool trim,
+			     bool shared_with_bluestore)
 {
   dout(10) << __func__ << " bdev " << id << " path " << path << dendl;
   ceph_assert(id < bdev.size());
   ceph_assert(bdev[id] == NULL);
-  BlockDevice *b = BlockDevice::create(cct, path, NULL, NULL, discard_cb[id], static_cast<void*>(this));
+  BlockDevice *b = BlockDevice::create(cct, path, NULL, NULL,
+				       discard_cb[id], static_cast<void*>(this));
+  if (shared_with_bluestore) {
+    b->set_no_exclusive_lock();
+  }
   int r = b->open(path);
   if (r < 0) {
     delete b;
@@ -187,12 +198,12 @@ uint64_t BlueFS::get_block_device_size(unsigned id)
   return 0;
 }
 
-void BlueFS::add_block_extent(unsigned id, uint64_t offset, uint64_t length)
+void BlueFS::_add_block_extent(unsigned id, uint64_t offset, uint64_t length)
 {
-  std::unique_lock l(lock);
   dout(1) << __func__ << " bdev " << id
-          << " 0x" << std::hex << offset << "~" << length << std::dec
+	  << " 0x" << std::hex << offset << "~" << length << std::dec
 	  << dendl;
+
   ceph_assert(id < bdev.size());
   ceph_assert(bdev[id]);
   ceph_assert(bdev[id]->get_size() >= offset + length);
@@ -200,8 +211,6 @@ void BlueFS::add_block_extent(unsigned id, uint64_t offset, uint64_t length)
 
   if (id < alloc.size() && alloc[id]) {
     log_t.op_alloc_add(id, offset, length);
-    int r = _flush_and_sync_log(l);
-    ceph_assert(r == 0);
     alloc[id]->init_add_free(offset, length);
   }
 
@@ -1732,6 +1741,14 @@ void BlueFS::_compact_log_async(std::unique_lock<ceph::mutex>& l)
                                 cct->_conf->bluefs_alloc_size);
   t.op_jump(log_seq, new_log_jump_to);
 
+  // allocate
+  r = _allocate(BlueFS::BDEV_DB, new_log_jump_to,
+                    &new_log->fnode);
+  ceph_assert(r == 0);
+
+  // we might have some more ops in log_t due to _allocate call
+  t.claim_ops(log_t);
+
   bufferlist bl;
   encode(t, bl);
   _pad_bl(bl);
@@ -1739,10 +1756,6 @@ void BlueFS::_compact_log_async(std::unique_lock<ceph::mutex>& l)
   dout(10) << __func__ << " new_log_jump_to 0x" << std::hex << new_log_jump_to
 	   << std::dec << dendl;
 
-  // allocate
-  r = _allocate(BlueFS::BDEV_DB, new_log_jump_to,
-                    &new_log->fnode);
-  ceph_assert(r == 0);
   new_log_writer = _create_writer(new_log);
   new_log_writer->append(bl);
 
@@ -2346,6 +2359,26 @@ void BlueFS::flush_bdev()
   }
 }
 
+int BlueFS::_expand_slow_device(uint64_t need, PExtentVector& extents)
+{
+  int r = -ENOSPC;
+  if (slow_dev_expander) {
+    auto min_alloc_size = cct->_conf->bluefs_alloc_size;
+    int id = _get_slow_device_id();
+    ceph_assert(id <= (int)alloc.size() && alloc[id]);
+    need = std::max(need,
+      slow_dev_expander->get_recommended_expansion_delta(
+        alloc[id]->get_free(), block_all[id].size()));
+
+    need = round_up_to(need, min_alloc_size);
+    dout(10) << __func__ << " expanding slow device by 0x"
+             << std::hex << need << std::dec
+	     << dendl;
+    r = slow_dev_expander->allocate_freespace(need, extents);
+  }
+  return r;
+}
+
 int BlueFS::_allocate_without_fallback(uint8_t id, uint64_t len,
 		      PExtentVector* extents)
 {
@@ -2392,8 +2425,8 @@ int BlueFS::_allocate(uint8_t id, uint64_t len,
   int64_t alloc_len = 0;
   PExtentVector extents;
   
+  uint64_t hint = 0;
   if (alloc[id]) {
-    uint64_t hint = 0;
     if (!node->extents.empty() && node->extents.back().bdev == id) {
       hint = node->extents.back().end();
     }   
@@ -2401,7 +2434,7 @@ int BlueFS::_allocate(uint8_t id, uint64_t len,
     alloc_len = alloc[id]->allocate(left, min_alloc_size, hint, &extents);
   }
   if (alloc_len < (int64_t)left) {
-    if (alloc_len != 0) {
+    if (alloc_len > 0) {
       alloc[id]->release(extents);
     }
     if (id != BDEV_SLOW) {
@@ -2414,16 +2447,44 @@ int BlueFS::_allocate(uint8_t id, uint64_t len,
       }
       return _allocate(id + 1, len, node);
     }
-    if (bdev[id])
-      derr << __func__ << " failed to allocate 0x" << std::hex << left
-	   << " on bdev " << (int)id
-	   << ", free 0x" << alloc[id]->get_free() << std::dec << dendl;
-    else
-      derr << __func__ << " failed to allocate 0x" << std::hex << left
-	   << " on bdev " << (int)id << ", dne" << std::dec << dendl;
-    if (alloc[id]) 
-      alloc[id]->dump();    
-    return -ENOSPC;
+    dout(1) << __func__ << " unable to allocate 0x" << std::hex << left
+	    << " on bdev " << (int)id << ", free 0x"
+	    << (alloc[id] ? alloc[id]->get_free() : (uint64_t)-1)
+	    << "; fallback to slow device expander "
+	    << std::dec << dendl;
+    extents.clear();
+    if (_expand_slow_device(left, extents) == 0) {
+      id = _get_slow_device_id();
+      for (auto& e : extents) {
+	_add_block_extent(id, e.offset, e.length);
+      }
+      extents.clear();
+      auto* last_alloc = alloc[id];
+      ceph_assert(last_alloc);
+      // try again
+      alloc_len = last_alloc->allocate(left, min_alloc_size, hint, &extents);
+      if (alloc_len < (int64_t)left) {
+	if (alloc_len > 0) {
+	  last_alloc->release(extents);
+	}
+	derr << __func__ << " failed to allocate 0x" << std::hex << left
+	      << " on bdev " << (int)id
+	      << ", free 0x" << last_alloc->get_free() << std::dec << dendl;
+        return -ENOSPC;
+      }
+    } else {
+      derr << __func__ << " failed to expand slow device to fit +0x"
+	   << std::hex << left << std::dec
+	   << dendl;
+      return -ENOSPC;
+    }
+  } else {
+    uint64_t total_allocated =
+      block_all[id].size() - alloc[id]->get_free();
+    if (max_bytes[id] < total_allocated) {
+      logger->set(max_bytes_pcounters[id], total_allocated);
+      max_bytes[id] = total_allocated;
+    }
   }
 
   for (auto& p : extents) {

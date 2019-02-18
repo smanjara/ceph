@@ -56,7 +56,9 @@ function run() {
     CEPH_ARGS+="--fsid=$(uuidgen) --auth-supported=none "
     CEPH_ARGS+="--mon-host=$CEPH_MON "
     CEPH_ARGS+="--osd-skip-data-digest=false "
+    CEPH_ARGS+="--osd-objectstore=filestore "
 
+    export -n CEPH_CLI_TEST_DUP_COMMAND
     local funcs=${@:-$(set | sed -n -e 's/^\(TEST_[0-9a-z_]*\) .*/\1/p')}
     for func in $funcs ; do
         $func $dir || return 1
@@ -193,7 +195,7 @@ function create_ec_pool() {
     local pool_name=$1
     local allow_overwrites=$2
 
-    ceph osd erasure-code-profile set myprofile crush-failure-domain=osd $3 $4 $5 $6 $7 || return 1
+    ceph osd erasure-code-profile set myprofile crush-failure-domain=osd "$@" || return 1
 
     create_pool "$poolname" 1 1 erasure myprofile || return 1
 
@@ -5240,7 +5242,7 @@ function TEST_periodic_scrub_replicated() {
     # Can't upgrade with this set
     ceph osd set nodeep-scrub
     # Let map change propagate to OSDs
-    flush pg_stats
+    flush_pg_stats
     sleep 5
 
     # Fake a schedule scrub
@@ -5267,6 +5269,91 @@ function TEST_periodic_scrub_replicated() {
 
     # deep-scrub error is no longer present
     rados list-inconsistent-obj $pg | jq '.' | grep -qv $objname || return 1
+}
+
+function TEST_scrub_warning() {
+    local dir=$1
+    local poolname=psr_pool
+    local objname=POBJ
+    local scrubs=5
+    local deep_scrubs=5
+    local i1_day=86400
+    local i7_days=$(calc $i1_day \* 7)
+    local i14_days=$(calc $i1_day \* 14)
+    local overdue=0.5
+    local conf_overdue_seconds=$(calc $i7_days + $i1_day + \( $i7_days \* $overdue \) )
+    local pool_overdue_seconds=$(calc $i14_days + $i1_day + \( $i14_days \* $overdue \) )
+
+    setup $dir || return 1
+    run_mon $dir a --osd_pool_default_size=1 || return 1
+    run_mgr $dir x --mon_warn_pg_not_scrubbed_ratio=${overdue} --mon_warn_pg_not_deep_scrubbed_ratio=${overdue} || return 1
+    run_osd $dir 0 $ceph_osd_args --osd_scrub_backoff_ratio=0 || return 1
+
+    for i in $(seq 1 $(expr $scrubs + $deep_scrubs))
+    do
+      create_pool $poolname-$i 1 1 || return 1
+      wait_for_clean || return 1
+      if [ $i = "1" ];
+      then
+        ceph osd pool set $poolname-$i scrub_max_interval $i14_days
+      fi
+      if [ $i = $(expr $scrubs + 1) ];
+      then
+        ceph osd pool set $poolname-$i deep_scrub_interval $i14_days
+      fi
+    done
+
+    # Only 1 osd
+    local primary=0
+
+    ceph osd set noscrub || return 1
+    ceph osd set nodeep-scrub || return 1
+    ceph config set global osd_scrub_interval_randomize_ratio 0
+    ceph config set global osd_deep_scrub_randomize_ratio 0
+    ceph config set global osd_scrub_max_interval ${i7_days}
+    ceph config set global osd_deep_scrub_interval ${i7_days}
+
+    # Fake schedule scrubs
+    for i in $(seq 1 $scrubs)
+    do
+      if [ $i = "1" ];
+      then
+        overdue_seconds=$pool_overdue_seconds
+      else
+        overdue_seconds=$conf_overdue_seconds
+      fi
+      CEPH_ARGS='' ceph daemon $(get_asok_path osd.${primary}) \
+             trigger_scrub ${i}.0 $(expr ${overdue_seconds} + ${i}00) || return 1
+    done
+    # Fake schedule deep scrubs
+    for i in $(seq $(expr $scrubs + 1) $(expr $scrubs + $deep_scrubs))
+    do
+      if [ $i = "$(expr $scrubs + 1)" ];
+      then
+        overdue_seconds=$pool_overdue_seconds
+      else
+        overdue_seconds=$conf_overdue_seconds
+      fi
+      CEPH_ARGS='' ceph daemon $(get_asok_path osd.${primary}) \
+             trigger_deep_scrub ${i}.0 $(expr ${overdue_seconds} + ${i}00) || return 1
+    done
+    flush_pg_stats
+
+    ceph health
+    ceph health detail
+    ceph health | grep -q "$deep_scrubs pgs not deep-scrubbed in time" || return 1
+    ceph health | grep -q "$scrubs pgs not scrubbed in time" || return 1
+    COUNT=$(ceph health detail | grep "not scrubbed since" | wc -l)
+    if [ "$COUNT" != $scrubs ]; then
+      ceph health detail | grep "not scrubbed since"
+      return 1
+    fi
+    COUNT=$(ceph health detail | grep "not deep-scrubbed since" | wc -l)
+    if [ "$COUNT" != $deep_scrubs ]; then
+      ceph health detail | grep "not deep-scrubbed since"
+      return 1
+    fi
+    return 0
 }
 
 #
@@ -5555,6 +5642,67 @@ EOF
     ceph osd pool rm $poolname $poolname --yes-i-really-really-mean-it
     teardown $dir || return 1
 }
+
+function TEST_request_scrub_priority() {
+    local dir=$1
+    local poolname=psr_pool
+    local objname=POBJ
+    local OBJECTS=64
+    local PGS=8
+
+    setup $dir || return 1
+    run_mon $dir a --osd_pool_default_size=1 || return 1
+    run_mgr $dir x || return 1
+    local ceph_osd_args="--osd-scrub-interval-randomize-ratio=0 --osd-deep-scrub-randomize-ratio=0 "
+    ceph_osd_args+="--osd_scrub_backoff_ratio=0"
+    run_osd $dir 0 $ceph_osd_args || return 1
+
+    create_pool $poolname $PGS $PGS || return 1
+    wait_for_clean || return 1
+
+    local osd=0
+    add_something $dir $poolname $objname noscrub || return 1
+    local primary=$(get_primary $poolname $objname)
+    local pg=$(get_pg $poolname $objname)
+    poolid=$(ceph osd dump | grep "^pool.*[']${poolname}[']" | awk '{ print $2 }')
+
+    local otherpgs
+    for i in $(seq 0 $(expr $PGS - 1))
+    do
+        opg="${poolid}.${i}"
+        if [ "$opg" = "$pg" ]; then
+          continue
+        fi
+        otherpgs="${otherpgs}${opg} "
+        local other_last_scrub=$(get_last_scrub_stamp $pg)
+        # Fake a schedule scrub
+        CEPH_ARGS='' ceph --admin-daemon $(get_asok_path osd.${primary}) \
+             trigger_scrub $opg || return 1
+    done
+
+    sleep 15
+    flush_pg_stats
+
+    # Request a regular scrub and it will be done
+    local last_scrub=$(get_last_scrub_stamp $pg)
+    ceph pg scrub $pg
+
+    ceph osd unset noscrub || return 1
+    ceph osd unset nodeep-scrub || return 1
+
+    wait_for_scrub $pg "$last_scrub"
+
+    for opg in $otherpgs $pg
+    do
+        wait_for_scrub $opg "$other_last_scrub"
+    done
+
+    # Verify that the requested scrub ran first
+    grep "log_channel.*scrub ok" $dir/osd.${primary}.log | head -1 | sed 's/.*[[]DBG[]]//' | grep -q $pg || return 1
+
+    return 0
+}
+
 
 main osd-scrub-repair "$@"
 

@@ -25,7 +25,8 @@
 #include "include/mempool.h"
 #include "common/admin_socket.h"
 #include "common/code_environment.h"
-#include "common/Cond.h"
+#include "common/ceph_mutex.h"
+#include "common/debug.h"
 #include "common/config.h"
 #include "common/ceph_crypto.h"
 #include "common/HeartbeatMap.h"
@@ -62,6 +63,11 @@ CephContext::CephContext()
 CephContext::~CephContext()
 {}
 
+uint32_t CephContext::get_module_type() const
+{
+  return CEPH_ENTITY_TYPE_OSD;
+}
+
 CryptoRandom* CephContext::random() const
 {
   return _crypto_random.get();
@@ -90,7 +96,8 @@ namespace {
 
 class LockdepObs : public md_config_obs_t {
 public:
-  explicit LockdepObs(CephContext *cct) : m_cct(cct), m_registered(false) {
+  explicit LockdepObs(CephContext *cct)
+    : m_cct(cct), m_registered(false), lock(ceph::make_mutex("lock_dep_obs")) {
   }
   ~LockdepObs() override {
     if (m_registered) {
@@ -105,6 +112,7 @@ public:
 
   void handle_conf_change(const ConfigProxy& conf,
                           const std::set <std::string> &changed) override {
+    std::unique_lock locker(lock);
     if (conf->lockdep && !m_registered) {
       lockdep_register_ceph_context(m_cct);
       m_registered = true;
@@ -116,14 +124,17 @@ public:
 private:
   CephContext *m_cct;
   bool m_registered;
+  ceph::mutex lock;
 };
 
 class MempoolObs : public md_config_obs_t,
 		  public AdminSocketHook {
   CephContext *cct;
+  ceph::mutex lock;
 
 public:
-  explicit MempoolObs(CephContext *cct) : cct(cct) {
+  explicit MempoolObs(CephContext *cct)
+    : cct(cct), lock(ceph::make_mutex("mem_pool_obs")) {
     cct->_conf.add_observer(this);
     int r = cct->get_admin_socket()->register_command(
       "dump_mempools",
@@ -148,6 +159,7 @@ public:
 
   void handle_conf_change(const ConfigProxy& conf,
                           const std::set <std::string> &changed) override {
+    std::unique_lock locker(lock);
     if (changed.count("mempool_debug")) {
       mempool::set_debug_mode(cct->_conf->mempool_debug);
     }
@@ -174,8 +186,7 @@ class CephContextServiceThread : public Thread
 {
 public:
   explicit CephContextServiceThread(CephContext *cct)
-    : _lock("CephContextServiceThread::_lock"),
-      _reopen_logs(false), _exit_thread(false), _cct(cct)
+    : _reopen_logs(false), _exit_thread(false), _cct(cct)
   {
   }
 
@@ -184,13 +195,13 @@ public:
   void *entry() override
   {
     while (1) {
-      std::lock_guard<Mutex> l(_lock);
+      std::unique_lock l(_lock);
 
       if (_cct->_conf->heartbeat_interval) {
-        utime_t interval(_cct->_conf->heartbeat_interval, 0);
-        _cond.WaitInterval(_lock, interval);
+        auto interval = ceph::make_timespan(_cct->_conf->heartbeat_interval);
+        _cond.wait_for(l, interval);
       } else
-        _cond.Wait(_lock);
+        _cond.wait(l);
 
       if (_exit_thread) {
         break;
@@ -210,21 +221,21 @@ public:
 
   void reopen_logs()
   {
-    std::lock_guard<Mutex> l(_lock);
+    std::lock_guard l(_lock);
     _reopen_logs = true;
-    _cond.Signal();
+    _cond.notify_all();
   }
 
   void exit_thread()
   {
-    std::lock_guard<Mutex> l(_lock);
+    std::lock_guard l(_lock);
     _exit_thread = true;
-    _cond.Signal();
+    _cond.notify_all();
   }
 
 private:
-  Mutex _lock;
-  Cond _cond;
+  ceph::mutex _lock = ceph::make_mutex("CephContextServiceThread::_lock");
+  ceph::condition_variable _cond;
   bool _reopen_logs;
   bool _exit_thread;
   CephContext *_cct;
@@ -240,9 +251,12 @@ private:
  */
 class LogObs : public md_config_obs_t {
   ceph::logging::Log *log;
+  ceph::mutex lock;
 
 public:
-  explicit LogObs(ceph::logging::Log *l) : log(l) {}
+  explicit LogObs(ceph::logging::Log *l)
+    : log(l), lock(ceph::make_mutex("log_obs")) {
+  }
 
   const char** get_tracked_conf_keys() const override {
     static const char *KEYS[] = {
@@ -268,6 +282,7 @@ public:
 
   void handle_conf_change(const ConfigProxy& conf,
                           const std::set <std::string> &changed) override {
+    std::unique_lock locker(lock);
     // stderr
     if (changed.count("log_to_stderr") || changed.count("err_to_stderr")) {
       int l = conf->log_to_stderr ? 99 : (conf->err_to_stderr ? -1 : -2);
@@ -351,7 +366,7 @@ public:
                           const std::set <std::string> &changed) override {
     if (changed.count(
 	  "enable_experimental_unrecoverable_data_corrupting_features")) {
-      std::lock_guard<ceph::spinlock> lg(cct->_feature_lock);
+      std::lock_guard lg(cct->_feature_lock);
       get_str_set(
 	conf->enable_experimental_unrecoverable_data_corrupting_features,
 	cct->_experimental_features);
@@ -743,7 +758,7 @@ void CephContext::shutdown_crypto()
 void CephContext::start_service_thread()
 {
   {
-    std::lock_guard<ceph::spinlock> lg(_service_thread_lock);
+    std::lock_guard lg(_service_thread_lock);
     if (_service_thread) {
       return;
     }
@@ -770,7 +785,7 @@ void CephContext::start_service_thread()
 
 void CephContext::reopen_logs()
 {
-  std::lock_guard<ceph::spinlock> lg(_service_thread_lock);
+  std::lock_guard lg(_service_thread_lock);
   if (_service_thread)
     _service_thread->reopen_logs();
 }
@@ -901,7 +916,7 @@ CryptoHandler *CephContext::get_crypto_handler(int type)
 void CephContext::notify_pre_fork()
 {
   {
-    std::lock_guard<ceph::spinlock> lg(_fork_watchers_lock);
+    std::lock_guard lg(_fork_watchers_lock);
     for (auto &&t : _fork_watchers) {
       t->handle_pre_fork();
     }

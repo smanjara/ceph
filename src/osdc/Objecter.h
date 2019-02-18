@@ -530,9 +530,8 @@ struct ObjectOperation {
 	    for (list<watch_item_t>::iterator i = resp.entries.begin() ;
 		 i != resp.entries.end() ; ++i) {
 	      obj_watch_t ow;
-	      ostringstream sa;
-	      sa << i->addr;
-	      strncpy(ow.addr, sa.str().c_str(), 256);
+	      string sa = i->addr.get_legacy_str();
+	      strncpy(ow.addr, sa.c_str(), 256);
 	      ow.watcher_id = i->name.num();
 	      ow.cookie = i->cookie;
 	      ow.timeout_seconds = i->timeout_seconds;
@@ -2180,7 +2179,6 @@ public:
   void _wait_for_new_map(Context *c, epoch_t epoch, int err=0);
   void wait_for_latest_osdmap(Context *fin);
   void get_latest_version(epoch_t oldest, epoch_t neweset, Context *fin);
-  void _get_latest_version(epoch_t oldest, epoch_t neweset, Context *fin);
 
   /** Get the current set of global op flags */
   int get_global_op_flags() const { return global_op_flags; }
@@ -3049,8 +3047,7 @@ public:
   void ms_handle_remote_reset(Connection *con) override;
   bool ms_handle_refused(Connection *con) override;
   bool ms_get_authorizer(int dest_type,
-			 AuthAuthorizer **authorizer,
-			 bool force_new) override;
+			 AuthAuthorizer **authorizer) override;
 
   void blacklist_self(bool set);
 

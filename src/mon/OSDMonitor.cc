@@ -60,6 +60,7 @@
 #include "common/ceph_argparse.h"
 #include "common/perf_counters.h"
 #include "common/strtol.h"
+#include "common/numa.h"
 
 #include "common/config.h"
 #include "common/errno.h"
@@ -326,7 +327,8 @@ void OSDMonitor::create_initial()
 
   newmap.flags |=
     CEPH_OSDMAP_RECOVERY_DELETES |
-    CEPH_OSDMAP_PURGED_SNAPDIRS;
+    CEPH_OSDMAP_PURGED_SNAPDIRS |
+    CEPH_OSDMAP_PGLOG_HARDLIMIT;
   newmap.full_ratio = g_conf()->mon_osd_full_ratio;
   if (newmap.full_ratio > 1.0) newmap.full_ratio /= 100;
   newmap.backfillfull_ratio = g_conf()->mon_osd_backfillfull_ratio;
@@ -979,7 +981,8 @@ void OSDMonitor::prime_pg_temp(
   int next_up_primary, next_acting_primary;
   next.pg_to_up_acting_osds(pgid, &next_up, &next_up_primary,
 			    &next_acting, &next_acting_primary);
-  if (acting == next_acting && next_up != next_acting)
+  if (acting == next_acting &&
+      !(up != acting && next_up == next_acting))
     return;  // no change since last epoch
 
   if (acting.empty())
@@ -1386,6 +1389,12 @@ void OSDMonitor::encode_pending(MonitorDBStore::TransactionRef t)
 	  }
 	  pending_inc.new_pools[i.first].flags |= pg_pool_t::FLAG_CREATING;
 	}
+      }
+      // adjust blacklist items to all be TYPE_ANY
+      for (auto& i : tmp.blacklist) {
+	auto a = i.first;
+	a.set_type(entity_addr_t::TYPE_ANY);
+	pending_inc.new_blacklist[a] = i.second;
       }
     }
   }
@@ -2225,17 +2234,22 @@ bool OSDMonitor::preprocess_get_osdmap(MonOpRequestRef op)
   epoch_t first = get_first_committed();
   epoch_t last = osdmap.get_epoch();
   int max = g_conf()->osd_map_message_max;
+  ssize_t max_bytes = g_conf()->osd_map_message_max_bytes;
   for (epoch_t e = std::max(first, m->get_full_first());
-       e <= std::min(last, m->get_full_last()) && max > 0;
+       e <= std::min(last, m->get_full_last()) && max > 0 && max_bytes > 0;
        ++e, --max) {
-    int r = get_version_full(e, features, reply->maps[e]);
+    bufferlist& bl = reply->maps[e];
+    int r = get_version_full(e, features, bl);
     ceph_assert(r >= 0);
+    max_bytes -= bl.length();
   }
   for (epoch_t e = std::max(first, m->get_inc_first());
-       e <= std::min(last, m->get_inc_last()) && max > 0;
+       e <= std::min(last, m->get_inc_last()) && max > 0 && max_bytes > 0;
        ++e, --max) {
-    int r = get_version(e, features, reply->incremental_maps[e]);
+    bufferlist& bl = reply->incremental_maps[e];
+    int r = get_version(e, features, bl);
     ceph_assert(r >= 0);
+    max_bytes -= bl.length();
   }
   reply->oldest_map = first;
   reply->newest_map = last;
@@ -2825,6 +2839,17 @@ bool OSDMonitor::preprocess_boot(MonOpRequestRef op)
     goto ignore;
   }
 
+  // The release check here is required because for OSD_PGLOG_HARDLIMIT,
+  // we are reusing a jewel feature bit that was retired in luminous.
+  if (osdmap.require_osd_release >= CEPH_RELEASE_LUMINOUS &&
+      osdmap.test_flag(CEPH_OSDMAP_PGLOG_HARDLIMIT) &&
+      !(m->osd_features & CEPH_FEATURE_OSD_PGLOG_HARDLIMIT)) {
+    mon->clog->info() << "disallowing boot of OSD "
+		      << m->get_orig_source_inst()
+		      << " because 'pglog_hardlimit' osdmap flag is set and OSD lacks the OSD_PGLOG_HARDLIMIT feature";
+    goto ignore;
+  }
+
   // already booted?
   if (osdmap.is_up(from) &&
       osdmap.get_addrs(from) == m->get_orig_source_addrs() &&
@@ -3031,7 +3056,8 @@ void OSDMonitor::_booted(MonOpRequestRef op, bool logit)
 	  << " w " << m->sb.weight << " from " << m->sb.current_epoch << dendl;
 
   if (logit) {
-    mon->clog->info() << m->get_orig_source_inst() << " boot";
+    mon->clog->info() << m->get_source() << " " << m->get_orig_source_addrs()
+		      << " boot";
   }
 
   send_latest(op, m->sb.current_epoch+1);
@@ -3326,7 +3352,6 @@ bool OSDMonitor::prepare_pg_ready_to_merge(MonOpRequestRef op)
   } else {
     wait_for_finished_proposal(op, new C_ReplyMap(this, op, m->version));
   }
-  mon->no_reply(op);
   return true;
 }
 
@@ -3487,6 +3512,7 @@ bool OSDMonitor::preprocess_remove_snaps(MonOpRequestRef op)
 
   // check privilege, ignore if failed
   MonSession *session = op->get_session();
+  mon->no_reply(op);
   if (!session)
     goto ignore;
   if (!session->caps.is_capable(
@@ -4007,14 +4033,24 @@ int OSDMonitor::get_version_full(version_t ver, uint64_t features,
 epoch_t OSDMonitor::blacklist(const entity_addrvec_t& av, utime_t until)
 {
   dout(10) << "blacklist " << av << " until " << until << dendl;
-  for (auto& a : av.v) {
+  for (auto a : av.v) {
+    if (osdmap.require_osd_release >= CEPH_RELEASE_NAUTILUS) {
+      a.set_type(entity_addr_t::TYPE_ANY);
+    } else {
+      a.set_type(entity_addr_t::TYPE_LEGACY);
+    }
     pending_inc.new_blacklist[a] = until;
   }
   return pending_inc.epoch;
 }
 
-epoch_t OSDMonitor::blacklist(const entity_addr_t& a, utime_t until)
+epoch_t OSDMonitor::blacklist(entity_addr_t a, utime_t until)
 {
+  if (osdmap.require_osd_release >= CEPH_RELEASE_NAUTILUS) {
+    a.set_type(entity_addr_t::TYPE_ANY);
+  } else {
+    a.set_type(entity_addr_t::TYPE_LEGACY);
+  }
   dout(10) << "blacklist " << a << " until " << until << dendl;
   pending_inc.new_blacklist[a] = until;
   return pending_inc.epoch;
@@ -4450,6 +4486,22 @@ bool OSDMonitor::handle_osd_timeouts(const utime_t &now,
   return new_down;
 }
 
+static void dump_cpu_list(Formatter *f, const char *name,
+			  const string& strlist)
+{
+  cpu_set_t cpu_set;
+  size_t cpu_set_size;
+  if (parse_cpu_set_list(strlist.c_str(), &cpu_set_size, &cpu_set) < 0) {
+    return;
+  }
+  set<int> cpus = cpu_set_to_set(cpu_set_size, &cpu_set);
+  f->open_array_section(name);
+  for (auto cpu : cpus) {
+    f->dump_int("cpu", cpu);
+  }
+  f->close_section();
+}
+
 void OSDMonitor::dump_info(Formatter *f)
 {
   f->open_object_section("osdmap");
@@ -4499,7 +4551,8 @@ namespace {
     RECOVERY_PRIORITY, RECOVERY_OP_PRIORITY, SCRUB_PRIORITY,
     COMPRESSION_MODE, COMPRESSION_ALGORITHM, COMPRESSION_REQUIRED_RATIO,
     COMPRESSION_MAX_BLOB_SIZE, COMPRESSION_MIN_BLOB_SIZE,
-    CSUM_TYPE, CSUM_MAX_BLOCK, CSUM_MIN_BLOCK, FINGERPRINT_ALGORITHM };
+    CSUM_TYPE, CSUM_MAX_BLOCK, CSUM_MIN_BLOCK, FINGERPRINT_ALGORITHM,
+    PG_AUTOSCALE_MODE, PG_NUM_MIN, TARGET_SIZE_BYTES, TARGET_SIZE_RATIO };
 
   std::set<osd_pool_get_choices>
     subtract_second_from_first(const std::set<osd_pool_get_choices>& first,
@@ -4766,6 +4819,24 @@ bool OSDMonitor::preprocess_command(MonOpRequestRef op)
     f->open_object_section("osd_location");
     f->dump_int("osd", osd);
     f->dump_object("addrs", osdmap.get_addrs(osd));
+    f->dump_stream("osd_fsid") << osdmap.get_uuid(osd);
+
+    // try to identify host, pod/container name, etc.
+    map<string,string> m;
+    load_metadata(osd, m, nullptr);
+    if (auto p = m.find("hostname"); p != m.end()) {
+      f->dump_string("host", p->second);
+    }
+    for (auto& k : {
+	"pod_name", "pod_namespace", // set by rook
+	"container_name"             // set by ceph-ansible
+	}) {
+      if (auto p = m.find(k); p != m.end()) {
+	f->dump_string(k, p->second);
+      }
+    }
+
+    // crush is helpful too
     f->open_object_section("crush_location");
     map<string,string> loc = osdmap.crush->get_full_location(osd);
     for (map<string,string>::iterator p = loc.begin(); p != loc.end(); ++p)
@@ -4833,6 +4904,93 @@ bool OSDMonitor::preprocess_command(MonOpRequestRef op)
     count_metadata(field, f.get());
     f->flush(rdata);
     r = 0;
+  } else if (prefix == "osd numa-status") {
+    TextTable tbl;
+    if (f) {
+      f->open_array_section("osds");
+    } else {
+      tbl.define_column("OSD", TextTable::LEFT, TextTable::RIGHT);
+      tbl.define_column("HOST", TextTable::LEFT, TextTable::LEFT);
+      tbl.define_column("NETWORK", TextTable::RIGHT, TextTable::RIGHT);
+      tbl.define_column("STORAGE", TextTable::RIGHT, TextTable::RIGHT);
+      tbl.define_column("AFFINITY", TextTable::RIGHT, TextTable::RIGHT);
+      tbl.define_column("CPUS", TextTable::LEFT, TextTable::LEFT);
+    }
+    for (int i=0; i<osdmap.get_max_osd(); ++i) {
+      if (osdmap.exists(i)) {
+	map<string,string> m;
+	ostringstream err;
+	if (load_metadata(i, m, &err) < 0) {
+	  continue;
+	}
+	string host;
+	auto p = m.find("hostname");
+	if (p != m.end()) {
+	  host = p->second;
+	}
+	if (f) {
+	  f->open_object_section("osd");
+	  f->dump_int("osd", i);
+	  f->dump_string("host", host);
+	  for (auto n : { "network_numa_node", "objectstore_numa_node",
+		"numa_node" }) {
+	    p = m.find(n);
+	    if (p != m.end()) {
+	      f->dump_int(n, atoi(p->second.c_str()));
+	    }
+	  }
+	  for (auto n : { "network_numa_nodes", "objectstore_numa_nodes" }) {
+	    p = m.find(n);
+	    if (p != m.end()) {
+	      list<string> ls = get_str_list(p->second, ",");
+	      f->open_array_section(n);
+	      for (auto node : ls) {
+		f->dump_int("node", atoi(node.c_str()));
+	      }
+	      f->close_section();
+	    }
+	  }
+	  for (auto n : { "numa_node_cpus" }) {
+	    p = m.find(n);
+	    if (p != m.end()) {
+	      dump_cpu_list(f.get(), n, p->second);
+	    }
+	  }
+	  f->close_section();
+	} else {
+	  tbl << i;
+	  tbl << host;
+	  p = m.find("network_numa_nodes");
+	  if (p != m.end()) {
+	    tbl << p->second;
+	  } else {
+	    tbl << "-";
+	  }
+	  p = m.find("objectstore_numa_nodes");
+	  if (p != m.end()) {
+	    tbl << p->second;
+	  } else {
+	    tbl << "-";
+	  }
+	  p = m.find("numa_node");
+	  auto q = m.find("numa_node_cpus");
+	  if (p != m.end() && q != m.end()) {
+	    tbl << p->second;
+	    tbl << q->second;
+	  } else {
+	    tbl << "-";
+	    tbl << "-";
+	  }
+	  tbl << TextTable::endrow;
+	}
+      }
+    }
+    if (f) {
+      f->close_section();
+      f->flush(rdata);
+    } else {
+      rdata.append(stringify(tbl));
+    }
   } else if (prefix == "osd map") {
     string poolstr, objstr, namespacestr;
     cmd_getval(cct, cmdmap, "pool", poolstr);
@@ -4962,7 +5120,7 @@ bool OSDMonitor::preprocess_command(MonOpRequestRef op)
 	 ++p) {
       if (f) {
 	f->open_object_section("entry");
-	f->dump_stream("addr") << p->first;
+	f->dump_string("addr", p->first.get_legacy_str());
 	f->dump_stream("until") << p->second;
 	f->close_section();
       } else {
@@ -5090,6 +5248,10 @@ bool OSDMonitor::preprocess_command(MonOpRequestRef op)
       {"csum_max_block", CSUM_MAX_BLOCK},
       {"csum_min_block", CSUM_MIN_BLOCK},
       {"fingerprint_algorithm", FINGERPRINT_ALGORITHM},
+      {"pg_autoscale_mode", PG_AUTOSCALE_MODE},
+      {"pg_num_min", PG_NUM_MIN},
+      {"target_size_bytes", TARGET_SIZE_BYTES},
+      {"target_size_ratio", TARGET_SIZE_RATIO},
     };
 
     typedef std::set<osd_pool_get_choices> choices_set_t;
@@ -5191,6 +5353,11 @@ bool OSDMonitor::preprocess_command(MonOpRequestRef op)
 	  case EC_OVERWRITES:
 	    f->dump_bool("allow_ec_overwrites",
                          p->has_flag(pg_pool_t::FLAG_EC_OVERWRITES));
+	    break;
+	  case PG_AUTOSCALE_MODE:
+	    f->dump_string("pg_autoscale_mode",
+			   pg_pool_t::get_pg_autoscale_mode_name(
+			     p->pg_autoscale_mode));
 	    break;
 	  case HASHPSPOOL:
 	  case NODELETE:
@@ -5297,10 +5464,13 @@ bool OSDMonitor::preprocess_command(MonOpRequestRef op)
 	  case CSUM_MAX_BLOCK:
 	  case CSUM_MIN_BLOCK:
 	  case FINGERPRINT_ALGORITHM:
+	  case PG_NUM_MIN:
+	  case TARGET_SIZE_BYTES:
+	  case TARGET_SIZE_RATIO:
             pool_opts_t::key_t key = pool_opts_t::get_opt_desc(i->first).key;
             if (p->opts.is_set(key)) {
               if(*it == CSUM_TYPE) {
-                int val;
+                int64_t val;
                 p->opts.get(pool_opts_t::CSUM_TYPE, &val);
                 f->dump_string(i->first.c_str(), Checksummer::get_csum_type_string(val));
               } else {
@@ -5336,6 +5506,10 @@ bool OSDMonitor::preprocess_command(MonOpRequestRef op)
 	    } else {
 	      ss << "crush_rule: " << p->get_crush_rule() << "\n";
 	    }
+	    break;
+	  case PG_AUTOSCALE_MODE:
+	    ss << "pg_autoscale_mode: " << pg_pool_t::get_pg_autoscale_mode_name(
+	      p->pg_autoscale_mode);
 	    break;
 	  case HIT_SET_PERIOD:
 	    ss << "hit_set_period: " << p->hit_set_period << "\n";
@@ -5446,6 +5620,9 @@ bool OSDMonitor::preprocess_command(MonOpRequestRef op)
 	  case CSUM_MAX_BLOCK:
 	  case CSUM_MIN_BLOCK:
 	  case FINGERPRINT_ALGORITHM:
+	  case PG_NUM_MIN:
+	  case TARGET_SIZE_BYTES:
+	  case TARGET_SIZE_RATIO:
 	    for (i = ALL_CHOICES.begin(); i != ALL_CHOICES.end(); ++i) {
 	      if (i->second == *it)
 		break;
@@ -5455,7 +5632,7 @@ bool OSDMonitor::preprocess_command(MonOpRequestRef op)
 	      pool_opts_t::key_t key = pool_opts_t::get_opt_desc(i->first).key;
 	      if (p->opts.is_set(key)) {
                 if(key == pool_opts_t::CSUM_TYPE) {
-                  int val;
+                  int64_t val;
                   p->opts.get(key, &val);
   		  ss << i->first << ": " << Checksummer::get_csum_type_string(val) << "\n";
                 } else {
@@ -6111,7 +6288,7 @@ int OSDMonitor::prepare_new_pool(MonOpRequestRef op)
   string rule_name;
   int ret = 0;
   ret = prepare_new_pool(m->name, m->crush_rule, rule_name,
-			 0, 0,
+			 0, 0, 0, 0, 0, 0.0,
 			 erasure_code_profile,
 			 pg_pool_t::TYPE_REPLICATED, 0, FAST_READ_OFF, &ss);
 
@@ -6424,14 +6601,18 @@ int OSDMonitor::parse_erasure_code_profile(const vector<string> &erasure_code_pr
 
 int OSDMonitor::prepare_pool_size(const unsigned pool_type,
 				  const string &erasure_code_profile,
+                                  uint8_t repl_size,
 				  unsigned *size, unsigned *min_size,
 				  ostream *ss)
 {
   int err = 0;
   switch (pool_type) {
   case pg_pool_t::TYPE_REPLICATED:
-    *size = g_conf().get_val<uint64_t>("osd_pool_default_size");
-    *min_size = g_conf().get_osd_pool_default_min_size();
+    if (repl_size == 0) {
+      repl_size = g_conf().get_val<uint64_t>("osd_pool_default_size");
+    }
+    *size = repl_size;
+    *min_size = g_conf().get_osd_pool_default_min_size(repl_size);
     break;
   case pg_pool_t::TYPE_ERASURE:
     {
@@ -6593,7 +6774,7 @@ int OSDMonitor::check_pg_num(int64_t pool, int pg_num, int size, ostream *ss)
     if (i.first == pool) {
       projected += pg_num * size;
     } else {
-      projected += i.second.get_pg_num() * i.second.get_size();
+      projected += i.second.get_pg_num_target() * i.second.get_size();
     }
   }
   if (projected > max_pgs) {
@@ -6616,6 +6797,7 @@ int OSDMonitor::check_pg_num(int64_t pool, int pg_num, int size, ostream *ss)
  * @param crush_rule_name The crush rule to use, if crush_rulset <0
  * @param pg_num The pg_num to use. If set to 0, will use the system default
  * @param pgp_num The pgp_num to use. If set to 0, will use the system default
+ * @param repl_size Replication factor, or 0 for default
  * @param erasure_code_profile The profile name in OSDMap to be used for erasure code
  * @param pool_type TYPE_ERASURE, or TYPE_REP
  * @param expected_num_objects expected number of objects on the pool
@@ -6628,6 +6810,10 @@ int OSDMonitor::prepare_new_pool(string& name,
 				 int crush_rule,
 				 const string &crush_rule_name,
                                  unsigned pg_num, unsigned pgp_num,
+				 unsigned pg_num_min,
+                                 const uint64_t repl_size,
+				 const uint64_t target_size_bytes,
+				 const float target_size_ratio,
 				 const string &erasure_code_profile,
                                  const unsigned pool_type,
                                  const uint64_t expected_num_objects,
@@ -6640,6 +6826,8 @@ int OSDMonitor::prepare_new_pool(string& name,
     pg_num = g_conf().get_val<uint64_t>("osd_pool_default_pg_num");
   if (pgp_num == 0)
     pgp_num = g_conf().get_val<uint64_t>("osd_pool_default_pgp_num");
+  if (!pgp_num)
+    pgp_num = pg_num;
   if (pg_num > g_conf().get_val<uint64_t>("mon_max_pool_pg_num")) {
     *ss << "'pg_num' must be greater than 0 and less than or equal to "
         << g_conf().get_val<uint64_t>("mon_max_pool_pg_num")
@@ -6683,7 +6871,8 @@ int OSDMonitor::prepare_new_pool(string& name,
              << duration << dendl;
   }
   unsigned size, min_size;
-  r = prepare_pool_size(pool_type, erasure_code_profile, &size, &min_size, ss);
+  r = prepare_pool_size(pool_type, erasure_code_profile, repl_size,
+                        &size, &min_size, ss);
   if (r) {
     dout(10) << "prepare_pool_size returns " << r << dendl;
     return r;
@@ -6715,7 +6904,7 @@ int OSDMonitor::prepare_new_pool(string& name,
         fread = true;
         break;
       case FAST_READ_DEFAULT:
-        fread = g_conf()->mon_osd_pool_ec_fast_read;
+        fread = g_conf()->osd_pool_default_ec_fast_read;
         break;
       default:
         *ss << "invalid fast_read setting: " << fast_read;
@@ -6758,6 +6947,12 @@ int OSDMonitor::prepare_new_pool(string& name,
   pi->crush_rule = crush_rule;
   pi->expected_num_objects = expected_num_objects;
   pi->object_hash = CEPH_STR_HASH_RJENKINS;
+
+  {
+    auto m = pg_pool_t::get_pg_autoscale_mode_by_name(
+      g_conf().get_val<string>("osd_pool_default_pg_autoscale_mode"));
+    pi->pg_autoscale_mode = m >= 0 ? m : 0;
+  }
   auto max = g_conf().get_val<int64_t>("mon_osd_max_initial_pgs");
   pi->set_pg_num(
     max > 0 ? std::min<uint64_t>(pg_num, std::max<int64_t>(1, max))
@@ -6766,14 +6961,33 @@ int OSDMonitor::prepare_new_pool(string& name,
   pi->set_pg_num_target(pg_num);
   pi->set_pgp_num(pi->get_pg_num());
   pi->set_pgp_num_target(pgp_num);
+  if (osdmap.require_osd_release >= CEPH_RELEASE_NAUTILUS &&
+      pg_num_min) {
+    pi->opts.set(pool_opts_t::PG_NUM_MIN, static_cast<int64_t>(pg_num_min));
+  }
+
   pi->last_change = pending_inc.epoch;
   pi->auid = 0;
+
   if (pool_type == pg_pool_t::TYPE_ERASURE) {
       pi->erasure_code_profile = erasure_code_profile;
   } else {
       pi->erasure_code_profile = "";
   }
   pi->stripe_width = stripe_width;
+
+  if (osdmap.require_osd_release >= CEPH_RELEASE_NAUTILUS &&
+      target_size_bytes) {
+    // only store for nautilus+ because TARGET_SIZE_BYTES may be
+    // larger than int32_t max.
+    pi->opts.set(pool_opts_t::TARGET_SIZE_BYTES, static_cast<int64_t>(target_size_bytes));
+  }
+  if (target_size_ratio > 0.0 &&
+    osdmap.require_osd_release >= CEPH_RELEASE_NAUTILUS) {
+    // only store for nautilus+, just to be consistent and tidy.
+    pi->opts.set(pool_opts_t::TARGET_SIZE_RATIO, target_size_ratio);
+  }
+
   pi->cache_target_dirty_ratio_micro =
     g_conf()->osd_pool_default_cache_target_dirty_ratio * 1000000;
   pi->cache_target_dirty_high_ratio_micro =
@@ -6782,6 +6996,7 @@ int OSDMonitor::prepare_new_pool(string& name,
     g_conf()->osd_pool_default_cache_target_full_ratio * 1000000;
   pi->cache_min_flush_age = g_conf()->osd_pool_default_cache_min_flush_age;
   pi->cache_min_evict_age = g_conf()->osd_pool_default_cache_min_evict_age;
+
   pending_inc.new_pool_names[pool] = name;
   return 0;
 }
@@ -6992,15 +7207,6 @@ int OSDMonitor::prepare_command_pool_set(const cmdmap_t& cmdmap,
 	ss << "splits in cache pools must be followed by scrubs and leave sufficient free space to avoid overfilling.  use --yes-i-really-mean-it to force.";
 	return -EPERM;
       }
-      int expected_osds = std::min(p.get_pg_num(), osdmap.get_num_osds());
-      int64_t new_pgs = n - p.get_pg_num_target();
-      if (new_pgs > g_conf()->mon_osd_max_split_count * expected_osds) {
-	ss << "specified pg_num " << n << " is too large (creating "
-	   << new_pgs << " new PGs on ~" << expected_osds
-	   << " OSDs exceeds per-OSD max with mon_osd_max_split_count of "
-	   << g_conf()->mon_osd_max_split_count << ')';
-	return -E2BIG;
-      }
     } else {
       if (osdmap.require_osd_release < CEPH_RELEASE_NAUTILUS) {
 	ss << "nautilus OSDs are required to adjust pg_num_pending";
@@ -7056,6 +7262,13 @@ int OSDMonitor::prepare_command_pool_set(const cmdmap_t& cmdmap,
       return -EINVAL;
     }
     p.set_pgp_num_target(n);
+  } else if (var == "pg_autoscale_mode") {
+    n = pg_pool_t::get_pg_autoscale_mode_by_name(val);
+    if (n < 0) {
+      ss << "specified invalid mode " << val;
+      return -EINVAL;
+    }
+    p.pg_autoscale_mode = n;
   } else if (var == "crush_rule") {
     int id = osdmap.crush->get_rule_id(val);
     if (id == -ENOENT) {
@@ -7333,6 +7546,16 @@ int OSDMonitor::prepare_command_pool_set(const cmdmap_t& cmdmap,
 	  return -EINVAL;
         }
       }
+    } else if (var == "pg_num_min") {
+      if (interr.length()) {
+        ss << "error parsing int value '" << val << "': " << interr;
+        return -EINVAL;
+      }
+      if (n > (int)p.get_pg_num_target()) {
+	ss << "specified pg_num_min " << n
+	   << " > pg_num " << p.get_pg_num_target();
+	return -EINVAL;
+      }
     }
 
     pool_opts_t::opt_desc_t desc = pool_opts_t::get_opt_desc(var);
@@ -7352,7 +7575,7 @@ int OSDMonitor::prepare_command_pool_set(const cmdmap_t& cmdmap,
       if (n == 0) {
 	p.opts.unset(desc.key);
       } else {
-	p.opts.set(desc.key, static_cast<int>(n));
+	p.opts.set(desc.key, static_cast<int64_t>(n));
       }
       break;
     case pool_opts_t::DOUBLE:
@@ -8684,7 +8907,12 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
      mempool::osdmap::map<string,map<string,string>> old_ec_profiles =
        osdmap.get_erasure_code_profiles();
      auto ec_profiles = pending_inc.get_erasure_code_profiles();
+#ifdef HAVE_STDLIB_MAP_SPLICING
      ec_profiles.merge(old_ec_profiles);
+#else
+     ec_profiles.insert(make_move_iterator(begin(old_ec_profiles)),
+                        make_move_iterator(end(old_ec_profiles)));
+#endif
      list<string> referenced_by;
      for (auto &i: ec_profiles) {
        for (auto &j: i.second) {
@@ -9972,6 +10200,24 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
 	err = -EPERM;
 	goto reply;
       }
+    } else if (key == "pglog_hardlimit") {
+      if (!osdmap.get_num_up_osds() && !sure) {
+        ss << "Not advisable to continue since no OSDs are up. Pass "
+           << "--yes-i-really-mean-it if you really wish to continue.";
+        err = -EPERM;
+        goto reply;
+      }
+      // The release check here is required because for OSD_PGLOG_HARDLIMIT,
+      // we are reusing a jewel feature bit that was retired in luminous.
+      if (osdmap.require_osd_release >= CEPH_RELEASE_LUMINOUS &&
+         (HAVE_FEATURE(osdmap.get_up_osd_features(), OSD_PGLOG_HARDLIMIT)
+          || sure)) {
+	return prepare_set_flag(op, CEPH_OSDMAP_PGLOG_HARDLIMIT);
+      } else {
+	ss << "not all up OSDs have OSD_PGLOG_HARDLIMIT feature";
+	err = -EPERM;
+	goto reply;
+      }
     } else if (key == "require_jewel_osds") {
       if (!osdmap.get_num_up_osds() && !sure) {
         ss << "Not advisable to continue since no OSDs are up. Pass "
@@ -10092,6 +10338,12 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
       goto reply;
     }
     if (rel == CEPH_RELEASE_MIMIC) {
+      if (!mon->monmap->get_required_features().contains_all(
+	    ceph::features::mon::FEATURE_MIMIC)) {
+	ss << "not all mons are mimic";
+	err = -EPERM;
+	goto reply;
+      }
       if ((!HAVE_FEATURE(osdmap.get_up_osd_features(), SERVER_MIMIC))
            && !sure) {
 	ss << "not all up OSDs have CEPH_FEATURE_SERVER_MIMIC feature";
@@ -10099,6 +10351,12 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
 	goto reply;
       }
     } else if (rel == CEPH_RELEASE_NAUTILUS) {
+      if (!mon->monmap->get_required_features().contains_all(
+	    ceph::features::mon::FEATURE_NAUTILUS)) {
+	ss << "not all mons are nautilus";
+	err = -EPERM;
+	goto reply;
+      }
       if ((!HAVE_FEATURE(osdmap.get_up_osd_features(), SERVER_NAUTILUS))
            && !sure) {
 	ss << "not all up OSDs have CEPH_FEATURE_SERVER_NAUTILUS feature";
@@ -11286,6 +11544,13 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
       goto reply;
     }
     else {
+      if (osdmap.require_osd_release >= CEPH_RELEASE_NAUTILUS) {
+	// always blacklist type ANY
+	addr.set_type(entity_addr_t::TYPE_ANY);
+      } else {
+	addr.set_type(entity_addr_t::TYPE_LEGACY);
+      }
+
       string blacklistop;
       cmd_getval(cct, cmdmap, "blacklistop", blacklistop);
       if (blacklistop == "add") {
@@ -11414,10 +11679,11 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
 					      get_last_committed() + 1));
     return true;
   } else if (prefix == "osd pool create") {
-    int64_t  pg_num;
+    int64_t pg_num, pg_num_min;
     int64_t pgp_num;
     cmd_getval(cct, cmdmap, "pg_num", pg_num, int64_t(0));
     cmd_getval(cct, cmdmap, "pgp_num", pgp_num, pg_num);
+    cmd_getval(cct, cmdmap, "pg_num_min", pg_num_min, int64_t(0));
 
     string pool_type_str;
     cmd_getval(cct, cmdmap, "pool_type", pool_type_str);
@@ -11554,11 +11820,19 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,
       fast_read = FAST_READ_OFF;
     else if (fast_read_param > 0)
       fast_read = FAST_READ_ON;
-    
+
+    int64_t repl_size = 0;
+    cmd_getval(cct, cmdmap, "size", repl_size);
+    int64_t target_size_bytes = 0;
+    double target_size_ratio = 0.0;
+    cmd_getval(cct, cmdmap, "target_size_bytes", target_size_bytes);
+    cmd_getval(cct, cmdmap, "target_size_ratio", target_size_ratio);
+
     err = prepare_new_pool(poolstr,
 			   -1, // default crush rule
 			   rule_name,
-			   pg_num, pgp_num,
+			   pg_num, pgp_num, pg_num_min,
+                           repl_size, target_size_bytes, target_size_ratio,
 			   erasure_code_profile, pool_type,
                            (uint64_t)expected_num_objects,
                            fast_read,

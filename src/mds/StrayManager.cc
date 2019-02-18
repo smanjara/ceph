@@ -55,7 +55,7 @@ public:
   explicit StrayManagerLogContext(StrayManager *sm_) : sm(sm_) {}
 };
 
-class StrayManagerContext : public virtual MDSInternalContextBase {
+class StrayManagerContext : public virtual MDSContext {
 protected:
   StrayManager *sm;
   MDSRank *get_mds() override
@@ -230,8 +230,6 @@ void StrayManager::_purge_stray_purged(
 
     mds->mdlog->submit_entry(le, new C_PurgeStrayLogged(this, dn, pdv,
           mds->mdlog->get_current_segment()));
-
-    logger->set(l_mdc_num_strays, num_strays);
   }
 }
 

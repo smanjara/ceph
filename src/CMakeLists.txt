@@ -2,12 +2,14 @@ include(GetGitRevisionDescription)
 
 include(GNUInstallDirs)
 # for erasure and compressor plugins
-set(CMAKE_INSTALL_PKGLIBDIR ${CMAKE_INSTALL_LIBDIR}/${PROJECT_NAME})
-set(CMAKE_INSTALL_FULL_PKGLIBDIR ${CMAKE_INSTALL_FULL_LIBDIR}/${PROJECT_NAME})
+set(CEPH_INSTALL_PKGLIBDIR ${CMAKE_INSTALL_LIBDIR}/${PROJECT_NAME})
+set(CEPH_INSTALL_FULL_PKGLIBDIR ${CMAKE_INSTALL_FULL_LIBDIR}/${PROJECT_NAME})
+# for mgr plugins
+set(CEPH_INSTALL_DATADIR ${CMAKE_INSTALL_FULL_DATADIR}/${PROJECT_NAME})
 # so libceph-common can be found
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 if(NOT CMAKE_INSTALL_RPATH)
-  set(CMAKE_INSTALL_RPATH "${CMAKE_INSTALL_FULL_PKGLIBDIR}")
+  set(CMAKE_INSTALL_RPATH "${CEPH_INSTALL_FULL_PKGLIBDIR}")
 endif()
 
 # to be compatible with configure_files shared with autoconfig
@@ -17,7 +19,7 @@ set(libdir ${CMAKE_INSTALL_FULL_LIBDIR})
 set(sysconfdir ${CMAKE_INSTALL_FULL_SYSCONFDIR})
 set(libexecdir ${CMAKE_INSTALL_FULL_LIBEXECDIR})
 set(pkgdatadir ${CMAKE_INSTALL_FULL_DATADIR})
-set(datadir ${CMAKE_INSTALL_FULL_DATADIR}/${PROJECT_NAME})
+set(datadir ${CEPH_INSTALL_DATADIR})
 set(prefix ${CMAKE_INSTALL_PREFIX})
 
 add_definitions("-DHAVE_CONFIG_H -D__CEPH__ -D_REENTRANT -D_THREAD_SAFE -D__STDC_FORMAT_MACROS")
@@ -277,16 +279,10 @@ include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/src/xxHash")
 include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/src/rapidjson/include")
 
 if(WITH_SEASTAR)
-  find_package(fmt 4.0.0 QUIET)
+  find_package(fmt 5.2.1 QUIET)
   if(NOT fmt_FOUND)
     message(STATUS "Could not find fmt, will build it")
-    add_subdirectory(fmt)
-  elseif(fmt_VERSION VERSION_GREATER_EQUAL 5.0.0)
-    message(WARNING "Could NOT find fmt: "
-      "Found unsuitable version \"${fmt_VERSION}\", "
-      "but required is at most \"5.0.0\" (found ${fmt_INCLUDE_DIR}). "
-      "Will build it")
-    add_subdirectory(fmt)
+    add_subdirectory(seastar/fmt)
   endif()
   find_package(c-ares 1.13.0 QUIET)
   if(NOT c-ares_FOUND)
@@ -300,10 +296,12 @@ if(WITH_SEASTAR)
     endif()
   endmacro ()
   set(Seastar_HWLOC OFF CACHE BOOL "" FORCE)
+  set(Seastar_STD_OPTIONAL_VARIANT_STRINGVIEW ON CACHE BOOL "" FORCE)
+  set(Seastar_CXX_FLAGS "-Wno-sign-compare;-Wno-attributes;-Wno-pessimizing-move;-Wno-address-of-packed-member" CACHE STRING "" FORCE)
   add_subdirectory(seastar)
   # create the directory so cmake won't complain when looking at the imported
   # target: Seastar exports this directory created at build-time
-  file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/seastar/gen")
+  file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/seastar/gen/include")
   add_subdirectory(crimson)
 endif()
 
@@ -317,6 +315,7 @@ set(libcommon_files
   mon/MonMap.cc
   mon/MonSub.cc
   mgr/MgrClient.cc
+  mon/PGMap.cc
   mgr/ServiceMap.cc
   osd/ECMsgTypes.cc
   osd/HitSet.cc
@@ -364,6 +363,7 @@ set(ceph_common_deps
   ${Backtrace_LIBRARIES}
   ${BLKIN_LIBRARIES}
   ${CRYPTO_LIBS}
+  ${GSSAPI_LIBRARIES}
   ${CMAKE_THREAD_LIBS_INIT}
   ${CMAKE_DL_LIBS})
 if(HAVE_UDEV)
@@ -416,7 +416,7 @@ endif()
 install(
   TARGETS ceph-common
   LIBRARY
-  DESTINATION ${CMAKE_INSTALL_PKGLIBDIR}
+  DESTINATION ${CEPH_INSTALL_PKGLIBDIR}
   NAMELINK_SKIP)
 
 if(${WITH_LTTNG})
@@ -455,14 +455,14 @@ endif()
 set(librados_config_srcs
   librados-config.cc)
 add_executable(librados-config ${librados_config_srcs})
-target_link_libraries(librados-config librados global ${BLKID_LIBRARIES} ${CMAKE_DL_LIBS})
+target_link_libraries(librados-config librados global ${BLKID_LIBRARIES} ${CMAKE_DL_LIBS} ${GSSAPI_LIBRARIES})
 
 install(TARGETS librados-config DESTINATION bin)
 
 # virtualenv base directory for ceph-disk and ceph-detect-init
 set(CEPH_BUILD_VIRTUALENV $ENV{TMPDIR})
 if(NOT CEPH_BUILD_VIRTUALENV)
-  set(CEPH_BUILD_VIRTUALENV /tmp)
+  set(CEPH_BUILD_VIRTUALENV ${CMAKE_BINARY_DIR})
 endif()
 
 add_subdirectory(pybind)
@@ -477,7 +477,7 @@ add_executable(ceph-mon ${ceph_mon_srcs}
 add_dependencies(ceph-mon erasure_code_plugins)
 target_link_libraries(ceph-mon mon os global-static ceph-common
   ${EXTRALIBS}
-  ${CMAKE_DL_LIBS})
+  ${CMAKE_DL_LIBS} ${GSSAPI_LIBRARIES})
 install(TARGETS ceph-mon DESTINATION bin)
 
 # OSD/ObjectStore
@@ -512,13 +512,15 @@ set_target_properties(ceph-osd PROPERTIES
   POSITION_INDEPENDENT_CODE ${EXE_LINKER_USE_PIE})
 install(TARGETS ceph-osd DESTINATION bin)
 
-add_subdirectory(mds)
-set(ceph_mds_srcs
-  ceph_mds.cc)
-add_executable(ceph-mds ${ceph_mds_srcs})
-target_link_libraries(ceph-mds mds ${CMAKE_DL_LIBS} global-static ceph-common
-  Boost::thread)
-install(TARGETS ceph-mds DESTINATION bin)
+if (WITH_CEPHFS)
+  add_subdirectory(mds)
+  set(ceph_mds_srcs
+    ceph_mds.cc)
+  add_executable(ceph-mds ${ceph_mds_srcs})
+  target_link_libraries(ceph-mds mds ${CMAKE_DL_LIBS} global-static ceph-common
+    Boost::thread)
+  install(TARGETS ceph-mds DESTINATION bin)
+endif()
 
 add_subdirectory(erasure-code)
 
@@ -654,7 +656,7 @@ if(WITH_FUSE)
     client/fuse_ll.cc)
   add_executable(ceph-fuse ${ceph_fuse_srcs})
   target_link_libraries(ceph-fuse ${FUSE_LIBRARIES}
-    client ceph-common global-static)
+    ${GSSAPI_LIBRARIES} client ceph-common global-static)
   set_target_properties(ceph-fuse PROPERTIES
     COMPILE_FLAGS "-I${FUSE_INCLUDE_DIRS}"
     POSITION_INDEPENDENT_CODE ${EXE_LINKER_USE_PIE})
@@ -729,18 +731,23 @@ configure_file(
 add_custom_target(vstart-base DEPENDS
     ceph-osd
     ceph-mon
-    ceph-mgr
     ceph-authtool
     ceph-conf
     monmaptool
     crushtool
     rados
     cython${PY_BINDING_INFIX}_rados)
+if (WITH_MGR)
+  add_dependencies(vstart-base ceph-mgr)
+endif()
 
-add_custom_target(vstart DEPENDS
-    vstart-base
-    ceph-mds
-    cython${PY_BINDING_INFIX}_rbd)
+add_custom_target(vstart DEPENDS vstart-base)
+if (WITH_RBD)
+  add_dependencies(vstart cython${PY_BINDING_INFIX}_rbd)
+endif()
+if (WITH_CEPHFS)
+  add_dependencies(vstart ceph-mds)
+endif()
 if(WITH_RADOSGW)
   add_dependencies(vstart radosgw radosgw-admin)
 endif(WITH_RADOSGW)
@@ -751,6 +758,10 @@ endif(WITH_LTTNG)
 
 if(WITH_MGR AND WITH_MGR_DASHBOARD_FRONTEND AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
   add_dependencies(vstart mgr-dashboard-frontend-build)
+endif()
+
+if(WITH_MGR)
+  add_dependencies(vstart ceph-volume-venv-setup)
 endif()
 
 # Everything you need to run CephFS tests

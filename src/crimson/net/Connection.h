@@ -15,8 +15,8 @@
 #pragma once
 
 #include <queue>
-#include <boost/smart_ptr/intrusive_ref_counter.hpp>
 #include <seastar/core/future.hh>
+#include <seastar/core/shared_ptr.hh>
 
 #include "Fwd.h"
 
@@ -24,25 +24,21 @@ namespace ceph::net {
 
 using seq_num_t = uint64_t;
 
-class Connection : public boost::intrusive_ref_counter<Connection,
-						       boost::thread_unsafe_counter> {
+class Connection : public seastar::enable_shared_from_this<Connection> {
  protected:
-  entity_addr_t my_addr;
   entity_addr_t peer_addr;
   peer_type_t peer_type = -1;
 
  public:
-  Connection(const entity_addr_t& my_addr)
-    : my_addr(my_addr) {}
+  Connection() {}
   virtual ~Connection() {}
 
   virtual Messenger* get_messenger() const = 0;
-  const entity_addr_t& get_my_addr() const { return my_addr; }
   const entity_addr_t& get_peer_addr() const { return peer_addr; }
   virtual int get_peer_type() const = 0;
 
   /// true if the handshake has completed and no errors have been encountered
-  virtual bool is_connected() = 0;
+  virtual seastar::future<bool> is_connected() = 0;
 
   /// send a message over a connection that has completed its handshake
   virtual seastar::future<> send(MessageRef msg) = 0;
@@ -53,6 +49,18 @@ class Connection : public boost::intrusive_ref_counter<Connection,
 
   /// close the connection and cancel any any pending futures from read/send
   virtual seastar::future<> close() = 0;
+
+  /// which shard id the connection lives
+  virtual seastar::shard_id shard_id() const = 0;
+
+  virtual void print(ostream& out) const = 0;
 };
+
+inline ostream& operator<<(ostream& out, const Connection& conn) {
+  out << "[";
+  conn.print(out);
+  out << "]";
+  return out;
+}
 
 } // namespace ceph::net

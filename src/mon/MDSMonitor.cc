@@ -680,7 +680,9 @@ bool MDSMonitor::prepare_beacon(MonOpRequestRef op)
         });
     }
 
-    if (info.state == MDSMap::STATE_STOPPING && state != MDSMap::STATE_STOPPED ) {
+    if (info.state == MDSMap::STATE_STOPPING &&
+        state != MDSMap::STATE_STOPPING &&
+        state != MDSMap::STATE_STOPPED) {
       // we can't transition to any other states from STOPPING
       dout(0) << "got beacon for MDS in STATE_STOPPING, ignoring requested state change"
 	       << dendl;
@@ -1108,6 +1110,8 @@ bool MDSMonitor::fail_mds_gid(FSMap &fsmap, mds_gid_t gid)
 {
   const MDSMap::mds_info_t &info = fsmap.get_info_gid(gid);
   dout(1) << "fail_mds_gid " << gid << " mds." << info.name << " role " << info.rank << dendl;
+
+  ceph_assert(mon->osdmon()->is_writeable());
 
   epoch_t blacklist_epoch = 0;
   if (info.rank >= 0 && info.state != MDSMap::STATE_STANDBY_REPLAY) {
@@ -1639,7 +1643,7 @@ int MDSMonitor::load_metadata(map<mds_gid_t, Metadata>& m)
   bufferlist bl;
   int r = mon->store->get(MDS_METADATA_PREFIX, "last_metadata", bl);
   if (r) {
-    dout(1) << "Unable to load 'last_metadata'" << dendl;
+    dout(5) << "Unable to load 'last_metadata'" << dendl;
     return r;
   }
 

@@ -40,6 +40,7 @@ Build-Depends: bc,
                libleveldb-dev,
                liblttng-ust-dev,
                liblz4-dev (>= 0.0~r131),
+               libncurses-dev,
                libnss3-dev,
                liboath-dev,
                libsnappy-dev,
@@ -179,7 +180,6 @@ Architecture: linux-any
 Depends: ceph-base (= ${binary:Version}),
          python-cherrypy3,
          python-jwt,
-         python-jinja2,
          python-openssl,
          python-pecan,
          python-bcrypt,
@@ -187,6 +187,10 @@ Depends: ceph-base (= ${binary:Version}),
          ${misc:Depends},
          ${python:Depends},
          ${shlibs:Depends},
+Recommends: ceph-mgr-dashboard,
+            ceph-mgr-diskprediction-local,
+            ceph-mgr-diskprediction-cloud,
+            ceph-mgr-rook
 Suggests: python-influxdb
 Replaces: ceph (<< 0.93-417),
 Breaks: ceph (<< 0.93-417),
@@ -197,6 +201,76 @@ Description: manager for the ceph distributed storage system
  .
  This package contains the manager daemon, which is used to expose high
  level management and monitoring functionality.
+
+Package: ceph-mgr-dashboard
+Architecture: all
+Depends: ceph-mgr (= ${binary:Version}),
+         python-cherrypy3,
+         python-jwt,
+         python-openssl,
+         python-bcrypt,
+         python-werkzeug,
+         ${misc:Depends},
+         ${python:Depends},
+         ${shlibs:Depends},
+Description: dashboard plugin for ceph-mgr
+ Ceph is a massively scalable, open-source, distributed
+ storage system that runs on commodity hardware and delivers object,
+ block and file system storage.
+ .
+ This package provides a ceph-mgr plugin, providing a web-based
+ application to monitor and manage many aspects of a Ceph cluster and
+ related components.
+ .
+ See the Dashboard documentation at http://docs.ceph.com/ for details
+ and a detailed feature overview.
+
+Package: ceph-mgr-diskprediction-local
+Architecture: all
+Depends: ceph-mgr (= ${binary:Version}),
+         python-numpy,
+         python-scipy,
+         python-sklearn,
+         ${misc:Depends},
+         ${python:Depends},
+         ${shlibs:Depends},
+Description: diskprediction-local plugin for ceph-mgr
+ Ceph is a massively scalable, open-source, distributed
+ storage system that runs on commodity hardware and delivers object,
+ block and file system storage.
+ .
+ This package contains the diskprediction_local plugin for the ceph-mgr
+ daemon, which helps predict disk failures.
+
+Package: ceph-mgr-diskprediction-cloud
+Architecture: all
+Depends: ceph-mgr (= ${binary:Version}),
+         ${misc:Depends},
+         ${python:Depends},
+         ${shlibs:Depends},
+Description: diskprediction-cloud plugin for ceph-mgr
+ Ceph is a massively scalable, open-source, distributed
+ storage system that runs on commodity hardware and delivers object,
+ block and file system storage.
+ .
+ This package contains the diskprediction_cloud plugin for the ceph-mgr
+ daemon, which helps predict disk failures.
+
+Package: ceph-mgr-rook
+Architecture: all
+Depends: ceph-mgr (= ${binary:Version}),
+         python-six,
+         ${misc:Depends},
+         ${python:Depends},
+         ${shlibs:Depends},
+Description: rook plugin for ceph-mgr
+ Ceph is a massively scalable, open-source, distributed
+ storage system that runs on commodity hardware and delivers object,
+ block and file system storage.
+ .
+ This package contains the rook plugin for ceph-mgr's orchestration
+ functionality, to allow ceph-mgr to install and configure ceph using
+ Rook.
 
 Package: ceph-mgr-dbg
 Architecture: linux-any
@@ -277,6 +351,7 @@ Package: ceph-fuse
 Architecture: linux-any
 Depends: ${misc:Depends},
          ${shlibs:Depends},
+         ${python3:Depends},
          fuse,
 Description: FUSE-based client for the Ceph distributed file system
  Ceph is a massively scalable, open-source, distributed
@@ -493,9 +568,9 @@ Depends: librados3 (= ${binary:Version}),
          ${misc:Depends},
          ${shlibs:Depends},
 Conflicts: librados1-dev,
-           librados3-dev,
+           librados2-dev,
 Replaces: librados1-dev,
-          librados3-dev,
+          librados2-dev,
 Description: RADOS distributed object store client library (development files)
  RADOS is a reliable, autonomic distributed object storage cluster
  developed as part of the Ceph distributed storage system.  This is a

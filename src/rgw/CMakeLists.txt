@@ -53,6 +53,7 @@ set(librgw_common_srcs
   rgw_acl.cc
   rgw_acl_s3.cc
   rgw_acl_swift.cc
+  rgw_aio_throttle.cc
   rgw_auth.cc
   rgw_auth_s3.cc
   rgw_basic_types.cc
@@ -63,6 +64,9 @@ set(librgw_common_srcs
   rgw_cors.cc
   rgw_cors_s3.cc
   rgw_dencoder.cc
+  rgw_dmclock_scheduler_ctx.cc
+  rgw_dmclock_sync_scheduler.cc
+  rgw_dmclock_async_scheduler.cc
   rgw_env.cc
   rgw_es_query.cc
   rgw_formats.cc
@@ -76,6 +80,7 @@ set(librgw_common_srcs
   rgw_metadata.cc
   rgw_multi.cc
   rgw_multi_del.cc
+  rgw_pubsub.cc
   rgw_sync.cc
   rgw_data_sync.cc
   rgw_sync_module.cc
@@ -83,6 +88,8 @@ set(librgw_common_srcs
   rgw_sync_module_es.cc
   rgw_sync_module_es_rest.cc
   rgw_sync_module_log.cc
+  rgw_sync_module_pubsub.cc
+  rgw_sync_module_pubsub_rest.cc
   rgw_sync_log_trim.cc
   rgw_sync_trace.cc
   rgw_period_history.cc
@@ -91,13 +98,13 @@ set(librgw_common_srcs
   rgw_coroutine.cc
   rgw_cr_rados.cc
   rgw_cr_rest.cc
+  rgw_cr_tools.cc
   rgw_object_expirer_core.cc
   rgw_op.cc
   rgw_otp.cc
   rgw_policy_s3.cc
   rgw_putobj.cc
   rgw_putobj_processor.cc
-  rgw_putobj_throttle.cc
   rgw_quota.cc
   rgw_rados.cc
   rgw_resolve.cc
@@ -130,6 +137,8 @@ set(librgw_common_srcs
 add_library(rgw_common OBJECT ${librgw_common_srcs})
 
 target_include_directories(rgw_common SYSTEM PUBLIC "services")
+target_include_directories(rgw_common PUBLIC "${CMAKE_SOURCE_DIR}/src/dmclock/support/src")
+
 
 if(WITH_LTTNG)
   # rgw/rgw_op.cc includes "tracing/rgw_op.h"
@@ -182,7 +191,9 @@ add_dependencies(rgw_a civetweb_h)
 
 target_include_directories(rgw_a SYSTEM PUBLIC "../rapidjson/include")
 
-target_link_libraries(rgw_a PRIVATE
+target_link_libraries(rgw_a
+  PUBLIC dmclock::dmclock
+  PRIVATE
   librados-cxx cls_otp_client cls_lock_client cls_rgw_client cls_refcount_client
   cls_log_client cls_timeindex_client cls_version_client
   cls_user_client ceph-common common_utf8 global
@@ -196,8 +207,7 @@ if(WITH_CURL_OPENSSL)
   target_link_libraries(rgw_a PRIVATE OpenSSL::Crypto)
 endif()
 
-if(WITH_RADOSGW_BEAST_FRONTEND)
-  target_compile_definitions(rgw_a PUBLIC BOOST_COROUTINES_NO_DEPRECATION_WARNING)
+if(WITH_BOOST_CONTEXT)
   target_link_libraries(rgw_a PRIVATE Boost::coroutine Boost::context)
 endif()
 
@@ -230,7 +240,8 @@ target_link_libraries(radosgw radosgw_a librados
   cls_rgw_client cls_otp_client cls_lock_client cls_refcount_client
   cls_log_client cls_timeindex_client
   cls_version_client cls_user_client
-  global ${FCGI_LIBRARY} ${LIB_RESOLV}
+  global dmclock::dmclock
+  ${FCGI_LIBRARY} ${LIB_RESOLV}
   ${CURL_LIBRARIES} ${EXPAT_LIBRARIES} ${BLKID_LIBRARIES}
   ${ALLOC_LIBS})
 install(TARGETS radosgw DESTINATION bin)
@@ -280,7 +291,9 @@ set(librgw_srcs
   librgw.cc
   rgw_file.cc)
 add_library(rgw SHARED ${librgw_srcs})
-target_link_libraries(rgw PRIVATE
+target_link_libraries(rgw
+  PUBLIC dmclock::dmclock
+  PRIVATE
   rgw_a
   librados
   cls_rgw_client
@@ -323,7 +336,11 @@ target_link_libraries(rgw_admin_user PRIVATE
   ${CURL_LIBRARIES}
   ${EXPAT_LIBRARIES}
   ${OPENLDAP_LIBRARIES}
+  dmclock::dmclock
   )
 set_target_properties(rgw_admin_user PROPERTIES OUTPUT_NAME rgw_admin_user VERSION 1.0.0
   SOVERSION 0)
 install(TARGETS rgw_admin_user DESTINATION ${CMAKE_INSTALL_LIBDIR})
+if(WITH_BOOST_CONTEXT)
+  target_link_libraries(rgw_admin_user PRIVATE Boost::coroutine Boost::context)
+endif()

@@ -58,7 +58,7 @@ endif(WITH_CCACHE)
 option(WITH_MANPAGE "Build man pages." ON)
 if(WITH_MANPAGE)
   find_program(SPHINX_BUILD
-    sphinx-build)
+    NAMES sphinx-build sphinx-build-3)
   if(NOT SPHINX_BUILD)
     message(FATAL_ERROR "Can't find sphinx-build.")
   endif(NOT SPHINX_BUILD)
@@ -232,6 +232,12 @@ if(WITH_OPENLDAP)
   set(HAVE_OPENLDAP ${OPENLDAP_FOUND})
 endif()
 
+option(WITH_GSSAPI "GSSAPI/KRB5 is here" OFF)
+if(WITH_GSSAPI)
+  find_package(GSSApi REQUIRED)
+  set(HAVE_GSSAPI ${GSSApi_FOUND})
+endif()
+
 option(WITH_FUSE "Fuse is here" ON)
 if(WITH_FUSE)
   find_package(fuse)
@@ -252,8 +258,13 @@ endif()
 
 option(WITH_BLUESTORE "Bluestore OSD backend" ON)
 if(WITH_BLUESTORE)
-  find_package(aio)
-  set(HAVE_LIBAIO ${AIO_FOUND})
+  if(LINUX)
+    find_package(aio)
+    set(HAVE_LIBAIO ${AIO_FOUND})
+  elseif(FREEBSD)
+    # POSIX AIO is integrated into FreeBSD kernel, and exposed by libc.
+    set(HAVE_POSIXAIO ON)
+  endif()
 endif()
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "i386|i686|amd64|x86_64|AMD64|aarch64")
@@ -279,7 +290,7 @@ if(WITH_PMEM)
 endif()
 
 if(WITH_BLUESTORE)
-  if(NOT AIO_FOUND AND NOT WITH_SPDK AND NOT WITH_PMEM)
+  if(NOT AIO_FOUND AND NOT HAVE_POSIXAIO AND NOT WITH_SPDK AND NOT WITH_PMEM)
     message(SEND_ERROR "WITH_BLUESTORE is ON, "
       "but none of the bluestore backends is enabled. "
       "Please install libaio, or enable WITH_SPDK or WITH_PMEM (experimental)")
@@ -560,6 +571,8 @@ option(ENABLE_COVERAGE "Coverage is enabled" OFF)
 option(PG_DEBUG_REFS "PG Ref debugging is enabled" OFF)
 
 option(WITH_TESTS "enable the build of ceph-test package scripts/binaries" ON)
+set(CEPH_TEST_TIMEOUT 3600 CACHE STRING 
+  "Maximum time before a CTest gets killed" )
 
 # fio
 option(WITH_FIO "build with fio plugin enabled" OFF)

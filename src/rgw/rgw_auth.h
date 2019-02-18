@@ -13,6 +13,7 @@
 
 #include "rgw_common.h"
 #include "rgw_keystone.h"
+#include "rgw_web_idp.h"
 
 #define RGW_USER_ANON_ID "anonymous"
 
@@ -350,6 +351,67 @@ protected:
  * Each new Strategy should be exposed to it. */
 class StrategyRegistry;
 
+class WebIdentityApplier : public IdentityApplier {
+protected:
+  CephContext* const cct;
+  RGWRados* const store;
+  rgw::web_idp::WebTokenClaims token_claims;
+
+  string get_idp_url() const;
+
+public:
+  WebIdentityApplier( CephContext* const cct,
+                      RGWRados* const store,
+                      const rgw::web_idp::WebTokenClaims& token_claims)
+    : cct(cct),
+      store(store),
+      token_claims(token_claims) {
+  }
+
+  void load_acct_info(const DoutPrefixProvider* dpp, RGWUserInfo& user_info) const override {
+    user_info.user_id = rgw_user(token_claims.sub);
+    user_info.display_name = token_claims.user_name;
+  }
+
+  void modify_request_state(const DoutPrefixProvider *dpp, req_state* s) const override;
+
+  uint32_t get_perms_from_aclspec(const DoutPrefixProvider* dpp, const aclspec_t& aclspec) const  override {
+    return RGW_PERM_NONE;
+  }
+
+  bool is_admin_of(const rgw_user& uid) const override {
+    return false;
+  }
+
+  bool is_owner_of(const rgw_user& uid) const override {
+    return false;
+  }
+
+  uint32_t get_perm_mask() const override {
+    return RGW_PERM_NONE;
+  }
+
+  void to_str(std::ostream& out) const override;
+
+  bool is_identity(const idset_t& ids) const override;
+
+  uint32_t get_identity_type() const override {
+    return TYPE_WEB;
+  }
+
+  string get_acct_name() const override {
+    return token_claims.user_name;
+  }
+
+  struct Factory {
+    virtual ~Factory() {}
+
+    virtual aplptr_t create_apl_web_identity( CephContext* cct,
+                                              const req_state* s,
+                                              const rgw::web_idp::WebTokenClaims& token) const = 0;
+  };
+};
+
 /* rgw::auth::RemoteApplier targets those authentication engines which don't
  * need to ask the RADOS store while performing the auth process. Instead,
  * they obtain credentials from an external source like Keystone or LDAP.
@@ -455,7 +517,6 @@ class LocalApplier : public IdentityApplier {
 protected:
   const RGWUserInfo user_info;
   const std::string subuser;
-  vector<std::string> role_policies;
   uint32_t perm_mask;
 
   uint32_t get_perm_mask(const std::string& subuser_name,
@@ -467,13 +528,9 @@ public:
   LocalApplier(CephContext* const cct,
                const RGWUserInfo& user_info,
                std::string subuser,
-               const boost::optional<vector<std::string> >& role_policies,
                const boost::optional<uint32_t>& perm_mask)
     : user_info(user_info),
       subuser(std::move(subuser)) {
-    if (role_policies) {
-      this->role_policies = role_policies.get();
-    }
     if (perm_mask) {
       this->perm_mask = perm_mask.get();
     } else {
@@ -497,7 +554,6 @@ public:
   void load_acct_info(const DoutPrefixProvider* dpp, RGWUserInfo& user_info) const override; /* out */
   uint32_t get_identity_type() const override { return TYPE_RGW; }
   string get_acct_name() const override { return {}; }
-  void modify_request_state(const DoutPrefixProvider* dpp, req_state* s) const override;
 
   struct Factory {
     virtual ~Factory() {}
@@ -505,11 +561,54 @@ public:
                                       const req_state* s,
                                       const RGWUserInfo& user_info,
                                       const std::string& subuser,
-                                      const boost::optional<vector<std::string> >& role_policies,
                                       const boost::optional<uint32_t>& perm_mask) const = 0;
     };
 };
 
+class RoleApplier : public IdentityApplier {
+protected:
+  const string role_name;
+  const rgw_user user_id;
+  vector<std::string> role_policies;
+
+public:
+
+  RoleApplier(CephContext* const cct,
+               const string& role_name,
+               const rgw_user& user_id,
+               const vector<std::string>& role_policies)
+    : role_name(role_name),
+      user_id(user_id),
+      role_policies(role_policies) {}
+
+  uint32_t get_perms_from_aclspec(const DoutPrefixProvider* dpp, const aclspec_t& aclspec) const override {
+    return 0;
+  }
+  bool is_admin_of(const rgw_user& uid) const override {
+    return false;
+  }
+  bool is_owner_of(const rgw_user& uid) const override {
+    return false;
+  }
+  bool is_identity(const idset_t& ids) const override;
+  uint32_t get_perm_mask() const override {
+    return RGW_PERM_NONE;
+  }
+  void to_str(std::ostream& out) const override;
+  void load_acct_info(const DoutPrefixProvider* dpp, RGWUserInfo& user_info) const override; /* out */
+  uint32_t get_identity_type() const override { return TYPE_ROLE; }
+  string get_acct_name() const override { return {}; }
+  void modify_request_state(const DoutPrefixProvider* dpp, req_state* s) const override;
+
+  struct Factory {
+    virtual ~Factory() {}
+    virtual aplptr_t create_apl_role( CephContext* cct,
+                                      const req_state* s,
+                                      const string& role_name,
+                                      const rgw_user& user_id,
+                                      const vector<std::string>& role_policies) const = 0;
+    };
+};
 
 /* The anonymous abstract engine. */
 class AnonymousEngine : public Engine {

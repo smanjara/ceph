@@ -34,6 +34,7 @@
 #include "OSDCap.h" 
  
 #include "auth/KeyRing.h"
+
 #include "osd/ClassHandler.h"
 
 #include "include/CompatSet.h"
@@ -46,6 +47,7 @@
 #include <atomic>
 #include <map>
 #include <memory>
+#include <string>
 
 #include "include/unordered_map.h"
 
@@ -124,9 +126,6 @@ enum {
   l_osd_rbytes,
 
   l_osd_loadavg,
-  l_osd_buf,
-  l_osd_history_alloc_bytes,
-  l_osd_history_alloc_num,
   l_osd_cached_crc,
   l_osd_cached_crc_adjusted,
   l_osd_missed_crc,
@@ -240,8 +239,6 @@ class KeyStore;
 class Watch;
 class PrimaryLogPG;
 
-class AuthAuthorizeHandlerRegistry;
-
 class TestOpsSocketHook;
 struct C_FinishSplits;
 struct C_OpenPGs;
@@ -296,7 +293,7 @@ public:
 
 private:
   // -- superblock --
-  Mutex publish_lock, pre_publish_lock; // pre-publish orders before publish
+  ceph::mutex publish_lock, pre_publish_lock; // pre-publish orders before publish
   OSDSuperblock superblock;
 
 public:
@@ -345,7 +342,7 @@ public:
    */
 private:
   OSDMapRef next_osdmap;
-  Cond pre_publish_cond;
+  ceph::condition_variable pre_publish_cond;
 
 public:
   void pre_publish_map(OSDMapRef map) {
@@ -378,20 +375,17 @@ public:
     if (--(i->second) == 0) {
       map_reservations.erase(i);
     }
-    pre_publish_cond.Signal();
+    pre_publish_cond.notify_all();
   }
   /// blocks until there are no reserved maps prior to next_osdmap
   void await_reserved_maps() {
-    std::lock_guard l(pre_publish_lock);
+    std::unique_lock l{pre_publish_lock};
     ceph_assert(next_osdmap);
-    while (true) {
-      map<epoch_t, unsigned>::const_iterator i = map_reservations.cbegin();
-      if (i == map_reservations.cend() || i->first >= next_osdmap->get_epoch()) {
-	break;
-      } else {
-	pre_publish_cond.Wait(pre_publish_lock);
-      }
-    }
+    pre_publish_cond.wait(l, [this] {
+      auto i = map_reservations.cbegin();
+      return (i == map_reservations.cend() ||
+	      i->first >= next_osdmap->get_epoch());
+    });
   }
   OSDMapRef get_next_osdmap() {
     std::lock_guard l(pre_publish_lock);
@@ -753,7 +747,11 @@ public:
   void requeue_pg_temp();
   void send_pg_temp();
 
+  ceph::mutex pg_created_lock = ceph::make_mutex("OSDService::pg_created_lock");
+  set<pg_t> pg_created;
   void send_pg_created(pg_t pgid);
+  void prune_pg_created();
+  void send_pg_created();
 
   AsyncReserver<spg_t> snap_reserver;
   void queue_recovery_context(PG *pg, GenContext<ThreadPool::TPHandle&> *c);
@@ -904,8 +902,10 @@ public:
   osd_stat_t osd_stat;
   uint32_t seq = 0;
 
-  void set_statfs(const struct store_statfs_t &stbuf);
+  void set_statfs(const struct store_statfs_t &stbuf,
+    osd_alert_list_t& alerts);
   osd_stat_t set_osd_stat(vector<int>& hb_peers, int num_pgs);
+  float compute_adjusted_ratio(osd_stat_t new_stat, float *pratio, uint64_t adjust_used = 0);
   osd_stat_t get_osd_stat() {
     std::lock_guard l(stat_lock);
     ++seq;
@@ -947,15 +947,19 @@ private:
     else
       return INVALID;
   }
-  double cur_ratio;  ///< current utilization
+  double cur_ratio, physical_ratio;  ///< current utilization
   mutable int64_t injectfull = 0;
   s_names injectfull_state = NONE;
   float get_failsafe_full_ratio();
+  bool _check_inject_full(DoutPrefixProvider *dpp, s_names type) const;
   bool _check_full(DoutPrefixProvider *dpp, s_names type) const;
 public:
-  void check_full_status(float ratio);
+  void check_full_status(float ratio, float pratio);
+  s_names recalc_full_state(float ratio, float pratio, string &inject);
+  bool _tentative_full(DoutPrefixProvider *dpp, s_names type, uint64_t adjust_used, osd_stat_t);
   bool check_failsafe_full(DoutPrefixProvider *dpp) const;
   bool check_full(DoutPrefixProvider *dpp) const;
+  bool tentative_backfill_full(DoutPrefixProvider *dpp, uint64_t adjust_used, osd_stat_t);
   bool check_backfill_full(DoutPrefixProvider *dpp) const;
   bool check_nearfull(DoutPrefixProvider *dpp) const;
   bool is_failsafe_full() const;
@@ -1131,11 +1135,11 @@ struct OSDShard {
   string shard_name;
 
   string sdata_wait_lock_name;
-  Mutex sdata_wait_lock;
-  Cond sdata_cond;
+  ceph::mutex sdata_wait_lock;
+  ceph::condition_variable sdata_cond;
 
   string osdmap_lock_name;
-  Mutex osdmap_lock;  ///< protect shard_osdmap updates vs users w/o shard_lock
+  ceph::mutex osdmap_lock;  ///< protect shard_osdmap updates vs users w/o shard_lock
   OSDMapRef shard_osdmap;
 
   OSDMapRef get_osdmap() {
@@ -1144,7 +1148,7 @@ struct OSDShard {
   }
 
   string shard_lock_name;
-  Mutex shard_lock;   ///< protects remaining members below
+  ceph::mutex shard_lock;   ///< protects remaining members below
 
   /// map of slots for each spg_t.  maintains ordering of items dequeued
   /// from pqueue while _process thread drops shard lock to acquire the
@@ -1166,7 +1170,7 @@ struct OSDShard {
       &OSDShardPGSlot::pg_epoch_item>,
     boost::intrusive::compare<pg_slot_compare_by_epoch>> pg_slots_by_epoch;
   int waiting_for_min_pg_epoch = 0;
-  Cond min_pg_epoch_cond;
+  ceph::condition_variable min_pg_epoch_cond;
 
   /// priority queue
   std::unique_ptr<OpQueue<OpQueueItem, uint64_t>> pqueue;
@@ -1228,11 +1232,11 @@ struct OSDShard {
       osd(osd),
       shard_name(string("OSDShard.") + stringify(id)),
       sdata_wait_lock_name(shard_name + "::sdata_wait_lock"),
-      sdata_wait_lock(sdata_wait_lock_name.c_str(), false, true, false),
+      sdata_wait_lock{make_mutex(sdata_wait_lock_name)},
       osdmap_lock_name(shard_name + "::osdmap_lock"),
-      osdmap_lock(osdmap_lock_name.c_str(), false, false),
+      osdmap_lock{make_mutex(osdmap_lock_name)},
       shard_lock_name(shard_name + "::shard_lock"),
-      shard_lock(shard_lock_name.c_str(), false, true, false),
+      shard_lock{make_mutex(shard_lock_name)},
       context_queue(sdata_wait_lock, sdata_cond) {
     if (opqueue == io_queue::weightedpriority) {
       pqueue = std::make_unique<
@@ -1253,12 +1257,14 @@ struct OSDShard {
 class OSD : public Dispatcher,
 	    public md_config_obs_t {
   /** OSD **/
-  Mutex osd_lock;			// global lock
+  Mutex osd_lock;          // global lock
   SafeTimer tick_timer;    // safe timer (osd_lock)
 
   // Tick timer for those stuff that do not need osd_lock
   Mutex tick_timer_lock;
   SafeTimer tick_timer_without_osd_lock;
+  std::string gss_ktfile_client{};
+
 public:
   // config observer bits
   const char** get_tracked_conf_keys() const override;
@@ -1271,9 +1277,6 @@ protected:
 
   const double OSD_TICK_INTERVAL = { 1.0 };
   double get_tick_interval() const;
-
-  AuthAuthorizeHandlerRegistry *authorize_handler_cluster_registry;
-  AuthAuthorizeHandlerRegistry *authorize_handler_service_registry;
 
   Messenger   *cluster_messenger;
   Messenger   *client_messenger;
@@ -1291,6 +1294,12 @@ protected:
 
   int whoami;
   std::string dev_path, journal_path;
+
+  int last_require_osd_release = 0;
+
+  int numa_node = -1;
+  size_t numa_cpu_set_size = 0;
+  cpu_set_t numa_cpu_set;
 
   bool store_is_rotational = true;
   bool journal_is_rotational = true;
@@ -1656,13 +1665,12 @@ public:
     int ms_handle_authentication(Connection *con) override {
       return true;
     }
-    bool ms_get_authorizer(int dest_type, AuthAuthorizer **authorizer,
-			   bool force_new) override {
+    bool ms_get_authorizer(int dest_type, AuthAuthorizer **authorizer) override {
       // some pre-nautilus OSDs get confused if you include an
       // authorizer but they are not expecting it.  do not try to authorize
       // heartbeat connections until all OSDs are nautilus.
       if (osd->get_osdmap()->require_osd_release >= CEPH_RELEASE_NAUTILUS) {
-	return osd->ms_get_authorizer(dest_type, authorizer, force_new);
+	return osd->ms_get_authorizer(dest_type, authorizer);
       }
       return false;
     }
@@ -1753,11 +1761,10 @@ protected:
     void return_waiting_threads() override {
       for(uint32_t i = 0; i < osd->num_shards; i++) {
 	OSDShard* sdata = osd->shards[i];
-	assert (NULL != sdata); 
-	sdata->sdata_wait_lock.Lock();
+	assert (NULL != sdata);
+	std::scoped_lock l{sdata->sdata_wait_lock};
 	sdata->stop_waiting = true;
-	sdata->sdata_cond.Signal();
-	sdata->sdata_wait_lock.Unlock();
+	sdata->sdata_cond.notify_all();
       }
     }
 
@@ -1765,9 +1772,8 @@ protected:
       for(uint32_t i = 0; i < osd->num_shards; i++) {
 	OSDShard* sdata = osd->shards[i];
 	assert (NULL != sdata);
-	sdata->sdata_wait_lock.Lock();
+	std::scoped_lock l{sdata->sdata_wait_lock};
 	sdata->stop_waiting = false;
-	sdata->sdata_wait_lock.Unlock();
       }
     }
 
@@ -1779,11 +1785,10 @@ protected:
 	snprintf(queue_name, sizeof(queue_name), "%s%" PRIu32, "OSD:ShardedOpWQ:", i);
 	ceph_assert(NULL != sdata);
 
-	sdata->shard_lock.Lock();
+	std::scoped_lock l{sdata->shard_lock};
 	f->open_object_section(queue_name);
 	sdata->pqueue->dump(f);
 	f->close_section();
-	sdata->shard_lock.Unlock();
       }
     }
 
@@ -2008,6 +2013,7 @@ protected:
   void requeue_failures();
   void send_failures();
   void send_still_alive(epoch_t epoch, int osd, const entity_addrvec_t &addrs);
+  void cancel_pending_failures();
 
   ceph::coarse_mono_clock::time_point last_sent_beacon;
   Mutex min_last_epoch_clean_lock{"OSD::min_last_epoch_clean_lock"};
@@ -2105,14 +2111,14 @@ protected:
       return c;
     }
     void _process(Command *c, ThreadPool::TPHandle &) override {
-      osd->osd_lock.Lock();
+      osd->osd_lock.lock();
       if (osd->is_stopping()) {
-	osd->osd_lock.Unlock();
+	osd->osd_lock.unlock();
 	delete c;
 	return;
       }
       osd->do_command(c->con.get(), c->tid, c->cmd, c->indata);
-      osd->osd_lock.Unlock();
+      osd->osd_lock.unlock();
       delete c;
     }
     void _clear() override {
@@ -2192,9 +2198,8 @@ private:
     }
   }
   void ms_fast_dispatch(Message *m) override;
-  void ms_fast_preprocess(Message *m) override;
   bool ms_dispatch(Message *m) override;
-  bool ms_get_authorizer(int dest_type, AuthAuthorizer **authorizer, bool force_new) override;
+  bool ms_get_authorizer(int dest_type, AuthAuthorizer **authorizer) override;
   void ms_handle_connect(Connection *con) override;
   void ms_handle_fast_connect(Connection *con) override;
   void ms_handle_fast_accept(Connection *con) override;
@@ -2291,8 +2296,12 @@ private:
   void probe_smart(const string& devid, ostream& ss);
 
 public:
-  static int peek_meta(ObjectStore *store, string& magic,
-		       uuid_d& cluster_fsid, uuid_d& osd_fsid, int& whoami);
+  static int peek_meta(ObjectStore *store,
+		       string *magic,
+		       uuid_d *cluster_fsid,
+		       uuid_d *osd_fsid,
+		       int *whoami,
+		       int *min_osd_release);
   
 
   // startup/shutdown
@@ -2301,6 +2310,7 @@ public:
   void final_init();
 
   int enable_disable_fuse(bool stop);
+  int set_numa_affinity();
 
   void suicide(int exitcode);
   int shutdown();
@@ -2315,12 +2325,14 @@ public:
   friend class OSDService;
 
 private:
-  void set_perf_queries(const std::list<OSDPerfMetricQuery> &queries);
+  void set_perf_queries(
+      const std::map<OSDPerfMetricQuery, OSDPerfMetricLimits> &queries);
   void get_perf_reports(
       std::map<OSDPerfMetricQuery, OSDPerfMetricReport> *reports);
 
   Mutex m_perf_queries_lock = {"OSD::m_perf_queries_lock"};
   std::list<OSDPerfMetricQuery> m_perf_queries;
+  std::map<OSDPerfMetricQuery, OSDPerfMetricLimits> m_perf_limits;
 };
 
 

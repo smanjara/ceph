@@ -1,5 +1,6 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -20,7 +21,11 @@
 #include "rgw_rados.h"
 #include "services/svc_rados.h"
 
-namespace rgw::putobj {
+namespace rgw {
+
+class Aio;
+
+namespace putobj {
 
 // a data consumer that writes an object in a bucket
 class ObjectProcessor : public DataProcessor {
@@ -67,7 +72,6 @@ class HeadObjectProcessor : public ObjectProcessor {
 };
 
 
-class Aio;
 using RawObjSet = std::set<rgw_raw_obj>;
 
 // a data sink that writes to rados objects and deletes them on cancelation
@@ -77,7 +81,6 @@ class RadosWriter : public DataProcessor {
   const RGWBucketInfo& bucket_info;
   RGWObjectCtx& obj_ctx;
   const rgw_obj& head_obj;
-  rgw_raw_obj stripe_raw;
   RGWSI_RADOS::Obj stripe_obj; // current stripe object
   RawObjSet written; // set of written objects for deletion
 
@@ -90,7 +93,7 @@ class RadosWriter : public DataProcessor {
   ~RadosWriter();
 
   // change the current stripe object
-  int set_stripe_obj(rgw_raw_obj&& obj);
+  int set_stripe_obj(const rgw_raw_obj& obj);
 
   // write the data at the given offset of the current stripe object
   int process(bufferlist&& data, uint64_t stripe_offset) override;
@@ -111,6 +114,7 @@ class ManifestObjectProcessor : public HeadObjectProcessor,
  protected:
   RGWRados *const store;
   const RGWBucketInfo& bucket_info;
+  rgw_placement_rule tail_placement_rule;
   const rgw_user& owner;
   RGWObjectCtx& obj_ctx;
   rgw_obj head_obj;
@@ -127,14 +131,23 @@ class ManifestObjectProcessor : public HeadObjectProcessor,
  public:
   ManifestObjectProcessor(Aio *aio, RGWRados *store,
                           const RGWBucketInfo& bucket_info,
+                          const rgw_placement_rule *ptail_placement_rule,
                           const rgw_user& owner, RGWObjectCtx& obj_ctx,
                           const rgw_obj& head_obj)
     : HeadObjectProcessor(0),
-      store(store), bucket_info(bucket_info), owner(owner),
+      store(store), bucket_info(bucket_info),
+      owner(owner),
       obj_ctx(obj_ctx), head_obj(head_obj),
       writer(aio, store, bucket_info, obj_ctx, head_obj),
-      chunk(&writer, 0), stripe(&chunk, this, 0)
-  {}
+      chunk(&writer, 0), stripe(&chunk, this, 0) {
+        if (ptail_placement_rule) {
+          tail_placement_rule = *ptail_placement_rule;
+        }
+      }
+
+  void set_tail_placement(const rgw_placement_rule&& tpr) {
+    tail_placement_rule = tpr;
+  }
 };
 
 
@@ -148,11 +161,14 @@ class AtomicObjectProcessor : public ManifestObjectProcessor {
   int process_first_chunk(bufferlist&& data, DataProcessor **processor) override;
  public:
   AtomicObjectProcessor(Aio *aio, RGWRados *store,
-                        const RGWBucketInfo& bucket_info, const rgw_user& owner,
+                        const RGWBucketInfo& bucket_info,
+                        const rgw_placement_rule *ptail_placement_rule,
+                        const rgw_user& owner,
                         RGWObjectCtx& obj_ctx, const rgw_obj& head_obj,
                         std::optional<uint64_t> olh_epoch,
                         const std::string& unique_tag)
-    : ManifestObjectProcessor(aio, store, bucket_info, owner, obj_ctx, head_obj),
+    : ManifestObjectProcessor(aio, store, bucket_info, ptail_placement_rule,
+                              owner, obj_ctx, head_obj),
       olh_epoch(olh_epoch), unique_tag(unique_tag)
   {}
 
@@ -187,11 +203,13 @@ class MultipartObjectProcessor : public ManifestObjectProcessor {
  public:
   MultipartObjectProcessor(Aio *aio, RGWRados *store,
                            const RGWBucketInfo& bucket_info,
+                           const rgw_placement_rule *ptail_placement_rule,
                            const rgw_user& owner, RGWObjectCtx& obj_ctx,
                            const rgw_obj& head_obj,
                            const std::string& upload_id, uint64_t part_num,
                            const std::string& part_num_str)
-    : ManifestObjectProcessor(aio, store, bucket_info, owner, obj_ctx, head_obj),
+    : ManifestObjectProcessor(aio, store, bucket_info, ptail_placement_rule,
+                              owner, obj_ctx, head_obj),
       target_obj(head_obj), upload_id(upload_id),
       part_num(part_num), part_num_str(part_num_str),
       mp(head_obj.key.name, upload_id)
@@ -210,4 +228,5 @@ class MultipartObjectProcessor : public ManifestObjectProcessor {
                rgw_zone_set *zones_trace, bool *canceled) override;
 };
 
-} // namespace rgw::putobj
+} // namespace putobj
+} // namespace rgw

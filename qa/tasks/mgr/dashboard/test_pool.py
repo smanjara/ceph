@@ -6,7 +6,7 @@ import logging
 import six
 import time
 
-from .helper import DashboardTestCase, JObj, JList
+from .helper import DashboardTestCase, JAny, JList, JObj
 
 log = logging.getLogger(__name__)
 
@@ -20,6 +20,21 @@ class PoolTest(DashboardTestCase):
         'application_metadata': JList(str),
         'flags': int,
         'flags_names': str,
+    }, allow_unknown=True)
+
+    pool_list_stat_schema = JObj(sub_elems={
+        'latest': int,
+        'rate': float,
+        'series': JList(JAny(none=False)),
+    })
+
+    pool_list_stats_schema = JObj(sub_elems={
+        'bytes_used': pool_list_stat_schema,
+        'max_avail': pool_list_stat_schema,
+        'rd_bytes': pool_list_stat_schema,
+        'wr_bytes': pool_list_stat_schema,
+        'rd': pool_list_stat_schema,
+        'wr': pool_list_stat_schema,
     }, allow_unknown=True)
 
     def _pool_create(self, data):
@@ -47,7 +62,7 @@ class PoolTest(DashboardTestCase):
             log.exception("test_pool_create: pool=%s", pool)
             raise
 
-        health = self._get('/api/dashboard/health')['health']
+        health = self._get('/api/health/minimal')['health']
         self.assertEqual(health['status'], 'HEALTH_OK', msg='health={}'.format(health))
 
     def _get_pool(self, pool_name):
@@ -86,7 +101,7 @@ class PoolTest(DashboardTestCase):
         # Feel free to test it locally.
         prop = 'pg_num'
         pgp_prop = 'pg_placement_num'
-        health = lambda: self._get('/api/dashboard/health')['health']['status'] == 'HEALTH_OK'
+        health = lambda: self._get('/api/health/minimal')['health']['status'] == 'HEALTH_OK'
         t = 0;
         while (int(value) != pool[pgp_prop] or not health()) and t < 180:
             time.sleep(2)
@@ -127,6 +142,7 @@ class PoolTest(DashboardTestCase):
         self.assertEqual(len(cluster_pools), len(data))
         self.assertSchemaBody(JList(self.pool_schema))
         for pool in data:
+            self.assertNotIn('pg_status', pool)
             self.assertNotIn('stats', pool)
             self.assertIn(pool['pool_name'], cluster_pools)
 
@@ -141,6 +157,7 @@ class PoolTest(DashboardTestCase):
             self.assertIn('type', pool)
             self.assertIn('flags', pool)
             self.assertNotIn('flags_names', pool)
+            self.assertNotIn('pg_status', pool)
             self.assertNotIn('stats', pool)
             self.assertIn(pool['pool_name'], cluster_pools)
 
@@ -150,12 +167,14 @@ class PoolTest(DashboardTestCase):
 
         cluster_pools = self.ceph_cluster.mon_manager.list_pools()
         self.assertEqual(len(cluster_pools), len(data))
+        self.assertSchemaBody(JList(self.pool_schema))
         for pool in data:
             self.assertIn('pool_name', pool)
             self.assertIn('type', pool)
             self.assertIn('application_metadata', pool)
             self.assertIn('flags', pool)
-            self.assertIn('stats', pool)
+            self.assertIn('pg_status', pool)
+            self.assertSchema(pool['stats'], self.pool_list_stats_schema)
             self.assertIn('flags_names', pool)
             self.assertIn(pool['pool_name'], cluster_pools)
 
@@ -166,7 +185,8 @@ class PoolTest(DashboardTestCase):
         self.assertEqual(pool['pool_name'], cluster_pools[0])
         self.assertIn('type', pool)
         self.assertIn('flags', pool)
-        self.assertIn('stats', pool)
+        self.assertNotIn('pg_status', pool)
+        self.assertSchema(pool['stats'], self.pool_list_stats_schema)
         self.assertNotIn('flags_names', pool)
 
     def test_pool_create(self):

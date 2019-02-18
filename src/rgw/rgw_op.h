@@ -1,5 +1,6 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab
+
 /**
  * All operations via the rados gateway are carried out by
  * small classes known as RGWOps. This class contains a req_state
@@ -8,6 +9,7 @@
  * These subclasses must be further subclassed (by interface type)
  * to provide additional virtual methods such as send_response or get_params.
  */
+
 #ifndef CEPH_RGW_OP_H
 #define CEPH_RGW_OP_H
 
@@ -31,6 +33,7 @@
 #include "common/ceph_time.h"
 
 #include "rgw_common.h"
+#include "rgw_dmclock.h"
 #include "rgw_rados.h"
 #include "rgw_user.h"
 #include "rgw_bucket.h"
@@ -65,6 +68,11 @@ class StrategyRegistry;
 }
 }
 
+int rgw_op_get_bucket_policy_from_attr(CephContext *cct,
+                                       RGWRados *store,
+                                       RGWBucketInfo& bucket_info,
+                                       map<string, bufferlist>& bucket_attrs,
+                                       RGWAccessControlPolicy *policy);
 
 class RGWHandler {
 protected:
@@ -99,11 +107,17 @@ public:
   virtual int postauth_init() = 0;
   virtual int error_handler(int err_no, std::string* error_content);
   virtual void dump(const string& code, const string& message) const {}
+
+  virtual bool supports_quota() {
+    return true;
+  }
 };
 
 
 
 void rgw_bucket_object_pre_exec(struct req_state *s);
+
+namespace dmc = rgw::dmclock;
 
 /**
  * Provide the base class for all ops.
@@ -136,9 +150,11 @@ public:
   int get_ret() const { return op_ret; }
 
   virtual int init_processing() {
-    op_ret = init_quota();
-    if (op_ret < 0)
-      return op_ret;
+    if (dialect_handler->supports_quota()) {
+      op_ret = init_quota();
+      if (op_ret < 0)
+        return op_ret;
+    }
 
     return 0;
   }
@@ -186,6 +202,14 @@ public:
   std::ostream& gen_prefix(std::ostream& out) const override;
   CephContext* get_cct() const override { return s->cct; }
   unsigned get_subsys() const override { return ceph_subsys_rgw; }
+
+  virtual dmc::client_id dmclock_client() { return dmc::client_id::metadata; }
+  virtual dmc::Cost dmclock_cost() { return 1; }
+};
+
+class RGWDefaultResponseOp : public RGWOp {
+public:
+  void send_response() override;
 };
 
 class RGWGetObj_Filter : public RGWGetDataCB
@@ -337,6 +361,7 @@ public:
     *filter = nullptr;
     return 0;
   }
+  dmc::client_id dmclock_client() override { return dmc::client_id::data; }
 };
 
 class RGWGetObj_CB : public RGWGetObj_Filter
@@ -465,6 +490,7 @@ public:
   const char* name() const override { return "bulk_delete"; }
   RGWOpType get_type() override { return RGW_OP_BULK_DELETE; }
   uint32_t op_mask() override { return RGW_OP_TYPE_DELETE; }
+  dmc::client_id dmclock_client() override { return dmc::client_id::data; }
 };
 
 inline ostream& operator<<(ostream& out, const RGWBulkDelete::acct_path_t &o) {
@@ -541,6 +567,7 @@ public:
   uint32_t op_mask() override {
     return RGW_OP_TYPE_WRITE;
   }
+  dmc::client_id dmclock_client() override { return dmc::client_id::data; }
 }; /* RGWBulkUploadOp */
 
 
@@ -883,7 +910,7 @@ class RGWCreateBucket : public RGWOp {
 protected:
   RGWAccessControlPolicy policy;
   string location_constraint;
-  string placement_rule;
+  rgw_placement_rule placement_rule;
   RGWBucketInfo info;
   obj_version ep_objv;
   bool has_cors;
@@ -1080,6 +1107,7 @@ public:
   const char* name() const override { return "put_obj"; }
   RGWOpType get_type() override { return RGW_OP_PUT_OBJ; }
   uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
+  dmc::client_id dmclock_client() override { return dmc::client_id::data; }
 };
 
 class RGWPostObj : public RGWOp {
@@ -1133,6 +1161,7 @@ public:
   const char* name() const override { return "post_obj"; }
   RGWOpType get_type() override { return RGW_OP_POST_OBJ; }
   uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
+  dmc::client_id dmclock_client() override { return dmc::client_id::data; }
 };
 
 class RGWPutMetadataAccount : public RGWOp {
@@ -1181,7 +1210,7 @@ protected:
   uint32_t policy_rw_mask;
   RGWAccessControlPolicy policy;
   RGWCORSConfiguration cors_config;
-  string placement_rule;
+  rgw_placement_rule placement_rule;
   boost::optional<std::string> swift_ver_location;
 
 public:
@@ -1264,6 +1293,7 @@ public:
   RGWOpType get_type() override { return RGW_OP_DELETE_OBJ; }
   uint32_t op_mask() override { return RGW_OP_TYPE_DELETE; }
   virtual bool need_object_expiration() { return false; }
+  dmc::client_id dmclock_client() override { return dmc::client_id::data; }
 };
 
 class RGWCopyObj : public RGWOp {
@@ -1306,6 +1336,8 @@ protected:
   boost::optional<ceph::real_time> delete_at;
   bool copy_if_newer;
 
+  bool need_to_check_storage_class = false;
+
   int init_common();
 
 public:
@@ -1342,6 +1374,10 @@ public:
   void execute() override;
   void progress_cb(off_t ofs);
 
+  virtual int check_storage_class(const rgw_placement_rule& src_placement) {
+    return 0;
+  }
+
   virtual int init_dest_policy() { return 0; }
   virtual int get_params() = 0;
   virtual void send_partial_response(off_t ofs) {}
@@ -1349,6 +1385,7 @@ public:
   const char* name() const override { return "copy_obj"; }
   RGWOpType get_type() override { return RGW_OP_COPY_OBJ; }
   uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
+  dmc::client_id dmclock_client() override { return dmc::client_id::data; }
 };
 
 class RGWGetACLs : public RGWOp {
@@ -1811,9 +1848,12 @@ public:
 extern int rgw_build_bucket_policies(RGWRados* store, struct req_state* s);
 extern int rgw_build_object_policies(RGWRados *store, struct req_state *s,
 				     bool prefetch_data);
-extern rgw::IAM::Environment rgw_build_iam_environment(RGWRados* store,
-						       struct req_state* s);
-
+extern void rgw_build_iam_environment(RGWRados* store,
+						                          struct req_state* s);
+extern vector<rgw::IAM::Policy> get_iam_user_policy_from_attr(CephContext* cct,
+                        RGWRados* store,
+                        map<string, bufferlist>& attrs,
+                        const string& tenant);
 
 static inline int get_system_versioning_params(req_state *s,
 					      uint64_t *olh_epoch,
@@ -1881,7 +1921,8 @@ static inline int rgw_get_request_metadata(CephContext* const cct,
   static const std::set<std::string> blacklisted_headers = {
       "x-amz-server-side-encryption-customer-algorithm",
       "x-amz-server-side-encryption-customer-key",
-      "x-amz-server-side-encryption-customer-key-md5"
+      "x-amz-server-side-encryption-customer-key-md5",
+      "x-amz-storage-class"
   };
 
   size_t valid_meta_count = 0;
@@ -2146,8 +2187,39 @@ public:
   virtual int get_params() = 0;
   void execute() override;
   const char* name() const override { return "get_cluster_stat"; }
+  dmc::client_id dmclock_client() override { return dmc::client_id::admin; }
 };
 
+static inline int parse_value_and_bound(
+    const string &input,
+    int &output,
+    const long lower_bound,
+    const long upper_bound,
+    const long default_val)
+{
+  if (!input.empty()) {
+    char *endptr;
+    output = strtol(input.c_str(), &endptr, 10);
+    if (endptr) {
+      if (endptr == input.c_str()) return -EINVAL;
+      while (*endptr && isspace(*endptr)) // ignore white space
+        endptr++;
+      if (*endptr) {
+        return -EINVAL;
+      }
+    }
+    if(output > upper_bound) {
+      output = upper_bound;
+    }
+    if(output < lower_bound) {
+      output = lower_bound;
+    }
+  } else {
+    output = default_val;
+  }
+
+  return 0;
+}
 
 
 #endif /* CEPH_RGW_OP_H */

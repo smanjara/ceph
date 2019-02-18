@@ -1,5 +1,5 @@
 import { Component, OnInit } from '@angular/core';
-import { FormControl, FormGroup, ValidatorFn, Validators } from '@angular/forms';
+import { FormControl, FormGroup, ValidatorFn } from '@angular/forms';
 import { ActivatedRoute, Router } from '@angular/router';
 
 import { I18n } from '@ngx-translate/i18n-polyfill';
@@ -8,10 +8,10 @@ import * as _ from 'lodash';
 import { ConfigurationService } from '../../../../shared/api/configuration.service';
 import { NotificationType } from '../../../../shared/enum/notification-type.enum';
 import { CdFormGroup } from '../../../../shared/forms/cd-form-group';
-import { CdValidators } from '../../../../shared/forms/cd-validators';
 import { NotificationService } from '../../../../shared/services/notification.service';
 import { ConfigFormCreateRequestModel } from './configuration-form-create-request.model';
 import { ConfigFormModel } from './configuration-form.model';
+import { ConfigOptionTypes } from './configuration-form.types';
 
 @Component({
   selector: 'cd-configuration-form',
@@ -66,142 +66,35 @@ export class ConfigurationFormComponent implements OnInit {
     });
   }
 
-  getType(type: string): any {
-    const knownTypes = [
-      {
-        name: 'uint64_t',
-        inputType: 'number',
-        humanReadable: this.i18n('Positive integer value'),
-        defaultMin: 0,
-        patternHelpText: this.i18n('The entered value needs to be a positive number.'),
-        isNumberType: true,
-        allowsNegative: false
-      },
-      {
-        name: 'int64_t',
-        inputType: 'number',
-        humanReadable: this.i18n('Integer value'),
-        patternHelpText: this.i18n('The entered value needs to be a number.'),
-        isNumberType: true,
-        allowsNegative: true
-      },
-      {
-        name: 'size_t',
-        inputType: 'number',
-        humanReadable: this.i18n('Positive integer value (size)'),
-        defaultMin: 0,
-        patternHelpText: this.i18n('The entered value needs to be a positive number.'),
-        isNumberType: true,
-        allowsNegative: false
-      },
-      {
-        name: 'secs',
-        inputType: 'number',
-        humanReadable: this.i18n('Positive integer value (secs)'),
-        defaultMin: 1,
-        patternHelpText: this.i18n('The entered value needs to be a positive number.'),
-        isNumberType: true,
-        allowsNegative: false
-      },
-      {
-        name: 'double',
-        inputType: 'number',
-        humanReadable: this.i18n('Decimal value'),
-        patternHelpText: this.i18n('The entered value needs to be a number or decimal.'),
-        isNumberType: true,
-        allowsNegative: true
-      },
-      {
-        name: 'std::string',
-        inputType: 'text',
-        humanReadable: this.i18n('Text'),
-        isNumberType: false
-      },
-      {
-        name: 'entity_addr_t',
-        inputType: 'text',
-        humanReadable: this.i18n('IPv4 or IPv6 address'),
-        patternHelpText: this.i18n('The entered value needs to be a valid IP address.'),
-        isNumberType: false
-      },
-      {
-        name: 'uuid_d',
-        inputType: 'text',
-        humanReadable: this.i18n('UUID'),
-        patternHelpText: this.i18n(
-          'The entered value is not a valid UUID, e.g.: 67dcac9f-2c03-4d6c-b7bd-1210b3a259a8'
-        ),
-        isNumberType: false
-      },
-      {
-        name: 'bool',
-        inputType: 'checkbox',
-        humanReadable: this.i18n('Boolean value'),
-        isNumberType: false
-      }
-    ];
-
-    let currentType = null;
-
-    knownTypes.forEach((knownType) => {
-      if (knownType.name === type) {
-        currentType = knownType;
-      }
-    });
-
-    if (currentType !== null) {
-      return currentType;
-    }
-
-    throw new Error('Found unknown type "' + type + '" for config option.');
-  }
-
   getValidators(configOption: any): ValidatorFn[] {
-    const typeParams = this.getType(configOption.type);
-    this.patternHelpText = typeParams.patternHelpText;
+    const typeValidators = ConfigOptionTypes.getTypeValidators(configOption);
+    if (typeValidators) {
+      this.patternHelpText = typeValidators.patternHelpText;
 
-    if (typeParams.isNumberType) {
-      const validators = [];
-
-      if (configOption.max && configOption.max !== '') {
-        this.maxValue = configOption.max;
-        validators.push(Validators.max(configOption.max));
+      if ('max' in typeValidators && typeValidators.max !== '') {
+        this.maxValue = typeValidators.max;
       }
 
-      if ('min' in configOption && configOption.min !== '') {
-        this.minValue = configOption.min;
-        validators.push(Validators.min(configOption.min));
-      } else if ('defaultMin' in typeParams) {
-        this.minValue = typeParams.defaultMin;
-        validators.push(Validators.min(typeParams.defaultMin));
+      if ('min' in typeValidators && typeValidators.min !== '') {
+        this.minValue = typeValidators.min;
       }
 
-      if (configOption.type === 'double') {
-        validators.push(CdValidators.decimalNumber());
-      } else {
-        validators.push(CdValidators.number(typeParams.allowsNegative));
-      }
-
-      return validators;
-    } else if (configOption.type === 'entity_addr_t') {
-      return [CdValidators.ip()];
-    } else if (configOption.type === 'uuid_d') {
-      return [CdValidators.uuid()];
+      return typeValidators.validators;
     }
   }
 
   getStep(type: string, value: number): number | undefined {
-    const numberTypes = ['uint64_t', 'int64_t', 'size_t', 'secs'];
+    const numberTypes = ['uint', 'int', 'size', 'secs'];
 
     if (numberTypes.includes(type)) {
       return 1;
     }
 
-    if (type === 'double') {
+    if (type === 'float') {
       if (value !== null) {
         const stringVal = value.toString();
         if (stringVal.indexOf('.') !== -1) {
-          // Value type double and contains decimal characters
+          // Value type float and contains decimal characters
           const decimal = value.toString().split('.');
           return Math.pow(10, -decimal[1].length);
         }
@@ -250,7 +143,7 @@ export class ConfigurationFormComponent implements OnInit {
         .setValidators(validators);
     });
 
-    const currentType = this.getType(response.type);
+    const currentType = ConfigOptionTypes.getType(response.type);
     this.type = currentType.name;
     this.inputType = currentType.inputType;
     this.humanReadableType = currentType.humanReadable;

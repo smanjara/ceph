@@ -217,15 +217,20 @@ describe('PoolFormComponent', () => {
       ['crushRule', 'size', 'erasureProfile', 'ecOverwrites'].forEach((name) =>
         formHelper.expectValid(name)
       );
-      expect(component.compressionForm.valid).toBeTruthy();
+      expect(component.form.get('compression').valid).toBeTruthy();
     });
 
     it('validates name', () => {
+      expect(component.editing).toBeFalsy();
       formHelper.expectError('name', 'required');
       formHelper.expectValidChange('name', 'some-name');
       component.info.pool_names.push('someExistingPoolName');
       formHelper.expectErrorChange('name', 'someExistingPoolName', 'uniqueName');
       formHelper.expectErrorChange('name', 'wrong format with spaces', 'pattern');
+    });
+
+    it('should validate with dots in pool name', () => {
+      formHelper.expectValidChange('name', 'pool.default.bar', true);
     });
 
     it('validates poolType', () => {
@@ -298,7 +303,7 @@ describe('PoolFormComponent', () => {
       });
 
       it('is valid', () => {
-        expect(component.compressionForm.valid).toBeTruthy();
+        expect(component.form.get('compression').valid).toBeTruthy();
       });
 
       it('validates minBlobSize to be only valid between 0 and maxBlobSize', () => {
@@ -375,7 +380,7 @@ describe('PoolFormComponent', () => {
       fixture.detectChanges();
       const selectBadges = fixture.debugElement.query(By.directive(SelectBadgesComponent))
         .componentInstance;
-      const control = selectBadges.filter;
+      const control = selectBadges.cdSelect.filter;
       formHelper.expectValid(control);
       control.setValue('?');
       formHelper.expectError(control, 'pattern');
@@ -524,21 +529,21 @@ describe('PoolFormComponent', () => {
     let selectBadges: SelectBadgesComponent;
 
     const testAddApp = (app?: string, result?: string[]) => {
-      selectBadges.filter.setValue(app);
-      selectBadges.updateFilter();
-      selectBadges.selectOption();
+      selectBadges.cdSelect.filter.setValue(app);
+      selectBadges.cdSelect.updateFilter();
+      selectBadges.cdSelect.selectOption();
       expect(component.data.applications.selected).toEqual(result);
     };
 
     const testRemoveApp = (app: string, result: string[]) => {
-      selectBadges.removeItem(app);
+      selectBadges.cdSelect.removeItem(app);
       expect(component.data.applications.selected).toEqual(result);
     };
 
     const setCurrentApps = (apps: string[]) => {
       component.data.applications.selected = apps;
       fixture.detectChanges();
-      selectBadges.ngOnInit();
+      selectBadges.cdSelect.ngOnInit();
       return apps;
     };
 
@@ -990,18 +995,19 @@ describe('PoolFormComponent', () => {
       });
 
       it('disabled inputs', () => {
-        const disabled = [
-          'name',
-          'poolType',
-          'crushRule',
-          'size',
-          'erasureProfile',
-          'ecOverwrites'
-        ];
+        const disabled = ['poolType', 'crushRule', 'size', 'erasureProfile', 'ecOverwrites'];
         disabled.forEach((controlName) => {
           return expect(form.get(controlName).disabled).toBeTruthy();
         });
-        const enabled = ['pgNum', 'mode', 'algorithm', 'minBlobSize', 'maxBlobSize', 'ratio'];
+        const enabled = [
+          'name',
+          'pgNum',
+          'mode',
+          'algorithm',
+          'minBlobSize',
+          'maxBlobSize',
+          'ratio'
+        ];
         enabled.forEach((controlName) => {
           return expect(form.get(controlName).enabled).toBeTruthy();
         });

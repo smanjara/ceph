@@ -20,14 +20,16 @@ function(distutils_install_module name)
       if(EXISTS /etc/debian_version)
         list(APPEND options --install-layout=deb)
       endif()
-      list(APPEND options --root=\$ENV{DESTDIR})
+      list(APPEND options
+        --root=\$ENV{DESTDIR}
+        --single-version-externally-managed)
       if(NOT \"${DU_INSTALL_SCRIPT}\" STREQUAL \"\")
         list(APPEND options --install-script=${DU_INSTALL_SCRIPT})
       endif()
     endif()
     execute_process(
     COMMAND ${PYTHON${PYTHON_VERSION}_EXECUTABLE}
-        setup.py install \${options} --single-version-externally-managed
+        setup.py install \${options}
     WORKING_DIRECTORY \"${CMAKE_CURRENT_BINARY_DIR}\")")
 endfunction(distutils_install_module)
 
@@ -47,6 +49,9 @@ function(distutils_add_cython_module name src)
   # CMake's implicit conversion between strings and lists is wonderful, isn't it?
   string(REPLACE " " ";" cflags ${CMAKE_C_FLAGS})
   list(APPEND cflags -iquote${CMAKE_SOURCE_DIR}/src/include -w)
+  # This little bit of magic wipes out __Pyx_check_single_interpreter()
+  list(APPEND cflags -D'void0=dead_function\(void\)')
+  list(APPEND cflags -D'__Pyx_check_single_interpreter\(ARG\)=ARG \#\# 0')
   set(PY_CC ${compiler_launcher} ${CMAKE_C_COMPILER} ${c_compiler_arg1} ${cflags})
   set(PY_CXX ${compiler_launcher} ${CMAKE_CXX_COMPILER} ${cxx_compiler_arg1})
   set(PY_LDSHARED ${link_launcher} ${CMAKE_C_COMPILER} ${c_compiler_arg1} "-shared")

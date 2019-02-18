@@ -428,6 +428,8 @@ def create_vg(devices, name=None, name_prefix=None):
         name = "ceph-%s" % str(uuid.uuid4())
     process.run([
         'vgcreate',
+        '-s',
+        '1G',
         '--force',
         '--yes',
         name] + devices
@@ -466,6 +468,9 @@ def remove_vg(vg_name):
     """
     Removes a volume group.
     """
+    if not vg_name:
+        logger.warning('Skipping removal of invalid VG name: "%s"', vg_name)
+        return
     fail_msg = "Unable to remove vg %s" % vg_name
     process.run(
         [

@@ -5,7 +5,7 @@ import os
 import time
 import sys
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from nose import with_setup, SkipTest
 from nose.tools import eq_ as eq, assert_raises, assert_not_equal
 from rados import (Rados,
@@ -24,7 +24,9 @@ from rbd import (RBD, Group, Image, ImageNotFound, InvalidArgument, ImageExists,
                  RBD_LOCK_MODE_EXCLUSIVE, RBD_OPERATION_FEATURE_GROUP,
                  RBD_SNAP_NAMESPACE_TYPE_TRASH,
                  RBD_IMAGE_MIGRATION_STATE_PREPARED, RBD_CONFIG_SOURCE_CONFIG,
-                 RBD_CONFIG_SOURCE_POOL, RBD_CONFIG_SOURCE_IMAGE)
+                 RBD_CONFIG_SOURCE_POOL, RBD_CONFIG_SOURCE_IMAGE,
+                 RBD_MIRROR_PEER_ATTRIBUTE_NAME_MON_HOST,
+                 RBD_MIRROR_PEER_ATTRIBUTE_NAME_KEY)
 
 rados = None
 ioctx = None
@@ -318,6 +320,10 @@ def test_list_empty():
 def test_list():
     eq([image_name], RBD().list(ioctx))
 
+    with Image(ioctx, image_name) as image:
+        image_id = image.id()
+    eq([{'id': image_id, 'name': image_name}], list(RBD().list2(ioctx)))
+
 @with_setup(create_image, remove_image)
 def test_rename():
     rbd = RBD()
@@ -350,11 +356,11 @@ def test_pool_metadata():
     eq(len(metadata), 0)
 
     N = 65
-    for i in xrange(N):
+    for i in range(N):
         rbd.pool_metadata_set(ioctx, "key" + str(i), "X" * 1025)
     metadata = list(rbd.pool_metadata_list(ioctx))
     eq(len(metadata), N)
-    for i in xrange(N):
+    for i in range(N):
         rbd.pool_metadata_remove(ioctx, "key" + str(i))
         metadata = list(rbd.pool_metadata_list(ioctx))
         eq(len(metadata), N - i - 1)
@@ -377,6 +383,21 @@ def test_config_list():
 
     for option in rbd.config_list(ioctx):
         eq(option['source'], RBD_CONFIG_SOURCE_CONFIG)
+
+def test_namespaces():
+    rbd = RBD()
+
+    eq(False, rbd.namespace_exists(ioctx, 'ns1'))
+    eq([], rbd.namespace_list(ioctx))
+    assert_raises(ImageNotFound, rbd.namespace_remove, ioctx, 'ns1')
+
+    rbd.namespace_create(ioctx, 'ns1')
+    eq(True, rbd.namespace_exists(ioctx, 'ns1'))
+
+    assert_raises(ImageExists, rbd.namespace_create, ioctx, 'ns1')
+    eq(['ns1'], rbd.namespace_list(ioctx))
+    rbd.namespace_remove(ioctx, 'ns1')
+    eq([], rbd.namespace_list(ioctx))
 
 @require_new_format()
 def test_pool_stats():
@@ -1063,11 +1084,11 @@ class TestImage(object):
         eq(len(metadata), 0)
 
         N = 65
-        for i in xrange(N):
+        for i in range(N):
             self.image.metadata_set("key" + str(i), "X" * 1025)
         metadata = list(self.image.metadata_list())
         eq(len(metadata), N)
-        for i in xrange(N):
+        for i in range(N):
             self.image.metadata_remove("key" + str(i))
             metadata = list(self.image.metadata_list())
             eq(len(metadata), N - i - 1)
@@ -1319,7 +1340,8 @@ class TestClone(object):
         eq(deduped, set(expected))
 
     def check_children2(self, expected):
-        actual = list(self.image.list_children2())
+        actual = [{k:v for k,v in x.items() if k in expected[0]} \
+                  for x in self.image.list_children2()]
         eq(actual, expected)
 
     def get_image_id(self, ioctx, name):
@@ -1332,7 +1354,8 @@ class TestClone(object):
         self.image.set_snap('snap1')
         self.check_children([(pool_name, self.clone_name)])
         self.check_children2(
-            [{'pool': pool_name, 'image': self.clone_name, 'trash': False,
+            [{'pool': pool_name, 'pool_namespace': '',
+              'image': self.clone_name, 'trash': False,
               'id': self.get_image_id(ioctx, self.clone_name)}])
         self.clone.close()
         self.rbd.remove(ioctx, self.clone_name)
@@ -1347,7 +1370,8 @@ class TestClone(object):
                            clone_name + str(i), features)
             expected_children.append((pool_name, clone_name + str(i)))
             expected_children2.append(
-                {'pool': pool_name, 'image': clone_name + str(i), 'trash': False,
+                {'pool': pool_name, 'pool_namespace': '',
+                 'image': clone_name + str(i), 'trash': False,
                  'id': self.get_image_id(ioctx, clone_name + str(i))})
             self.check_children(expected_children)
             self.check_children2(expected_children2)
@@ -1384,7 +1408,8 @@ class TestClone(object):
                        features)
         self.check_children([(pool_name, self.clone_name)])
         self.check_children2(
-            [{'pool': pool_name, 'image': self.clone_name, 'trash': False,
+            [{'pool': pool_name, 'pool_namespace': '',
+              'image': self.clone_name, 'trash': False,
               'id': self.get_image_id(ioctx, self.clone_name)}])
         self.clone = Image(ioctx, self.clone_name)
 
@@ -1717,6 +1742,14 @@ class TestMirroring(object):
             'client_name' : client_name,
             }
         eq([peer], list(self.rbd.mirror_peer_list(ioctx)))
+
+        attribs = {
+            RBD_MIRROR_PEER_ATTRIBUTE_NAME_MON_HOST: 'host1',
+            RBD_MIRROR_PEER_ATTRIBUTE_NAME_KEY: 'abc'
+            }
+        self.rbd.mirror_peer_set_attributes(ioctx, uuid, attribs)
+        eq(attribs, self.rbd.mirror_peer_get_attributes(ioctx, uuid))
+
         self.rbd.mirror_peer_remove(ioctx, uuid)
         eq([], list(self.rbd.mirror_peer_list(ioctx)))
 
@@ -1829,6 +1862,25 @@ class TestTrash(object):
 
         RBD().trash_move(ioctx, image_name, 1000)
         RBD().trash_remove(ioctx, image_id, True)
+
+    def test_purge(self):
+        create_image()
+        with Image(ioctx, image_name) as image:
+            image_name1 = image_name
+            image_id1 = image.id()
+
+        create_image()
+        with Image(ioctx, image_name) as image:
+            image_name2 = image_name
+            image_id2 = image.id()
+
+        RBD().trash_move(ioctx, image_name1, 0)
+        RBD().trash_move(ioctx, image_name2, 1000)
+        RBD().trash_purge(ioctx, datetime.now())
+
+        entries = list(RBD().trash_list(ioctx))
+        eq([image_id2], [x['id'] for x in entries])
+        RBD().trash_remove(ioctx, image_id2, True)
 
     def test_remove_denied(self):
         create_image()

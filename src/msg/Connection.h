@@ -24,9 +24,11 @@
 #include "common/RefCountedObj.h"
 #include "common/config.h"
 #include "common/debug.h"
+#include "common/Mutex.h"
 #include "include/ceph_assert.h" // Because intusive_ptr clobbers our assert...
 #include "include/buffer.h"
 #include "include/types.h"
+#include "common/item_history.h"
 #include "msg/MessageRef.h"
 
 
@@ -41,7 +43,8 @@ struct Connection : public RefCountedObject {
   Messenger *msgr;
   RefCountedPtr priv;
   int peer_type;
-  entity_addrvec_t peer_addrs;
+  int64_t peer_id = -1;  // [msgr2 only] the 0 of osd.0, 4567 or client.4567
+  safe_item_history<entity_addrvec_t> peer_addrs;
   utime_t last_keepalive, last_keepalive_ack;
 private:
   uint64_t features;
@@ -152,6 +155,7 @@ public:
    */
   virtual void mark_disposable() = 0;
 
+  // WARNING / FIXME: this is not populated for loopback connections
   AuthCapsInfo& get_peer_caps_info() {
     return peer_caps_info;
   }
@@ -165,6 +169,10 @@ public:
   int get_peer_type() const { return peer_type; }
   void set_peer_type(int t) { peer_type = t; }
 
+  // peer_id is only defined for msgr2
+  int64_t get_peer_id() const { return peer_id; }
+  void set_peer_id(int64_t t) { peer_id = t; }
+
   bool peer_is_mon() const { return peer_type == CEPH_ENTITY_TYPE_MON; }
   bool peer_is_mgr() const { return peer_type == CEPH_ENTITY_TYPE_MGR; }
   bool peer_is_mds() const { return peer_type == CEPH_ENTITY_TYPE_MDS; }
@@ -175,10 +183,10 @@ public:
   virtual entity_addr_t get_peer_socket_addr() const = 0;
 
   entity_addr_t get_peer_addr() const {
-    return peer_addrs.front();
+    return peer_addrs->front();
   }
   const entity_addrvec_t& get_peer_addrs() const {
-    return peer_addrs;
+    return *peer_addrs;
   }
   void set_peer_addr(const entity_addr_t& a) {
     peer_addrs = entity_addrvec_t(a);

@@ -26,9 +26,6 @@
 #include <list>
 #include <set>
 #include <string_view>
-using std::map;
-using std::list;
-using std::set;
 
 class MDSRank;
 class Session;
@@ -69,7 +66,7 @@ protected:
   void send_lock_message(SimpleLock *lock, int msg, const bufferlist &data);
 
   // -- locks --
-  void _drop_locks(MutationImpl *mut, set<CInode*> *pneed_issue, bool drop_rdlocks);
+  void _drop_locks(MutationImpl *mut, std::set<CInode*> *pneed_issue, bool drop_rdlocks);
 public:
   void include_snap_rdlocks(CInode *in, MutationImpl::LockOpVec& lov);
   void include_snap_rdlocks_wlayout(CInode *in, MutationImpl::LockOpVec& lov,
@@ -81,15 +78,16 @@ public:
 		     bool auth_pin_nonblock=false);
 
   void notify_freeze_waiter(MDSCacheObject *o);
-  void cancel_locking(MutationImpl *mut, set<CInode*> *pneed_issue);
-  void drop_locks(MutationImpl *mut, set<CInode*> *pneed_issue=0);
+  void cancel_locking(MutationImpl *mut, std::set<CInode*> *pneed_issue);
+  void drop_locks(MutationImpl *mut, std::set<CInode*> *pneed_issue=0);
   void set_xlocks_done(MutationImpl *mut, bool skip_dentry=false);
-  void drop_non_rdlocks(MutationImpl *mut, set<CInode*> *pneed_issue=0);
+  void drop_non_rdlocks(MutationImpl *mut, std::set<CInode*> *pneed_issue=0);
   void drop_rdlocks_for_early_reply(MutationImpl *mut);
+  void drop_locks_for_fragment_unfreeze(MutationImpl *mut);
 
-  void eval_gather(SimpleLock *lock, bool first=false, bool *need_issue=0, MDSInternalContextBase::vec *pfinishers=0);
+  void eval_gather(SimpleLock *lock, bool first=false, bool *need_issue=0, MDSContext::vec *pfinishers=0);
   void eval(SimpleLock *lock, bool *need_issue);
-  void eval_any(SimpleLock *lock, bool *need_issue, MDSInternalContextBase::vec *pfinishers=0, bool first=false) {
+  void eval_any(SimpleLock *lock, bool *need_issue, MDSContext::vec *pfinishers=0, bool first=false) {
     if (!lock->is_stable())
       eval_gather(lock, first, need_issue, pfinishers);
     else if (lock->get_parent()->is_auth())
@@ -98,14 +96,14 @@ public:
 
   void eval_scatter_gathers(CInode *in);
 
-  void eval_cap_gather(CInode *in, set<CInode*> *issue_set=0);
+  void eval_cap_gather(CInode *in, std::set<CInode*> *issue_set=0);
 
   bool eval(CInode *in, int mask, bool caps_imported=false);
   void try_eval(MDSCacheObject *p, int mask);
   void try_eval(SimpleLock *lock, bool *pneed_issue);
 
   bool _rdlock_kick(SimpleLock *lock, bool as_anon);
-  bool rdlock_try(SimpleLock *lock, client_t client, MDSInternalContextBase *c);
+  bool rdlock_try(SimpleLock *lock, client_t client, MDSContext *c);
   bool rdlock_start(SimpleLock *lock, MDRequestRef& mut, bool as_anon=false);
   void rdlock_finish(const MutationImpl::lock_iterator& it, MutationImpl *mut, bool *pneed_issue);
   bool can_rdlock_set(MutationImpl::LockOpVec& lov);
@@ -129,7 +127,7 @@ public:
   // simple
 public:
   void try_simple_eval(SimpleLock *lock);
-  bool simple_rdlock_try(SimpleLock *lock, MDSInternalContextBase *con);
+  bool simple_rdlock_try(SimpleLock *lock, MDSContext *con);
 protected:
   void simple_eval(SimpleLock *lock, bool *need_issue);
   void handle_simple_lock(SimpleLock *lock, const MLock::const_ref &m);
@@ -147,7 +145,7 @@ public:
   void scatter_eval(ScatterLock *lock, bool *need_issue);        // public for MDCache::adjust_subtree_auth()
 
   void scatter_tick();
-  void scatter_nudge(ScatterLock *lock, MDSInternalContextBase *c, bool forcelockchange=false);
+  void scatter_nudge(ScatterLock *lock, MDSContext *c, bool forcelockchange=false);
 
 protected:
   void handle_scatter_lock(ScatterLock *lock, const MLock::const_ref &m);
@@ -181,7 +179,7 @@ public:
   void kick_cap_releases(MDRequestRef& mdr);
   void kick_issue_caps(CInode *in, client_t client, ceph_seq_t seq);
 
-  void remove_client_cap(CInode *in, client_t client);
+  void remove_client_cap(CInode *in, Capability *cap);
 
   void get_late_revoking_clients(std::list<client_t> *result, double timeout) const;
 
@@ -243,10 +241,9 @@ public:
   version_t issue_file_data_version(CInode *in);
   Capability* issue_new_caps(CInode *in, int mode, Session *session, SnapRealm *conrealm, bool is_replay);
   bool issue_caps(CInode *in, Capability *only_cap=0);
-  void issue_caps_set(set<CInode*>& inset);
+  void issue_caps_set(std::set<CInode*>& inset);
   void issue_truncate(CInode *in);
   void revoke_stale_caps(Session *session);
-  void revoke_stale_caps(Capability *cap);
   void resume_stale_caps(Session *session);
   void remove_stale_leases(Session *session);
 
@@ -260,7 +257,7 @@ protected:
 private:
   uint64_t calc_new_max_size(CInode::mempool_inode *pi, uint64_t size);
 public:
-  void calc_new_client_ranges(CInode *in, uint64_t size,
+  void calc_new_client_ranges(CInode *in, uint64_t size, bool update,
 			      CInode::mempool_inode::client_range_map* new_ranges,
 			      bool *max_increased);
   bool check_inode_max_size(CInode *in, bool force_wrlock=false,

@@ -283,12 +283,6 @@ class MDSCluster(CephCluster):
     def status(self):
         return FSStatus(self.mon_manager)
 
-    def set_down(self, down=True):
-        self.mon_manager.raw_cluster_cmd("fs", "set", str(self.name), "down", str(down).lower())
-
-    def set_joinable(self, joinable=True):
-        self.mon_manager.raw_cluster_cmd("fs", "set", str(self.name), "joinable", str(joinable).lower())
-
     def delete_all_filesystems(self):
         """
         Remove all filesystems that exist, and any pools in use by them.
@@ -301,16 +295,13 @@ class MDSCluster(CephCluster):
         # mark cluster down for each fs to prevent churn during deletion
         status = self.status()
         for fs in status.get_filesystems():
-            self.mon_manager.raw_cluster_cmd("fs", "set", str(fs['mdsmap']['fs_name']), "joinable", "false")
+            self.mon_manager.raw_cluster_cmd("fs", "fail", str(fs['mdsmap']['fs_name']))
 
         # get a new copy as actives may have since changed
         status = self.status()
         for fs in status.get_filesystems():
             mdsmap = fs['mdsmap']
             metadata_pool = pool_id_name[mdsmap['metadata_pool']]
-
-            for gid in mdsmap['up'].values():
-                self.mon_manager.raw_cluster_cmd('mds', 'fail', gid.__str__())
 
             self.mon_manager.raw_cluster_cmd('fs', 'rm', mdsmap['fs_name'], '--yes-i-really-mean-it')
             self.mon_manager.raw_cluster_cmd('osd', 'pool', 'delete',
@@ -477,9 +468,18 @@ class Filesystem(MDSCluster):
         assert(mds_map['max_mds'] == max_mds)
         assert(mds_map['in'] == list(range(0, max_mds)))
 
+    def fail(self):
+        self.mon_manager.raw_cluster_cmd("fs", "fail", str(self.name))
+
     def set_var(self, var, *args):
         a = map(str, args)
         self.mon_manager.raw_cluster_cmd("fs", "set", self.name, var, *a)
+
+    def set_down(self, down=True):
+        self.set_var("down", str(down).lower())
+
+    def set_joinable(self, joinable=True):
+        self.set_var("joinable", str(joinable).lower())
 
     def set_max_mds(self, max_mds):
         self.set_var("max_mds", "%d" % max_mds)
@@ -602,8 +602,8 @@ class Filesystem(MDSCluster):
             status = self.status()
         return status.get_fsmap(self.id)['mdsmap']
 
-    def get_var(self, var):
-        return self.status().get_fsmap(self.id)['mdsmap'][var]
+    def get_var(self, var, status=None):
+        return self.get_mds_map(status=status)[var]
 
     def add_data_pool(self, name):
         self.mon_manager.raw_cluster_cmd('osd', 'pool', 'create', name, self.get_pgs_per_fs_pool().__str__())
@@ -920,6 +920,10 @@ class Filesystem(MDSCluster):
     def rank_asok(self, command, rank=0, status=None, timeout=None):
         info = self.get_rank(rank=rank, status=status)
         return self.json_asok(command, 'mds', info['name'], timeout=timeout)
+
+    def rank_tell(self, command, rank=0, status=None):
+        info = self.get_rank(rank=rank, status=status)
+        return json.loads(self.mon_manager.raw_cluster_cmd("tell", 'mds.{0}'.format(info['name']), *command))
 
     def read_cache(self, path, depth=None):
         cmd = ["dump", "tree", path]

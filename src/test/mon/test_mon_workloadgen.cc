@@ -258,7 +258,7 @@ class ClientStub : public TestStub
     messenger->set_default_policy(
 	Messenger::Policy::lossy_client(CEPH_FEATURE_OSDREPLYMUX));
     dout(10) << "ClientStub::" << __func__ << " starting messenger at "
-	    << messenger->get_myaddr() << dendl;
+	    << messenger->get_myaddrs() << dendl;
 
     objecter.reset(new Objecter(cct, messenger.get(), &monc, NULL, 0, 0));
     ceph_assert(objecter.get() != NULL);
@@ -302,10 +302,8 @@ class ClientStub : public TestStub
   }
 };
 
-typedef boost::scoped_ptr<AuthAuthorizeHandlerRegistry> AuthHandlerRef;
 class OSDStub : public TestStub
 {
-  AuthHandlerRef auth_handler_registry;
   int whoami;
   OSDSuperblock sb;
   OSDMap osdmap;
@@ -351,11 +349,6 @@ class OSDStub : public TestStub
 
   OSDStub(int _whoami, CephContext *cct)
     : TestStub(cct, "osd"),
-      auth_handler_registry(new AuthAuthorizeHandlerRegistry(
-				  cct,
-				  cct->_conf->auth_cluster_required.length() ?
-				  cct->_conf->auth_cluster_required :
-				  cct->_conf->auth_supported)),
       whoami(_whoami),
       gen(whoami),
       mon_osd_rng(STUB_MON_OSD_FIRST, STUB_MON_OSD_LAST)
@@ -536,9 +529,9 @@ class OSDStub : public TestStub
       return;
     }
 
-    osd_stat.kb = stbuf.f_blocks * stbuf.f_bsize / 1024;
-    osd_stat.kb_used = (stbuf.f_blocks - stbuf.f_bfree) * stbuf.f_bsize / 1024;
-    osd_stat.kb_avail = stbuf.f_bavail * stbuf.f_bsize / 1024;
+    osd_stat.statfs.total = stbuf.f_blocks * stbuf.f_bsize;
+    osd_stat.statfs.available = stbuf.f_bavail * stbuf.f_bsize;
+    osd_stat.statfs.internally_reserved = 0;
   }
 
   void send_pg_stats() {
@@ -707,7 +700,7 @@ class OSDStub : public TestStub
     for (; num_entries > 0; --num_entries) {
       LogEntry e;
       e.rank = messenger->get_myname();
-      e.addrs.v.push_back(messenger->get_myaddr());
+      e.addrs = messenger->get_myaddrs();
       e.stamp = now;
       e.seq = seq++;
       e.prio = CLOG_DEBUG;

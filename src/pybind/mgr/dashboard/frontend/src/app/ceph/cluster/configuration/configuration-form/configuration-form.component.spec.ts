@@ -41,127 +41,9 @@ describe('ConfigurationFormComponent', () => {
     expect(component).toBeTruthy();
   });
 
-  describe('getType', () => {
-    it('should return uint64_t type', () => {
-      const ret = component.getType('uint64_t');
-      expect(ret).toBeTruthy();
-      expect(ret.name).toBe('uint64_t');
-      expect(ret.inputType).toBe('number');
-      expect(ret.humanReadable).toBe('Positive integer value');
-      expect(ret.defaultMin).toBe(0);
-      expect(ret.patternHelpText).toBe('The entered value needs to be a positive number.');
-      expect(ret.isNumberType).toBe(true);
-      expect(ret.allowsNegative).toBe(false);
-    });
-
-    it('should return int64_t type', () => {
-      const ret = component.getType('int64_t');
-      expect(ret).toBeTruthy();
-      expect(ret.name).toBe('int64_t');
-      expect(ret.inputType).toBe('number');
-      expect(ret.humanReadable).toBe('Integer value');
-      expect(ret.defaultMin).toBeUndefined();
-      expect(ret.patternHelpText).toBe('The entered value needs to be a number.');
-      expect(ret.isNumberType).toBe(true);
-      expect(ret.allowsNegative).toBe(true);
-    });
-
-    it('should return size_t type', () => {
-      const ret = component.getType('size_t');
-      expect(ret).toBeTruthy();
-      expect(ret.name).toBe('size_t');
-      expect(ret.inputType).toBe('number');
-      expect(ret.humanReadable).toBe('Positive integer value (size)');
-      expect(ret.defaultMin).toBe(0);
-      expect(ret.patternHelpText).toBe('The entered value needs to be a positive number.');
-      expect(ret.isNumberType).toBe(true);
-      expect(ret.allowsNegative).toBe(false);
-    });
-
-    it('should return secs type', () => {
-      const ret = component.getType('secs');
-      expect(ret).toBeTruthy();
-      expect(ret.name).toBe('secs');
-      expect(ret.inputType).toBe('number');
-      expect(ret.humanReadable).toBe('Positive integer value (secs)');
-      expect(ret.defaultMin).toBe(1);
-      expect(ret.patternHelpText).toBe('The entered value needs to be a positive number.');
-      expect(ret.isNumberType).toBe(true);
-      expect(ret.allowsNegative).toBe(false);
-    });
-
-    it('should return double type', () => {
-      const ret = component.getType('double');
-      expect(ret).toBeTruthy();
-      expect(ret.name).toBe('double');
-      expect(ret.inputType).toBe('number');
-      expect(ret.humanReadable).toBe('Decimal value');
-      expect(ret.defaultMin).toBeUndefined();
-      expect(ret.patternHelpText).toBe('The entered value needs to be a number or decimal.');
-      expect(ret.isNumberType).toBe(true);
-      expect(ret.allowsNegative).toBe(true);
-    });
-
-    it('should return std::string type', () => {
-      const ret = component.getType('std::string');
-      expect(ret).toBeTruthy();
-      expect(ret.name).toBe('std::string');
-      expect(ret.inputType).toBe('text');
-      expect(ret.humanReadable).toBe('Text');
-      expect(ret.defaultMin).toBeUndefined();
-      expect(ret.patternHelpText).toBeUndefined();
-      expect(ret.isNumberType).toBe(false);
-      expect(ret.allowsNegative).toBeUndefined();
-    });
-
-    it('should return entity_addr_t type', () => {
-      const ret = component.getType('entity_addr_t');
-      expect(ret).toBeTruthy();
-      expect(ret.name).toBe('entity_addr_t');
-      expect(ret.inputType).toBe('text');
-      expect(ret.humanReadable).toBe('IPv4 or IPv6 address');
-      expect(ret.defaultMin).toBeUndefined();
-      expect(ret.patternHelpText).toBe('The entered value needs to be a valid IP address.');
-      expect(ret.isNumberType).toBe(false);
-      expect(ret.allowsNegative).toBeUndefined();
-    });
-
-    it('should return uuid_d type', () => {
-      const ret = component.getType('uuid_d');
-      expect(ret).toBeTruthy();
-      expect(ret.name).toBe('uuid_d');
-      expect(ret.inputType).toBe('text');
-      expect(ret.humanReadable).toBe('UUID');
-      expect(ret.defaultMin).toBeUndefined();
-      expect(ret.patternHelpText).toBe(
-        'The entered value is not a valid UUID, e.g.: 67dcac9f-2c03-4d6c-b7bd-1210b3a259a8'
-      );
-      expect(ret.isNumberType).toBe(false);
-      expect(ret.allowsNegative).toBeUndefined();
-    });
-
-    it('should return bool type', () => {
-      const ret = component.getType('bool');
-      expect(ret).toBeTruthy();
-      expect(ret.name).toBe('bool');
-      expect(ret.inputType).toBe('checkbox');
-      expect(ret.humanReadable).toBe('Boolean value');
-      expect(ret.defaultMin).toBeUndefined();
-      expect(ret.patternHelpText).toBeUndefined();
-      expect(ret.isNumberType).toBe(false);
-      expect(ret.allowsNegative).toBeUndefined();
-    });
-
-    it('should throw an error for unknown type', () => {
-      expect(() =>
-        component.getType('unknown').toThrowError('Found unknown type "unknown" for config option.')
-      );
-    });
-  });
-
   describe('getValidators', () => {
-    it('should return a validator for types double, entity_addr_t and uuid_d', () => {
-      const types = ['double', 'entity_addr_t', 'uuid_d'];
+    it('should return a validator for types float, addr and uuid', () => {
+      const types = ['float', 'addr', 'uuid'];
 
       types.forEach((valType) => {
         const configOption = new ConfigFormModel();
@@ -173,8 +55,8 @@ describe('ConfigurationFormComponent', () => {
       });
     });
 
-    it('should not return a validator for types std::string and bool', () => {
-      const types = ['std::string', 'bool'];
+    it('should not return a validator for types str and bool', () => {
+      const types = ['str', 'bool'];
 
       types.forEach((valType) => {
         const configOption = new ConfigFormModel();
@@ -187,7 +69,7 @@ describe('ConfigurationFormComponent', () => {
 
     it('should return a pattern and a min validator', () => {
       const configOption = new ConfigFormModel();
-      configOption.type = 'int64_t';
+      configOption.type = 'int';
       configOption.min = 2;
 
       const ret = component.getValidators(configOption);
@@ -199,7 +81,7 @@ describe('ConfigurationFormComponent', () => {
 
     it('should return a pattern and a max validator', () => {
       const configOption = new ConfigFormModel();
-      configOption.type = 'int64_t';
+      configOption.type = 'int';
       configOption.max = 5;
 
       const ret = component.getValidators(configOption);
@@ -211,7 +93,7 @@ describe('ConfigurationFormComponent', () => {
 
     it('should return multiple validators', () => {
       const configOption = new ConfigFormModel();
-      configOption.type = 'double';
+      configOption.type = 'float';
       configOption.max = 5.2;
       configOption.min = 1.5;
 
@@ -224,23 +106,23 @@ describe('ConfigurationFormComponent', () => {
   });
 
   describe('getStep', () => {
-    it('should return the correct step for type uint64_t and value 0', () => {
-      const ret = component.getStep('uint64_t', 0);
+    it('should return the correct step for type uint and value 0', () => {
+      const ret = component.getStep('uint', 0);
       expect(ret).toBe(1);
     });
 
-    it('should return the correct step for type int64_t and value 1', () => {
-      const ret = component.getStep('int64_t', 1);
+    it('should return the correct step for type int and value 1', () => {
+      const ret = component.getStep('int', 1);
       expect(ret).toBe(1);
     });
 
-    it('should return the correct step for type int64_t and value null', () => {
-      const ret = component.getStep('int64_t', null);
+    it('should return the correct step for type int and value null', () => {
+      const ret = component.getStep('int', null);
       expect(ret).toBe(1);
     });
 
-    it('should return the correct step for type size_t and value 2', () => {
-      const ret = component.getStep('size_t', 2);
+    it('should return the correct step for type size and value 2', () => {
+      const ret = component.getStep('size', 2);
       expect(ret).toBe(1);
     });
 
@@ -249,28 +131,28 @@ describe('ConfigurationFormComponent', () => {
       expect(ret).toBe(1);
     });
 
-    it('should return the correct step for type double and value 1', () => {
-      const ret = component.getStep('double', 1);
+    it('should return the correct step for type float and value 1', () => {
+      const ret = component.getStep('float', 1);
       expect(ret).toBe(0.1);
     });
 
-    it('should return the correct step for type double and value 0.1', () => {
-      const ret = component.getStep('double', 0.1);
+    it('should return the correct step for type float and value 0.1', () => {
+      const ret = component.getStep('float', 0.1);
       expect(ret).toBe(0.1);
     });
 
-    it('should return the correct step for type double and value 0.02', () => {
-      const ret = component.getStep('double', 0.02);
+    it('should return the correct step for type float and value 0.02', () => {
+      const ret = component.getStep('float', 0.02);
       expect(ret).toBe(0.01);
     });
 
-    it('should return the correct step for type double and value 0.003', () => {
-      const ret = component.getStep('double', 0.003);
+    it('should return the correct step for type float and value 0.003', () => {
+      const ret = component.getStep('float', 0.003);
       expect(ret).toBe(0.001);
     });
 
-    it('should return the correct step for type double and value null', () => {
-      const ret = component.getStep('double', null);
+    it('should return the correct step for type float and value null', () => {
+      const ret = component.getStep('float', null);
       expect(ret).toBe(0.1);
     });
 

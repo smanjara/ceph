@@ -6,8 +6,6 @@
 #include <algorithm>
 #include <string>
 #include <boost/tokenizer.hpp>
-#include <boost/algorithm/string.hpp>
-#include <boost/utility/string_view.hpp>
 
 #include "json_spirit/json_spirit.h"
 #include "common/ceph_json.h"
@@ -120,6 +118,7 @@ rgw_http_errors rgw_http_s3_errors({
     { ERR_INTERNAL_ERROR, {500, "InternalError" }},
     { ERR_NOT_IMPLEMENTED, {501, "NotImplemented" }},
     { ERR_SERVICE_UNAVAILABLE, {503, "ServiceUnavailable"}},
+    { ERR_RATE_LIMITED, {503, "SlowDown"}},
     { ERR_ZERO_IN_URL, {400, "InvalidRequest" }},
 });
 
@@ -138,10 +137,12 @@ rgw_http_errors rgw_http_swift_errors({
      * procedures also for ERR_ZERO_IN_URL. This make a problem as the validation
      * is performed very early, even before setting the req_state::proto_flags. */
     { ERR_ZERO_IN_URL, {412, "Invalid UTF8 or contains NULL"}},
+    { ERR_RATE_LIMITED, {498, "Rate Limited"}},
 });
 
 rgw_http_errors rgw_http_sts_errors({
     { ERR_PACKED_POLICY_TOO_LARGE, {400, "PackedPolicyTooLarge" }},
+    { ERR_INVALID_IDENTITY_TOKEN, {400, "InvalidIdentityToken" }},
 });
 
 int rgw_perf_start(CephContext *cct)
@@ -404,7 +405,6 @@ struct str_len meta_prefixes[] = { STR_LEN_ENTRY("HTTP_X_AMZ"),
                                    STR_LEN_ENTRY("HTTP_X_CONTAINER"),
                                    STR_LEN_ENTRY("HTTP_X_ACCOUNT"),
                                    {NULL, 0} };
-
 
 void req_info::init_meta_info(bool *found_bad_meta)
 {
@@ -722,11 +722,11 @@ using ceph::crypto::SHA256;
  */
 sha256_digest_t calc_hash_sha256(const boost::string_view& msg)
 {
-  std::array<unsigned char, CEPH_CRYPTO_HMACSHA256_DIGESTSIZE> hash;
+  sha256_digest_t hash;
 
   SHA256 hasher;
   hasher.Update(reinterpret_cast<const unsigned char*>(msg.data()), msg.size());
-  hasher.Final(hash.data());
+  hasher.Final(hash.v);
 
   return hash;
 }
@@ -962,6 +962,7 @@ void RGWHTTPArgs::append(const string& name, const string& val)
               (name.compare("index") == 0) ||
               (name.compare("policy") == 0) ||
               (name.compare("quota") == 0) ||
+              (name.compare("list") == 0) ||
               (name.compare("object") == 0)) {
 
     if (!admin_subresource_added) {
@@ -1030,6 +1031,26 @@ void RGWHTTPArgs::get_bool(const char *name, bool *val, bool def_val)
       !exists) {
     *val = def_val;
   }
+}
+
+int RGWHTTPArgs::get_int(const char *name, int *val, int def_val)
+{
+  bool exists = false;
+  string val_str;
+  val_str = get(name, &exists);
+  if (!exists) {
+    *val = def_val;
+    return 0;
+  }
+
+  string err;
+
+  *val = (int)strict_strtol(val_str.c_str(), 10, &err);
+  if (!err.empty()) {
+    *val = def_val;
+    return -EINVAL;
+  }
+  return 0;
 }
 
 string RGWHTTPArgs::sys_get(const string& name, bool * const exists) const
@@ -1112,18 +1133,16 @@ bool verify_user_permission(const DoutPrefixProvider* dpp,
     return false;
   }
 
+  if (usr_policy_res == Effect::Allow) {
+    return true;
+  }
+
   if (op == rgw::IAM::s3CreateBucket || op == rgw::IAM::s3ListAllMyBuckets) {
     auto perm = op_to_perm(op);
 
     return verify_user_permission_no_policy(dpp, s, user_acl, perm);
   }
 
-  if (usr_policy_res == Effect::Pass) {
-    return false;
-  }
-  else if (usr_policy_res == Effect::Allow) {
-    return true;
-  }
   return false;
 }
 
@@ -1131,6 +1150,9 @@ bool verify_user_permission_no_policy(const DoutPrefixProvider* dpp, struct req_
                             RGWAccessControlPolicy * const user_acl,
                             const int perm)
 {
+  if (s->auth.identity->get_identity_type() == TYPE_ROLE)
+    return false;
+
   /* S3 doesn't support account ACLs. */
   if (!user_acl)
     return true;
@@ -1938,12 +1960,15 @@ bool match_policy(boost::string_view pattern, boost::string_view input,
 {
   const uint32_t flag2 = flag & (MATCH_POLICY_ACTION|MATCH_POLICY_ARN) ?
       MATCH_CASE_INSENSITIVE : 0;
+  const bool colonblocks = !(flag & (MATCH_POLICY_RESOURCE |
+				     MATCH_POLICY_STRING));
 
   const auto npos = boost::string_view::npos;
   boost::string_view::size_type last_pos_input = 0, last_pos_pattern = 0;
   while (true) {
-    auto cur_pos_input = input.find(":", last_pos_input);
-    auto cur_pos_pattern = pattern.find(":", last_pos_pattern);
+    auto cur_pos_input = colonblocks ? input.find(":", last_pos_input) : npos;
+    auto cur_pos_pattern =
+      colonblocks ? pattern.find(":", last_pos_pattern) : npos;
 
     auto substr_input = input.substr(last_pos_input, cur_pos_input);
     auto substr_pattern = pattern.substr(last_pos_pattern, cur_pos_pattern);

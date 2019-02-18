@@ -46,7 +46,7 @@
 int CDir::num_frozen_trees = 0;
 int CDir::num_freezing_trees = 0;
 
-class CDirContext : public MDSInternalContextBase
+class CDirContext : public MDSContext
 {
 protected:
   CDir *dir;
@@ -907,7 +907,7 @@ void CDir::steal_dentry(CDentry *dn)
   dn->dir = this;
 }
 
-void CDir::prepare_old_fragment(map<string_snap_t, MDSInternalContextBase::vec >& dentry_waiters, bool replay)
+void CDir::prepare_old_fragment(map<string_snap_t, MDSContext::vec >& dentry_waiters, bool replay)
 {
   // auth_pin old fragment for duration so that any auth_pinning
   // during the dentry migration doesn't trigger side effects
@@ -935,7 +935,7 @@ void CDir::prepare_new_fragment(bool replay)
   inode->add_dirfrag(this);
 }
 
-void CDir::finish_old_fragment(MDSInternalContextBase::vec& waiters, bool replay)
+void CDir::finish_old_fragment(MDSContext::vec& waiters, bool replay)
 {
   // take waiters _before_ unfreeze...
   if (!replay) {
@@ -986,13 +986,13 @@ void CDir::init_fragment_pins()
     get(PIN_SUBTREE);
 }
 
-void CDir::split(int bits, list<CDir*>& subs, MDSInternalContextBase::vec& waiters, bool replay)
+void CDir::split(int bits, list<CDir*>& subs, MDSContext::vec& waiters, bool replay)
 {
   dout(10) << "split by " << bits << " bits on " << *this << dendl;
 
   ceph_assert(replay || is_complete() || !is_auth());
 
-  list<frag_t> frags;
+  frag_vec_t frags;
   frag.split(bits, frags);
 
   vector<CDir*> subfrags(1 << bits);
@@ -1010,13 +1010,13 @@ void CDir::split(int bits, list<CDir*>& subs, MDSInternalContextBase::vec& waite
     fragstatdiff.add_delta(fnode.accounted_fragstat, fnode.fragstat);
   dout(10) << " rstatdiff " << rstatdiff << " fragstatdiff " << fragstatdiff << dendl;
 
-  map<string_snap_t, MDSInternalContextBase::vec > dentry_waiters;
+  map<string_snap_t, MDSContext::vec > dentry_waiters;
   prepare_old_fragment(dentry_waiters, replay);
 
   // create subfrag dirs
   int n = 0;
-  for (list<frag_t>::iterator p = frags.begin(); p != frags.end(); ++p) {
-    CDir *f = new CDir(inode, *p, cache, is_auth());
+  for (const auto& fg : frags) {
+    CDir *f = new CDir(inode, fg, cache, is_auth());
     f->state_set(state & (MASK_STATE_FRAGMENT_KEPT | STATE_COMPLETE));
     f->get_replicas() = get_replicas();
     f->set_version(get_version());
@@ -1031,11 +1031,12 @@ void CDir::split(int bits, list<CDir*>& subs, MDSInternalContextBase::vec& waite
     f->pop_auth_subtree_nested = pop_auth_subtree_nested;
     f->pop_auth_subtree_nested.scale(fac);
 
-    dout(10) << " subfrag " << *p << " " << *f << dendl;
+    dout(10) << " subfrag " << fg << " " << *f << dendl;
     subfrags[n++] = f;
     subs.push_back(f);
 
     f->set_dir_auth(get_dir_auth());
+    f->freeze_tree_state = freeze_tree_state;
     f->prepare_new_fragment(replay);
     f->init_fragment_pins();
   }
@@ -1087,20 +1088,18 @@ void CDir::split(int bits, list<CDir*>& subs, MDSInternalContextBase::vec& waite
   finish_old_fragment(waiters, replay);
 }
 
-void CDir::merge(list<CDir*>& subs, MDSInternalContextBase::vec& waiters, bool replay)
+void CDir::merge(list<CDir*>& subs, MDSContext::vec& waiters, bool replay)
 {
   dout(10) << "merge " << subs << dendl;
 
-  mds_authority_t new_auth = CDIR_AUTH_DEFAULT;
+  set_dir_auth(subs.front()->get_dir_auth());
+  freeze_tree_state = subs.front()->freeze_tree_state;
+
   for (auto dir : subs) {
-    if (dir->get_dir_auth() != CDIR_AUTH_DEFAULT &&
-	dir->get_dir_auth() != new_auth) {
-      ceph_assert(new_auth == CDIR_AUTH_DEFAULT);
-      new_auth = dir->get_dir_auth();
-    }
+    ceph_assert(get_dir_auth() == dir->get_dir_auth());
+    ceph_assert(freeze_tree_state == dir->freeze_tree_state);
   }
 
-  set_dir_auth(new_auth);
   prepare_new_fragment(replay);
 
   nest_info_t rstatdiff;
@@ -1109,7 +1108,7 @@ void CDir::merge(list<CDir*>& subs, MDSInternalContextBase::vec& waiters, bool r
   version_t rstat_version = inode->get_projected_inode()->rstat.version;
   version_t dirstat_version = inode->get_projected_inode()->dirstat.version;
 
-  map<string_snap_t, MDSInternalContextBase::vec > dentry_waiters;
+  map<string_snap_t, MDSContext::vec > dentry_waiters;
 
   for (auto dir : subs) {
     dout(10) << " subfrag " << dir->get_frag() << " " << *dir << dendl;
@@ -1254,7 +1253,7 @@ void CDir::assimilate_dirty_rstat_inodes_finish(MutationRef& mut, EMetaBlob *blo
  * WAITING
  */
 
-void CDir::add_dentry_waiter(std::string_view dname, snapid_t snapid, MDSInternalContextBase *c) 
+void CDir::add_dentry_waiter(std::string_view dname, snapid_t snapid, MDSContext *c) 
 {
   if (waiting_on_dentry.empty())
     get(PIN_DNWAITER);
@@ -1265,7 +1264,7 @@ void CDir::add_dentry_waiter(std::string_view dname, snapid_t snapid, MDSInterna
 }
 
 void CDir::take_dentry_waiting(std::string_view dname, snapid_t first, snapid_t last,
-			       MDSInternalContextBase::vec& ls)
+			       MDSContext::vec& ls)
 {
   if (waiting_on_dentry.empty())
     return;
@@ -1289,7 +1288,7 @@ void CDir::take_dentry_waiting(std::string_view dname, snapid_t first, snapid_t 
     put(PIN_DNWAITER);
 }
 
-void CDir::take_sub_waiting(MDSInternalContextBase::vec& ls)
+void CDir::take_sub_waiting(MDSContext::vec& ls)
 {
   dout(10) << __func__ << dendl;
   if (!waiting_on_dentry.empty()) {
@@ -1305,7 +1304,7 @@ void CDir::take_sub_waiting(MDSInternalContextBase::vec& ls)
 
 
 
-void CDir::add_waiter(uint64_t tag, MDSInternalContextBase *c) 
+void CDir::add_waiter(uint64_t tag, MDSContext *c) 
 {
   // hierarchical?
   
@@ -1327,7 +1326,7 @@ void CDir::add_waiter(uint64_t tag, MDSInternalContextBase *c)
 
 
 /* NOTE: this checks dentry waiters too */
-void CDir::take_waiting(uint64_t mask, MDSInternalContextBase::vec& ls)
+void CDir::take_waiting(uint64_t mask, MDSContext::vec& ls)
 {
   if ((mask & WAIT_DENTRY) && !waiting_on_dentry.empty()) {
     // take all dentry waiters
@@ -1351,7 +1350,7 @@ void CDir::finish_waiting(uint64_t mask, int result)
 {
   dout(11) << __func__ << " mask " << hex << mask << dec << " result " << result << " on " << *this << dendl;
 
-  MDSInternalContextBase::vec finished;
+  MDSContext::vec finished;
   take_waiting(mask, finished);
   if (result < 0)
     finish_contexts(g_ceph_context, finished, result);
@@ -1432,7 +1431,7 @@ void CDir::mark_new(LogSegment *ls)
   ls->new_dirfrags.push_back(&item_new);
   state_clear(STATE_CREATING);
 
-  MDSInternalContextBase::vec waiters;
+  MDSContext::vec waiters;
   take_waiting(CDir::WAIT_CREATED, waiters);
   cache->mds->queue_waiters(waiters);
 }
@@ -1482,13 +1481,13 @@ void CDir::last_put()
 
 // -----------------------
 // FETCH
-void CDir::fetch(MDSInternalContextBase *c, bool ignore_authpinnability)
+void CDir::fetch(MDSContext *c, bool ignore_authpinnability)
 {
   string want;
   return fetch(c, want, ignore_authpinnability);
 }
 
-void CDir::fetch(MDSInternalContextBase *c, std::string_view want_dn, bool ignore_authpinnability)
+void CDir::fetch(MDSContext *c, std::string_view want_dn, bool ignore_authpinnability)
 {
   dout(10) << "fetch on " << *this << dendl;
   
@@ -1543,7 +1542,7 @@ void CDir::fetch(MDSInternalContextBase *c, std::string_view want_dn, bool ignor
   _omap_fetch(NULL, empty);
 }
 
-void CDir::fetch(MDSInternalContextBase *c, const std::set<dentry_key_t>& keys)
+void CDir::fetch(MDSContext *c, const std::set<dentry_key_t>& keys)
 {
   dout(10) << "fetch " << keys.size() << " keys on " << *this << dendl;
 
@@ -1568,14 +1567,14 @@ void CDir::fetch(MDSInternalContextBase *c, const std::set<dentry_key_t>& keys)
 }
 
 class C_IO_Dir_OMAP_FetchedMore : public CDirIOContext {
-  MDSInternalContextBase *fin;
+  MDSContext *fin;
 public:
   bufferlist hdrbl;
   bool more = false;
   map<string, bufferlist> omap;      ///< carry-over from before
   map<string, bufferlist> omap_more; ///< new batch
   int ret;
-  C_IO_Dir_OMAP_FetchedMore(CDir *d, MDSInternalContextBase *f) :
+  C_IO_Dir_OMAP_FetchedMore(CDir *d, MDSContext *f) :
     CDirIOContext(d), fin(f), ret(0) { }
   void finish(int r) {
     // merge results
@@ -1598,7 +1597,7 @@ public:
 };
 
 class C_IO_Dir_OMAP_Fetched : public CDirIOContext {
-  MDSInternalContextBase *fin;
+  MDSContext *fin;
 public:
   bufferlist hdrbl;
   bool more = false;
@@ -1606,7 +1605,7 @@ public:
   bufferlist btbl;
   int ret1, ret2, ret3;
 
-  C_IO_Dir_OMAP_Fetched(CDir *d, MDSInternalContextBase *f) :
+  C_IO_Dir_OMAP_Fetched(CDir *d, MDSContext *f) :
     CDirIOContext(d), fin(f), ret1(0), ret2(0), ret3(0) { }
   void finish(int r) override {
     // check the correctness of backtrace
@@ -1627,7 +1626,7 @@ public:
   }
 };
 
-void CDir::_omap_fetch(MDSInternalContextBase *c, const std::set<dentry_key_t>& keys)
+void CDir::_omap_fetch(MDSContext *c, const std::set<dentry_key_t>& keys)
 {
   C_IO_Dir_OMAP_Fetched *fin = new C_IO_Dir_OMAP_Fetched(this, c);
   object_t oid = get_ondisk_object();
@@ -1663,7 +1662,7 @@ void CDir::_omap_fetch(MDSInternalContextBase *c, const std::set<dentry_key_t>& 
 void CDir::_omap_fetch_more(
   bufferlist& hdrbl,
   map<string, bufferlist>& omap,
-  MDSInternalContextBase *c)
+  MDSContext *c)
 {
   // we have more omap keys to fetch!
   object_t oid = get_ondisk_object();
@@ -2092,7 +2091,7 @@ void CDir::go_bad(bool complete)
  * @param want - min version i want committed
  * @param c - callback for completion
  */
-void CDir::commit(version_t want, MDSInternalContextBase *c, bool ignore_authpinnability, int op_prio)
+void CDir::commit(version_t want, MDSContext *c, bool ignore_authpinnability, int op_prio)
 {
   dout(10) << "commit want " << want << " on " << *this << dendl;
   if (want == 0) want = get_version();
@@ -2455,7 +2454,7 @@ void CDir::_committed(int r, version_t v)
       _commit(it->first, -1);
       break;
     }
-    MDSInternalContextBase::vec t;
+    MDSContext::vec t;
     for (const auto &waiter : it->second)
       t.push_back(waiter);
     cache->mds->queue_waiters(t);
@@ -2670,6 +2669,11 @@ void CDir::set_dir_auth(const mds_authority_t &a)
   if (!was_subtree && is_subtree_root()) {
     dout(10) << " new subtree root, adjusting auth_pins" << dendl;
 
+    if (freeze_tree_state) {
+      // only by CDir::_freeze_tree()
+      ceph_assert(is_freezing_tree_root());
+    }
+
     inode->num_subtree_roots++;   
     
     // unpin parent of frozen dir/tree?
@@ -2694,7 +2698,7 @@ void CDir::set_dir_auth(const mds_authority_t &a)
 
   // newly single auth?
   if (was_ambiguous && dir_auth.second == CDIR_AUTH_UNKNOWN) {
-    MDSInternalContextBase::vec ls;
+    MDSContext::vec ls;
     take_waiting(WAIT_SINGLEAUTH, ls);
     cache->mds->queue_waiters(ls);
   }
@@ -2903,12 +2907,6 @@ void CDir::_freeze_tree()
   }
   freeze_tree_state->frozen = true;
 
-  // twiddle state
-  if (state_test(STATE_FREEZINGTREE)) {
-    state_clear(STATE_FREEZINGTREE);   // actually, this may get set again by next context?
-    --num_freezing_trees;
-  }
-
   if (is_auth()) {
     mds_authority_t auth;
     bool was_subtree = is_subtree_root();
@@ -2946,6 +2944,12 @@ void CDir::_freeze_tree()
     );
   }
 
+  // twiddle state
+  if (state_test(STATE_FREEZINGTREE)) {
+    state_clear(STATE_FREEZINGTREE);
+    --num_freezing_trees;
+  }
+
   state_set(STATE_FROZENTREE);
   ++num_frozen_trees;
   get(PIN_FROZEN);
@@ -2955,7 +2959,7 @@ void CDir::unfreeze_tree()
 {
   dout(10) << __func__ << " " << *this << dendl;
 
-  MDSInternalContextBase::vec unfreeze_waiters;
+  MDSContext::vec unfreeze_waiters;
   take_waiting(WAIT_UNFREEZE, unfreeze_waiters);
 
   if (freeze_tree_state) {
@@ -3013,7 +3017,7 @@ void CDir::adjust_freeze_after_rename(CDir *dir)
   ceph_assert(!freeze_tree_state->frozen);
   ceph_assert(get_dir_auth_pins() > 0);
 
-  MDSInternalContextBase::vec unfreeze_waiters;
+  MDSContext::vec unfreeze_waiters;
 
   auto unfreeze = [this, &unfreeze_waiters](CDir *dir) {
     if (dir->freeze_tree_state != freeze_tree_state)
@@ -3334,7 +3338,7 @@ void CDir::scrub_finished()
 }
 
 int CDir::_next_dentry_on_set(dentry_key_set &dns, bool missing_okay,
-                              MDSInternalContext *cb, CDentry **dnout)
+                              MDSContext *cb, CDentry **dnout)
 {
   dentry_key_t dnkey;
   CDentry *dn;
@@ -3385,7 +3389,7 @@ int CDir::_next_dentry_on_set(dentry_key_set &dns, bool missing_okay,
   return ENOENT;
 }
 
-int CDir::scrub_dentry_next(MDSInternalContext *cb, CDentry **dnout)
+int CDir::scrub_dentry_next(MDSContext *cb, CDentry **dnout)
 {
   dout(20) << __func__ << dendl;
   ceph_assert(scrub_infop && scrub_infop->directory_scrubbing);

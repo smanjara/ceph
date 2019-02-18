@@ -45,7 +45,8 @@
 #undef dout_prefix
 #define dout_prefix *_dout << *this
 ostream& Pipe::_pipe_prefix(std::ostream &out) const {
-  return out << "-- " << msgr->get_myaddr() << " >> " << peer_addr << " pipe(" << this
+  return out << "-- " << msgr->get_myaddr_legacy() << " >> " << peer_addr
+	     << " pipe(" << this
 	     << " sd=" << sd << " :" << port
              << " s=" << state
              << " pgs=" << peer_global_seq
@@ -524,8 +525,10 @@ int Pipe::accept()
     had_challenge = (bool)authorizer_challenge;
     authorizer_reply.clear();
     if (!msgr->ms_deliver_verify_authorizer(
-	  connection_state.get(), peer_type, connect.authorizer_protocol, authorizer,
+	  connection_state.get(), peer_type, connect.authorizer_protocol,
+	  authorizer,
 	  authorizer_reply, authorizer_valid, session_key,
+	  nullptr /* connection_secret */,
 	  need_challenge ? &authorizer_challenge : nullptr) ||
 	!authorizer_valid) {
       pipe_lock.Lock();
@@ -817,6 +820,7 @@ int Pipe::accept()
       get_auth_session_handler(msgr->cct,
 			       connect.authorizer_protocol,
 			       session_key,
+			       string(), /* connection_secret */
 			       connection_state->get_features()));
 
   // notify
@@ -957,7 +961,7 @@ void Pipe::set_socket_options()
     if (!peer_addr.is_blank_ip()) {
       addr_family = peer_addr.get_family();
     } else {
-      addr_family = msgr->get_myaddr().get_family();
+      addr_family = msgr->get_myaddr_legacy().get_family();
     }
     switch (addr_family) {
     case AF_INET:
@@ -993,8 +997,6 @@ void Pipe::set_socket_options()
 
 int Pipe::connect()
 {
-  bool got_bad_auth = false;
-
   ldout(msgr->cct,10) << "connect " << connect_seq << dendl;
   ceph_assert(pipe_lock.is_locked());
 
@@ -1036,7 +1038,7 @@ int Pipe::connect()
   set_socket_options();
 
   {
-    entity_addr_t addr2bind = msgr->get_myaddr();
+    entity_addr_t addr2bind = msgr->get_myaddr_legacy();
     if (msgr->cct->_conf->ms_bind_before_connect && (!addr2bind.is_blank_ip())) {
       addr2bind.set_port(0);
       int r = ::bind(sd , addr2bind.get_sockaddr(), addr2bind.get_sockaddr_len());
@@ -1148,7 +1150,7 @@ int Pipe::connect()
 
   while (1) {
     if (!authorizer) {
-      authorizer = msgr->ms_deliver_get_authorizer(peer_type, false);
+      authorizer = msgr->ms_deliver_get_authorizer(peer_type);
     }
     bufferlist authorizer_reply;
 
@@ -1225,7 +1227,7 @@ int Pipe::connect()
 
     if (authorizer) {
       auto iter = authorizer_reply.cbegin();
-      if (!authorizer->verify_reply(iter)) {
+      if (!authorizer->verify_reply(iter, nullptr /* connection_secret */)) {
         ldout(msgr->cct,0) << "failed verifying authorize reply" << dendl;
 	goto fail;
       }
@@ -1260,13 +1262,7 @@ int Pipe::connect()
 
     if (reply.tag == CEPH_MSGR_TAG_BADAUTHORIZER) {
       ldout(msgr->cct,0) << "connect got BADAUTHORIZER" << dendl;
-      if (got_bad_auth)
-        goto stop_locked;
-      got_bad_auth = true;
-      pipe_lock.Unlock();
-      delete authorizer;
-      authorizer = msgr->ms_deliver_get_authorizer(peer_type, true);
-      continue;
+      goto fail_locked;
     }
     if (reply.tag == CEPH_MSGR_TAG_RESETSESSION) {
       ldout(msgr->cct,0) << "connect got RESETSESSION" << dendl;
@@ -1347,10 +1343,12 @@ int Pipe::connect()
 
       if (authorizer != NULL) {
 	session_security.reset(
-            get_auth_session_handler(msgr->cct,
-				     authorizer->protocol,
-				     authorizer->session_key,
-				     connection_state->get_features()));
+            get_auth_session_handler(
+	      msgr->cct,
+	      authorizer->protocol,
+	      authorizer->session_key,
+	      string() /* connection secret*/,
+	      connection_state->get_features()));
       }  else {
         // We have no authorizer, so we shouldn't be applying security to messages in this pipe.  PLR
 	session_security.reset();
@@ -2408,7 +2406,7 @@ int Pipe::write_message(const ceph_msg_header& header, const ceph_msg_footer& fo
   msg.msg_iovlen++;
 
   // payload (front+data)
-  list<bufferptr>::const_iterator pb = blist.buffers().begin();
+  auto pb = std::cbegin(blist.buffers());
   unsigned b_off = 0;  // carry-over buffer offset, if any
   unsigned bl_pos = 0; // blist pos
   unsigned left = blist.length();

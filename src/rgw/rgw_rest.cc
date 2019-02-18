@@ -71,8 +71,10 @@ const static struct rgw_http_status_code http_codes[] = {
   { 416, "Requested Range Not Satisfiable" },
   { 417, "Expectation Failed" },
   { 422, "Unprocessable Entity" },
+  { 498, "Rate Limited"},
   { 500, "Internal Server Error" },
   { 501, "Not Implemented" },
+  { 503, "Slow Down"},
   { 0, NULL },
 };
 
@@ -92,6 +94,7 @@ static const struct rgw_http_attr base_rgw_to_http_attrs[] = {
   { RGW_ATTR_CONTENT_ENC,       "Content-Encoding" },
   { RGW_ATTR_USER_MANIFEST,     "X-Object-Manifest" },
   { RGW_ATTR_X_ROBOTS_TAG ,     "X-Robots-Tag" },
+  { RGW_ATTR_STORAGE_CLASS ,    "X-Amz-Storage-Class" },
   /* RGW_ATTR_AMZ_WEBSITE_REDIRECT_LOCATION header depends on access mode:
    * S3 endpoint: x-amz-website-redirect-location
    * S3Website endpoint: Location
@@ -170,7 +173,7 @@ string uppercase_underscore_http_attr(const string& orig)
 static set<string> hostnames_set;
 static set<string> hostnames_s3website_set;
 
-void rgw_rest_init(CephContext *cct, RGWRados *store, RGWZoneGroup& zone_group)
+void rgw_rest_init(CephContext *cct, RGWRados *store, const RGWZoneGroup& zone_group)
 {
   for (const auto& rgw2http : base_rgw_to_http_attrs)  {
     rgw_to_http_attrs[rgw2http.rgw_attr] = rgw2http.http_attr;
@@ -334,31 +337,11 @@ void dump_header(struct req_state* const s,
   }
 }
 
-static inline boost::string_ref get_sanitized_hdrval(ceph::buffer::list& raw)
-{
-  /* std::string and thus boost::string_ref ARE OBLIGED to carry multiple
-   * 0x00 and count them to the length of a string. We need to take that
-   * into consideration and sanitize the size of a ceph::buffer::list used
-   * to store metadata values (x-amz-meta-*, X-Container-Meta-*, etags).
-   * Otherwise we might send 0x00 to clients. */
-  const char* const data = raw.c_str();
-  size_t len = raw.length();
-
-  if (len && data[len - 1] == '\0') {
-    /* That's the case - the null byte has been included at the last position
-     * of the bufferlist. We need to restore the proper string length we'll
-     * pass to string_ref. */
-    len--;
-  }
-
-  return boost::string_ref(data, len);
-}
-
 void dump_header(struct req_state* const s,
                  const boost::string_ref& name,
                  ceph::buffer::list& bl)
 {
-  return dump_header(s, name, get_sanitized_hdrval(bl));
+  return dump_header(s, name, rgw_sanitized_hdrval(bl));
 }
 
 void dump_header(struct req_state* const s,
@@ -1578,8 +1561,9 @@ int RGWListMultipart_ObjStore::get_params()
   }
   
   string str = s->info.args.get("max-parts");
-  if (!str.empty())
-    max_parts = atoi(str.c_str());
+  op_ret = parse_value_and_bound(str, max_parts, 0,
+			g_conf().get_val<uint64_t>("rgw_max_listing_results"),
+			max_parts);
 
   return op_ret;
 }
@@ -1589,10 +1573,12 @@ int RGWListBucketMultiparts_ObjStore::get_params()
   delimiter = s->info.args.get("delimiter");
   prefix = s->info.args.get("prefix");
   string str = s->info.args.get("max-uploads");
-  if (!str.empty())
-    max_uploads = atoi(str.c_str());
-  else
-    max_uploads = default_max;
+  op_ret = parse_value_and_bound(str, max_uploads, 0,
+			g_conf().get_val<uint64_t>("rgw_max_listing_results"),
+			default_max);
+  if (op_ret < 0) {
+    return op_ret;
+  }
 
   string key_marker = s->info.args.get("key-marker");
   string upload_id_marker = s->info.args.get("upload-id-marker");
@@ -1814,8 +1800,28 @@ static http_op op_from_method(const char *method)
 
 int RGWHandler_REST::init_permissions(RGWOp* op)
 {
-  if (op->get_type() == RGW_OP_CREATE_BUCKET)
+  if (op->get_type() == RGW_OP_CREATE_BUCKET) {
+    // We don't need user policies in case of STS token returned by AssumeRole, hence the check for user type
+    if (! s->user->user_id.empty() && s->auth.identity->get_identity_type() != TYPE_ROLE) {
+      try {
+        map<string, bufferlist> uattrs;
+        if (auto ret = rgw_get_user_attrs_by_uid(store, s->user->user_id, uattrs); ! ret) {
+          if (s->iam_user_policies.empty()) {
+            s->iam_user_policies = get_iam_user_policy_from_attr(s->cct, store, uattrs, s->user->user_id.tenant);
+          } else {
+          // This scenario can happen when a STS token has a policy, then we need to append other user policies
+          // to the existing ones. (e.g. token returned by GetSessionToken)
+          auto user_policies = get_iam_user_policy_from_attr(s->cct, store, uattrs, s->user->user_id.tenant);
+          s->iam_user_policies.insert(s->iam_user_policies.end(), user_policies.begin(), user_policies.end());
+          }
+        }
+      } catch (const std::exception& e) {
+        lderr(s->cct) << "Error reading IAM User Policy: " << e.what() << dendl;
+      }
+    }
+    rgw_build_iam_environment(store, s);
     return 0;
+  }
 
   return do_init_permissions();
 }

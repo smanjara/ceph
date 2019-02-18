@@ -154,7 +154,6 @@ typedef std::shared_ptr<const OSDMap> OSDMapRef;
        vector<ObjectStore::Transaction>& tls,
        OpRequestRef op = OpRequestRef()
        ) = 0;
-     virtual epoch_t get_epoch() const = 0;
      virtual epoch_t get_interval_start_epoch() const = 0;
      virtual epoch_t get_last_peering_reset_epoch() const = 0;
 
@@ -205,7 +204,7 @@ typedef std::shared_ptr<const OSDMap> OSDMapRef;
 
      virtual const PGLog &get_log() const = 0;
      virtual bool pgb_is_primary() const = 0;
-     virtual OSDMapRef pgb_get_osdmap() const = 0;
+     virtual const OSDMapRef& pgb_get_osdmap() const = 0;
      virtual epoch_t pgb_get_osdmap_epoch() const = 0;
      virtual const pg_info_t &get_info() const = 0;
      virtual const pg_pool_t &get_pool() const = 0;
@@ -271,8 +270,6 @@ typedef std::shared_ptr<const OSDMap> OSDMapRef;
      virtual spg_t primary_spg_t() const = 0;
      virtual pg_shard_t primary_shard() const = 0;
 
-     virtual uint64_t min_peer_features() const = 0;
-
      virtual hobject_t get_temp_recovery_object(const hobject_t& target,
 						eversion_t version) = 0;
 
@@ -296,6 +293,11 @@ typedef std::shared_ptr<const OSDMap> OSDMapRef;
 
      virtual bool check_osdmap_full(const set<pg_shard_t> &missing_on) = 0;
 
+     virtual bool pg_is_remote_backfilling() = 0;
+     virtual void pg_add_local_num_bytes(int64_t num_bytes) = 0;
+     virtual void pg_sub_local_num_bytes(int64_t num_bytes) = 0;
+     virtual void pg_add_num_bytes(int64_t num_bytes) = 0;
+     virtual void pg_sub_num_bytes(int64_t num_bytes) = 0;
      virtual bool maybe_preempt_replica_scrub(const hobject_t& oid) = 0;
      virtual ~Listener() {}
    };
@@ -309,7 +311,7 @@ typedef std::shared_ptr<const OSDMap> OSDMapRef;
      ch(ch),
      parent(l) {}
    bool is_primary() const { return get_parent()->pgb_is_primary(); }
-   OSDMapRef get_osdmap() const { return get_parent()->pgb_get_osdmap(); }
+   const OSDMapRef& get_osdmap() const { return get_parent()->pgb_get_osdmap(); }
    epoch_t get_osdmap_epoch() const { return get_parent()->pgb_get_osdmap_epoch(); }
    const pg_info_t &get_info() { return get_parent()->get_info(); }
 
@@ -407,6 +409,8 @@ typedef std::shared_ptr<const OSDMap> OSDMapRef;
 
    virtual IsPGRecoverablePredicate *get_is_recoverable_predicate() const = 0;
    virtual IsPGReadablePredicate *get_is_readable_predicate() const = 0;
+   virtual int get_ec_data_chunk_count() const { return 0; };
+   virtual int get_ec_stripe_chunk_size() const { return 0; };
 
    virtual void dump_recovery_info(Formatter *f) const = 0;
 

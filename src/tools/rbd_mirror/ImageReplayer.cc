@@ -43,6 +43,8 @@ using std::unique_ptr;
 using std::shared_ptr;
 using std::vector;
 
+extern PerfCounters *g_perf_counters;
+
 namespace rbd {
 namespace mirror {
 
@@ -530,7 +532,9 @@ void ImageReplayer<I>::handle_bootstrap(int r) {
     }
   }
 
-  if (r == -EREMOTEIO) {
+  if (on_start_interrupted()) {
+    return;
+  } else if (r == -EREMOTEIO) {
     m_local_image_tag_owner = "";
     dout(5) << "remote image is non-primary" << dendl;
     on_start_fail(-EREMOTEIO, "remote image is non-primary");
@@ -541,8 +545,6 @@ void ImageReplayer<I>::handle_bootstrap(int r) {
     return;
   } else if (r < 0) {
     on_start_fail(r, "error bootstrapping replay");
-    return;
-  } else if (on_start_interrupted()) {
     return;
   } else if (m_resync_requested) {
     on_start_fail(0, "resync requested");
@@ -580,11 +582,11 @@ template <typename I>
 void ImageReplayer<I>::handle_init_remote_journaler(int r) {
   dout(10) << "r=" << r << dendl;
 
-  if (r < 0) {
+  if (on_start_interrupted()) {
+    return;
+  } else if (r < 0) {
     derr << "failed to initialize remote journal: " << cpp_strerror(r) << dendl;
     on_start_fail(r, "error initializing remote journal");
-    return;
-  } else if (on_start_interrupted()) {
     return;
   }
 
@@ -1084,7 +1086,7 @@ void ImageReplayer<I>::allocate_local_tag() {
          local_tag_data.predecessor.mirror_uuid ==
            librbd::Journal<>::LOCAL_MIRROR_UUID)) {
       dout(15) << "skipping stale demotion event" << dendl;
-      handle_process_entry_safe(m_replay_entry, 0);
+      handle_process_entry_safe(m_replay_entry, m_replay_start_time, 0);
       handle_replay_ready();
       return;
     } else {
@@ -1166,6 +1168,7 @@ void ImageReplayer<I>::handle_preprocess_entry_ready(int r) {
   dout(20) << "r=" << r << dendl;
   ceph_assert(r == 0);
 
+  m_replay_start_time = ceph_clock_now();
   if (!m_event_preprocessor->is_required(m_event_entry)) {
     process_entry();
     return;
@@ -1208,7 +1211,8 @@ void ImageReplayer<I>::process_entry() {
 
   Context *on_ready = create_context_callback<
     ImageReplayer, &ImageReplayer<I>::handle_process_entry_ready>(this);
-  Context *on_commit = new C_ReplayCommitted(this, std::move(m_replay_entry));
+  Context *on_commit = new C_ReplayCommitted(this, std::move(m_replay_entry),
+                                             m_replay_start_time);
 
   m_local_replay->process(m_event_entry, on_ready, on_commit);
 }
@@ -1236,7 +1240,8 @@ void ImageReplayer<I>::handle_process_entry_ready(int r) {
 }
 
 template <typename I>
-void ImageReplayer<I>::handle_process_entry_safe(const ReplayEntry& replay_entry,
+void ImageReplayer<I>::handle_process_entry_safe(const ReplayEntry &replay_entry,
+                                                 const utime_t &replay_start_time,
                                                  int r) {
   dout(20) << "commit_tid=" << replay_entry.get_commit_tid() << ", r=" << r
 	   << dendl;
@@ -1248,7 +1253,27 @@ void ImageReplayer<I>::handle_process_entry_safe(const ReplayEntry& replay_entry
     ceph_assert(m_remote_journaler != nullptr);
     m_remote_journaler->committed(replay_entry);
   }
-  m_event_replay_tracker.finish_op();
+
+  auto bytes = replay_entry.get_data().length();
+  auto latency = ceph_clock_now() - replay_start_time;
+
+  if (g_perf_counters) {
+    g_perf_counters->inc(l_rbd_mirror_replay);
+    g_perf_counters->inc(l_rbd_mirror_replay_bytes, bytes);
+    g_perf_counters->tinc(l_rbd_mirror_replay_latency, latency);
+  }
+
+  auto ctx = new FunctionContext(
+    [this, bytes, latency](int r) {
+      Mutex::Locker locker(m_lock);
+      if (m_perf_counters) {
+        m_perf_counters->inc(l_rbd_mirror_replay);
+        m_perf_counters->inc(l_rbd_mirror_replay_bytes, bytes);
+        m_perf_counters->tinc(l_rbd_mirror_replay_latency, latency);
+      }
+      m_event_replay_tracker.finish_op();
+    });
+  m_threads->work_queue->queue(ctx, 0);
 }
 
 template <typename I>
@@ -1785,12 +1810,27 @@ void ImageReplayer<I>::register_admin_socket_hook() {
       return;
     }
 
+    ceph_assert(m_perf_counters == nullptr);
+
     dout(15) << "registered asok hook: " << m_name << dendl;
     asok_hook = new ImageReplayerAdminSocketHook<I>(g_ceph_context, m_name,
                                                     this);
     int r = asok_hook->register_commands();
     if (r == 0) {
       m_asok_hook = asok_hook;
+
+      CephContext *cct = static_cast<CephContext *>(m_local->cct());
+      auto prio = cct->_conf.get_val<int64_t>("rbd_mirror_perf_stats_prio");
+      PerfCountersBuilder plb(g_ceph_context, "rbd_mirror_" + m_name,
+                              l_rbd_mirror_first, l_rbd_mirror_last);
+      plb.add_u64_counter(l_rbd_mirror_replay, "replay", "Replays", "r", prio);
+      plb.add_u64_counter(l_rbd_mirror_replay_bytes, "replay_bytes",
+                          "Replayed data", "rb", prio, unit_t(UNIT_BYTES));
+      plb.add_time_avg(l_rbd_mirror_replay_latency, "replay_latency",
+                       "Replay latency", "rl", prio);
+      m_perf_counters = plb.create_perf_counters();
+      g_ceph_context->get_perfcounters_collection()->add(m_perf_counters);
+
       return;
     }
     derr << "error registering admin socket commands" << dendl;
@@ -1803,11 +1843,17 @@ void ImageReplayer<I>::unregister_admin_socket_hook() {
   dout(15) << dendl;
 
   AdminSocketHook *asok_hook = nullptr;
+  PerfCounters *perf_counters = nullptr;
   {
     Mutex::Locker locker(m_lock);
     std::swap(asok_hook, m_asok_hook);
+    std::swap(perf_counters, m_perf_counters);
   }
   delete asok_hook;
+  if (perf_counters != nullptr) {
+    g_ceph_context->get_perfcounters_collection()->remove(perf_counters);
+    delete perf_counters;
+  }
 }
 
 template <typename I>

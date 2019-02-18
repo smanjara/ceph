@@ -22,7 +22,8 @@
 #include "AsyncMessenger.h"
 #include "AsyncConnection.h"
 
-#include "Protocol.h"
+#include "ProtocolV1.h"
+#include "ProtocolV2.h"
 
 #include "messages/MOSDOp.h"
 #include "messages/MOSDOpReply.h"
@@ -36,8 +37,9 @@
 #define dout_prefix _conn_prefix(_dout)
 ostream& AsyncConnection::_conn_prefix(std::ostream *_dout) {
   return *_dout << "-- " << async_msgr->get_myaddrs() << " >> "
-		<< target_addr << " conn(" << this
-		<< (msgr2 ? " msgr2" : " legacy")
+		<< *peer_addrs << " conn(" << this
+		<< (msgr2 ? " msgr2=" : " legacy=")
+		<< protocol.get()
                 << " :" << port
                 << " s=" << get_state_name(state)
                 << " l=" << policy.lossy
@@ -130,6 +132,8 @@ AsyncConnection::AsyncConnection(CephContext *cct, AsyncMessenger *m, DispatchQu
   recv_buf = new char[2*recv_max_prefetch];
   if (local) {
     protocol = std::unique_ptr<Protocol>(new LoopbackProtocolV1(this));
+  } else if (m2) {
+    protocol = std::unique_ptr<Protocol>(new ProtocolV2(this));
   } else {
     protocol = std::unique_ptr<Protocol>(new ProtocolV1(this));
   }
@@ -213,7 +217,7 @@ ssize_t AsyncConnection::read_until(unsigned len, char *p)
 
   recv_end = recv_start = 0;
   /* nothing left in the prefetch buffer */
-  if (len > recv_max_prefetch) {
+  if (left > (uint64_t)recv_max_prefetch) {
     /* this was a large read, we don't prefetch for these */
     do {
       r = read_bulk(p+state_offset, left);
@@ -368,8 +372,8 @@ void AsyncConnection::process() {
 
       SocketOptions opts;
       opts.priority = async_msgr->get_socket_priority();
-      opts.connect_bind_addr = msgr->get_myaddr();
-      ssize_t r = worker->connect(get_peer_addr(), opts, &cs);
+      opts.connect_bind_addr = msgr->get_myaddrs().front();
+      ssize_t r = worker->connect(target_addr, opts, &cs);
       if (r < 0) {
         protocol->fault();
         return;
@@ -381,7 +385,8 @@ void AsyncConnection::process() {
     case STATE_CONNECTING_RE: {
       ssize_t r = cs.is_connected();
       if (r < 0) {
-        ldout(async_msgr->cct, 1) << __func__ << " reconnect failed " << dendl;
+        ldout(async_msgr->cct, 1) << __func__ << " reconnect failed to "
+                                  << target_addr << dendl;
         if (r == -ECONNREFUSED) {
           ldout(async_msgr->cct, 2)
               << __func__ << " connection refused!" << dendl;
@@ -462,16 +467,19 @@ void AsyncConnection::_connect()
   center->dispatch_event_external(read_handler);
 }
 
-void AsyncConnection::accept(ConnectedSocket socket, entity_addr_t &addr)
+void AsyncConnection::accept(ConnectedSocket socket,
+			     const entity_addr_t &listen_addr,
+			     const entity_addr_t &peer_addr)
 {
   ldout(async_msgr->cct, 10) << __func__ << " sd=" << socket.fd()
-			     << " on " << addr << dendl;
+			     << " listen_addr " << listen_addr
+			     << " peer_addr " << peer_addr << dendl;
   ceph_assert(socket.fd() >= 0);
 
   std::lock_guard<std::mutex> l(lock);
   cs = std::move(socket);
-  socket_addr = addr;
-  target_addr = addr; // until we know better
+  socket_addr = listen_addr;
+  target_addr = peer_addr; // until we know better
   state = STATE_ACCEPTING;
   protocol->accept();
   // rescheduler connection in order to avoid lock dep
@@ -485,7 +493,7 @@ int AsyncConnection::send_message(Message *m)
 		   1) << "-- " << async_msgr->get_myaddrs() << " --> "
 		      << get_peer_addrs() << " -- "
 		      << *m << " -- " << m << " con "
-		      << m->get_connection().get()
+		      << this
 		      << dendl;
 
   // optimistic think it's ok to encode(actually may broken now)
@@ -521,6 +529,23 @@ int AsyncConnection::send_message(Message *m)
   return 0;
 }
 
+entity_addr_t AsyncConnection::_infer_target_addr(const entity_addrvec_t& av)
+{
+  // pick the first addr of the same address family as socket_addr.  it could be
+  // an any: or v2: addr, we don't care.  it should not be a v1 addr.
+  for (auto& i : av.v) {
+    if (i.is_legacy()) {
+      continue;
+    }
+    if (i.get_family() == socket_addr.get_family()) {
+      ldout(async_msgr->cct,10) << __func__ << " " << av << " -> " << i << dendl;
+      return i;
+    }
+  }
+  ldout(async_msgr->cct,10) << __func__ << " " << av << " -> nothing to match "
+			    << socket_addr << dendl;
+  return {};
+}
 
 void AsyncConnection::fault()
 {
@@ -643,7 +668,7 @@ void AsyncConnection::mark_down()
 
 void AsyncConnection::handle_write()
 {
-  ldout(async_msgr->cct, 4) << __func__ << dendl;
+  ldout(async_msgr->cct, 10) << __func__ << dendl;
   protocol->write_event();
 }
 

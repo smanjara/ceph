@@ -109,18 +109,19 @@ namespace librados
     bool operator!=(const NObjectIterator& rhs) const;
     const ListObject& operator*() const;
     const ListObject* operator->() const;
-    NObjectIterator &operator++(); // Preincrement
-    NObjectIterator operator++(int); // Postincrement
+    NObjectIterator &operator++(); //< Preincrement; errors are thrown as exceptions
+    NObjectIterator operator++(int); //< Postincrement; errors are thrown as exceptions
     friend class IoCtx;
     friend class NObjectIteratorImpl;
 
     /// get current hash position of the iterator, rounded to the current pg
     uint32_t get_pg_hash_position() const;
 
-    /// move the iterator to a given hash position.  this may (will!) be rounded to the nearest pg.
+    /// move the iterator to a given hash position. this may (will!) be rounded
+    /// to the nearest pg. errors are thrown as exceptions
     uint32_t seek(uint32_t pos);
 
-    /// move the iterator to a given cursor position
+    /// move the iterator to a given cursor position. errors are thrown as exceptions
     uint32_t seek(const ObjectCursor& cursor);
 
     /// get current cursor position
@@ -736,7 +737,7 @@ namespace librados
     std::string get_pool_name();
 
     bool pool_requires_alignment();
-    int pool_requires_alignment2(bool * requires);
+    int pool_requires_alignment2(bool * req);
     uint64_t pool_required_alignment();
     int pool_required_alignment2(uint64_t * alignment);
 
@@ -890,12 +891,14 @@ namespace librados
 		     std::list<librados::locker_t> *lockers);
 
 
-    /// Start enumerating objects for a pool
+    /// Start enumerating objects for a pool. Errors are thrown as exceptions.
     NObjectIterator nobjects_begin(const bufferlist &filter=bufferlist());
-    /// Start enumerating objects for a pool starting from a hash position
+    /// Start enumerating objects for a pool starting from a hash position.
+    /// Errors are thrown as exceptions.
     NObjectIterator nobjects_begin(uint32_t start_hash_position,
                                    const bufferlist &filter=bufferlist());
-    /// Start enumerating objects for a pool starting from cursor
+    /// Start enumerating objects for a pool starting from cursor. Errors are
+    /// thrown as exceptions.
     NObjectIterator nobjects_begin(const librados::ObjectCursor& cursor,
                                    const bufferlist &filter=bufferlist());
     /// Iterator indicating the end of a pool

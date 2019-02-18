@@ -1,3 +1,6 @@
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab
+
 #include "common/errno.h"
 
 #include "rgw_zone.h"
@@ -55,7 +58,7 @@ void RGWDefaultZoneGroupInfo::decode_json(JSONObj *obj) {
   }
 }
 
-rgw_pool RGWZoneGroup::get_pool(CephContext *cct_)
+rgw_pool RGWZoneGroup::get_pool(CephContext *cct_) const
 {
   if (cct_->_conf->rgw_zonegroup_root_pool.empty()) {
     return rgw_pool(RGW_DEFAULT_ZONEGROUP_ROOT_POOL);
@@ -73,7 +76,7 @@ int RGWZoneGroup::create_default(bool old_format)
   RGWZoneGroupPlacementTarget placement_target;
   placement_target.name = "default-placement";
   placement_targets[placement_target.name] = placement_target;
-  default_placement = "default-placement";
+  default_placement.name = "default-placement";
 
   RGWZoneParams zone_params(default_zone_name);
 
@@ -128,7 +131,7 @@ int RGWZoneGroup::create_default(bool old_format)
   return 0;
 }
 
-const string RGWZoneGroup::get_default_oid(bool old_region_format)
+const string RGWZoneGroup::get_default_oid(bool old_region_format) const
 {
   if (old_region_format) {
     if (cct->_conf->rgw_default_region_info_oid.empty()) {
@@ -148,7 +151,7 @@ const string RGWZoneGroup::get_default_oid(bool old_region_format)
   return default_oid;
 }
 
-const string& RGWZoneGroup::get_info_oid_prefix(bool old_region_format)
+const string& RGWZoneGroup::get_info_oid_prefix(bool old_region_format) const
 {
   if (old_region_format) {
     return region_info_oid_prefix;
@@ -156,12 +159,12 @@ const string& RGWZoneGroup::get_info_oid_prefix(bool old_region_format)
   return zone_group_info_oid_prefix;
 }
 
-const string& RGWZoneGroup::get_names_oid_prefix()
+const string& RGWZoneGroup::get_names_oid_prefix() const
 {
   return zonegroup_names_oid_prefix;
 }
 
-const string& RGWZoneGroup::get_predefined_name(CephContext *cct) {
+const string& RGWZoneGroup::get_predefined_name(CephContext *cct) const {
   return cct->_conf->rgw_zonegroup;
 }
 
@@ -287,7 +290,7 @@ void RGWZoneGroup::post_process_params()
   }
 
   if (default_placement.empty() && !placement_targets.empty()) {
-    default_placement = placement_targets.begin()->first;
+    default_placement.init(placement_targets.begin()->first, RGW_STORAGE_CLASS_STANDARD);
   }
 }
 
@@ -681,7 +684,7 @@ int RGWSystemMetaObj::write(bool exclusive)
 }
 
 
-const string& RGWRealm::get_predefined_name(CephContext *cct) {
+const string& RGWRealm::get_predefined_name(CephContext *cct) const {
   return cct->_conf->rgw_realm;
 }
 
@@ -763,7 +766,7 @@ int RGWRealm::delete_control()
   return sysobj.wop().remove();
 }
 
-rgw_pool RGWRealm::get_pool(CephContext *cct)
+rgw_pool RGWRealm::get_pool(CephContext *cct) const
 {
   if (cct->_conf->rgw_realm_root_pool.empty()) {
     return rgw_pool(RGW_DEFAULT_REALM_ROOT_POOL);
@@ -771,7 +774,7 @@ rgw_pool RGWRealm::get_pool(CephContext *cct)
   return rgw_pool(cct->_conf->rgw_realm_root_pool);
 }
 
-const string RGWRealm::get_default_oid(bool old_format)
+const string RGWRealm::get_default_oid(bool old_format) const
 {
   if (cct->_conf->rgw_default_realm_info_oid.empty()) {
     return default_realm_info_oid;
@@ -779,12 +782,12 @@ const string RGWRealm::get_default_oid(bool old_format)
   return cct->_conf->rgw_default_realm_info_oid;
 }
 
-const string& RGWRealm::get_names_oid_prefix()
+const string& RGWRealm::get_names_oid_prefix() const
 {
   return realm_names_oid_prefix;
 }
 
-const string& RGWRealm::get_info_oid_prefix(bool old_format)
+const string& RGWRealm::get_info_oid_prefix(bool old_format) const
 {
   return realm_info_oid_prefix;
 }
@@ -822,7 +825,7 @@ int RGWRealm::set_current_period(RGWPeriod& period)
   return 0;
 }
 
-string RGWRealm::get_control_oid()
+string RGWRealm::get_control_oid() const
 {
   return get_info_oid_prefix() + id + ".control";
 }
@@ -954,7 +957,9 @@ int RGWPeriod::init(CephContext *_cct, RGWSI_SysObj *_sysobj_svc, bool setup_obj
 }
 
 
-int RGWPeriod::get_zonegroup(RGWZoneGroup& zonegroup, const string& zonegroup_id) {
+int RGWPeriod::get_zonegroup(RGWZoneGroup& zonegroup,
+                             const string& zonegroup_id) const
+{
   map<string, RGWZoneGroup>::const_iterator iter;
   if (!zonegroup_id.empty()) {
     iter = period_map.zonegroups.find(zonegroup_id);
@@ -969,7 +974,7 @@ int RGWPeriod::get_zonegroup(RGWZoneGroup& zonegroup, const string& zonegroup_id
   return -ENOENT;
 }
 
-const string& RGWPeriod::get_latest_epoch_oid()
+const string& RGWPeriod::get_latest_epoch_oid() const
 {
   if (cct->_conf->rgw_period_latest_epoch_info_oid.empty()) {
     return period_latest_epoch_info_oid;
@@ -977,17 +982,17 @@ const string& RGWPeriod::get_latest_epoch_oid()
   return cct->_conf->rgw_period_latest_epoch_info_oid;
 }
 
-const string& RGWPeriod::get_info_oid_prefix()
+const string& RGWPeriod::get_info_oid_prefix() const
 {
   return period_info_oid_prefix;
 }
 
-const string RGWPeriod::get_period_oid_prefix()
+const string RGWPeriod::get_period_oid_prefix() const
 {
   return get_info_oid_prefix() + id;
 }
 
-const string RGWPeriod::get_period_oid()
+const string RGWPeriod::get_period_oid() const
 {
   std::ostringstream oss;
   oss << get_period_oid_prefix();
@@ -1216,7 +1221,7 @@ int RGWPeriod::store_info(bool exclusive)
                .write(bl);
 }
 
-rgw_pool RGWPeriod::get_pool(CephContext *cct)
+rgw_pool RGWPeriod::get_pool(CephContext *cct) const
 {
   if (cct->_conf->rgw_period_root_pool.empty()) {
     return rgw_pool(RGW_DEFAULT_PERIOD_ROOT_POOL);
@@ -1269,8 +1274,14 @@ int RGWPeriod::update()
     if (zg.master_zone.empty()) {
       ldout(cct, 0) << "ERROR: zonegroup " << zg.get_name() << " should have a master zone " << dendl;
       return -EINVAL;
-    }  
-    
+    }
+
+    if (zg.zones.find(zg.master_zone) == zg.zones.end()) {
+      ldout(cct,0) << "ERROR: zonegroup " << zg.get_name()
+                   << " has a non existent master zone "<< dendl;
+      return -EINVAL;
+    }
+
     if (zg.is_master_zonegroup()) {
       master_zonegroup = zg.get_id();
       master_zone = zg.master_zone;
@@ -1536,7 +1547,11 @@ int get_zones_pool_set(CephContext* cct,
       pool_names.insert(zone.reshard_pool);
       for(auto& iter : zone.placement_pools) {
 	pool_names.insert(iter.second.index_pool);
-	pool_names.insert(iter.second.data_pool);
+        for (auto& pi : iter.second.storage_classes.get_all()) {
+          if (pi.second.data_pool) {
+            pool_names.insert(pi.second.data_pool.get());
+          }
+        }
 	pool_names.insert(iter.second.data_extra_pool);
       }
     }
@@ -1610,8 +1625,13 @@ int RGWZoneParams::fix_pool_names()
   for(auto& iter : placement_pools) {
     iter.second.index_pool = fix_zone_pool_dup(pools, name, "." + default_bucket_index_pool_suffix,
                                                iter.second.index_pool);
-    iter.second.data_pool = fix_zone_pool_dup(pools, name, "." + default_storage_pool_suffix,
-                                              iter.second.data_pool);
+    for (auto& pi : iter.second.storage_classes.get_all()) {
+      if (pi.second.data_pool) {
+        rgw_pool& pool = pi.second.data_pool.get();
+        pool = fix_zone_pool_dup(pools, name, "." + default_storage_pool_suffix,
+                                 pool);
+      }
+    }
     iter.second.data_extra_pool= fix_zone_pool_dup(pools, name, "." + default_storage_extra_pool_suffix,
                                                    iter.second.data_extra_pool);
   }
@@ -1631,7 +1651,8 @@ int RGWZoneParams::create(bool exclusive)
     /* a new system, let's set new placement info */
     RGWZonePlacementInfo default_placement;
     default_placement.index_pool = name + "." + default_bucket_index_pool_suffix;
-    default_placement.data_pool =  name + "." + default_storage_pool_suffix;
+    rgw_pool pool = name + "." + default_storage_pool_suffix;
+    default_placement.storage_classes.set_storage_class(RGW_STORAGE_CLASS_STANDARD, &pool, nullptr);
     default_placement.data_extra_pool = name + "." + default_storage_extra_pool_suffix;
     placement_pools["default-placement"] = default_placement;
   }
@@ -1657,7 +1678,7 @@ int RGWZoneParams::create(bool exclusive)
   return 0;
 }
 
-rgw_pool RGWZoneParams::get_pool(CephContext *cct)
+rgw_pool RGWZoneParams::get_pool(CephContext *cct) const
 {
   if (cct->_conf->rgw_zone_root_pool.empty()) {
     return rgw_pool(RGW_DEFAULT_ZONE_ROOT_POOL);
@@ -1666,7 +1687,7 @@ rgw_pool RGWZoneParams::get_pool(CephContext *cct)
   return rgw_pool(cct->_conf->rgw_zone_root_pool);
 }
 
-const string RGWZoneParams::get_default_oid(bool old_format)
+const string RGWZoneParams::get_default_oid(bool old_format) const
 {
   if (old_format) {
     return cct->_conf->rgw_default_zone_info_oid;
@@ -1675,17 +1696,17 @@ const string RGWZoneParams::get_default_oid(bool old_format)
   return cct->_conf->rgw_default_zone_info_oid + "." + realm_id;
 }
 
-const string& RGWZoneParams::get_names_oid_prefix()
+const string& RGWZoneParams::get_names_oid_prefix() const
 {
   return zone_names_oid_prefix;
 }
 
-const string& RGWZoneParams::get_info_oid_prefix(bool old_format)
+const string& RGWZoneParams::get_info_oid_prefix(bool old_format) const
 {
   return zone_info_oid_prefix;
 }
 
-const string& RGWZoneParams::get_predefined_name(CephContext *cct) {
+const string& RGWZoneParams::get_predefined_name(CephContext *cct) const {
   return cct->_conf->rgw_zone;
 }
 
@@ -1731,14 +1752,14 @@ int RGWZoneParams::set_as_default(bool exclusive)
   return RGWSystemMetaObj::set_as_default(exclusive);
 }
 
-const string& RGWZoneParams::get_compression_type(const string& placement_rule) const
+const string& RGWZoneParams::get_compression_type(const rgw_placement_rule& placement_rule) const
 {
   static const std::string NONE{"none"};
-  auto p = placement_pools.find(placement_rule);
+  auto p = placement_pools.find(placement_rule.name);
   if (p == placement_pools.end()) {
     return NONE;
   }
-  const auto& type = p->second.compression_type;
+  const auto& type = p->second.get_compression_type(placement_rule.storage_class);
   return !type.empty() ? type : NONE;
 }
 

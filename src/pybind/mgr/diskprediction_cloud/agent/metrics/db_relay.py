@@ -501,8 +501,7 @@ class DBRelayAgent(MetricsAgent):
             )
             cluster_host = socket.gethostname()
             data.fields['agenthost'] = cluster_host
-            data.tags['agenthost_domain_id'] = \
-                str('%s_%s' % (cluster_id, data.fields['agenthost']))
+            data.tags['agenthost_domain_id'] = cluster_id
             data.tags['host'] = cluster_host
             data.fields['cmd'] = str(cypher_cmd)
             self.data.append(data)
@@ -521,8 +520,7 @@ class DBRelayAgent(MetricsAgent):
             )
             cluster_host = socket.gethostname()
             data.fields['agenthost'] = cluster_host
-            data.tags['agenthost_domain_id'] = \
-                str('%s_%s' % (self._cluster_id, data.fields['agenthost']))
+            data.tags['agenthost_domain_id'] = self._cluster_id
             data.tags['host'] = cluster_host
             data.fields['cmd'] = str(cypher_cmd)
             self.data.append(data)
@@ -542,8 +540,7 @@ class DBRelayAgent(MetricsAgent):
             )
             cluster_host = socket.gethostname()
             data.fields['agenthost'] = cluster_host
-            data.tags['agenthost_domain_id'] = \
-                str('%s_%s' % (cluster_id, data.fields['agenthost']))
+            data.tags['agenthost_domain_id'] = cluster_id, data
             data.tags['host'] = cluster_host
             data.fields['cmd'] = str(cypher_cmd)
             self.data.append(data)
@@ -563,8 +560,7 @@ class DBRelayAgent(MetricsAgent):
             )
             cluster_host = socket.gethostname()
             data.fields['agenthost'] = cluster_host
-            data.tags['agenthost_domain_id'] = \
-                str('%s_%s' % (cluster_id, data.fields['agenthost']))
+            data.tags['agenthost_domain_id'] = cluster_id
             data.tags['host'] = cluster_host
             data.fields['cmd'] = str(cypher_cmd)
             self.data.append(data)
@@ -574,7 +570,7 @@ class DBRelayAgent(MetricsAgent):
         cluster_host = socket.gethostname()
         for d_name, d_node in self._dev_nodes.items():
             keys = {'data_osd': 'DataDiskOfOSD',
-                    'fs_journal_osd': 'FsJounalDiskOfOSD',
+                    'fs_journal_osd': 'FsJournalDiskOfOSD',
                     'bs_db_osd': 'BsDBDiskOfOSD',
                     'bs_wal_osd': 'BsWalDiskOfOSD'}
             for k, v in keys.items():
@@ -591,8 +587,7 @@ class DBRelayAgent(MetricsAgent):
                         d_node,
                         v)
                     data.fields['agenthost'] = cluster_host
-                    data.tags['agenthost_domain_id'] = \
-                        str('%s_%s' % (cluster_id, data.fields['agenthost']))
+                    data.tags['agenthost_domain_id'] = cluster_id
                     data.tags['host'] = cluster_host
                     data.fields['cmd'] = str(cypher_cmd)
                     self.data.append(data)
@@ -611,8 +606,7 @@ class DBRelayAgent(MetricsAgent):
                 'VmHostContainsVmDisk'
             )
             data.fields['agenthost'] = cluster_host
-            data.tags['agenthost_domain_id'] = \
-                str('%s_%s' % (cluster_id, data.fields['agenthost']))
+            data.tags['agenthost_domain_id'] = cluster_id
             data.tags['host'] = cluster_host
             data.fields['cmd'] = str(cypher_cmd)
             self.data.append(data)
@@ -632,8 +626,7 @@ class DBRelayAgent(MetricsAgent):
                     'OsdContainsPool'
                 )
                 data.fields['agenthost'] = cluster_host
-                data.tags['agenthost_domain_id'] = \
-                    str('%s_%s' % (cluster_id, data.fields['agenthost']))
+                data.tags['agenthost_domain_id'] = cluster_id
                 data.tags['host'] = cluster_host
                 data.fields['cmd'] = str(cypher_cmd)
                 self.data.append(data)
@@ -652,8 +645,7 @@ class DBRelayAgent(MetricsAgent):
                     'PoolContainsRBD'
                 )
                 data.fields['agenthost'] = cluster_host
-                data.tags['agenthost_domain_id'] = \
-                    str('%s_%s' % (cluster_id, data.fields['agenthost']))
+                data.tags['agenthost_domain_id'] = cluster_id
                 data.tags['host'] = cluster_host
                 data.fields['cmd'] = str(cypher_cmd)
                 self.data.append(data)
@@ -675,8 +667,7 @@ class DBRelayAgent(MetricsAgent):
                             'MetadataPoolContainsFS' if p_attr == 'metadata_pool' else 'DataPoolContainsFS'
                         )
                         data.fields['agenthost'] = cluster_host
-                        data.tags['agenthost_domain_id'] = \
-                            str('%s_%s' % (cluster_id, data.fields['agenthost']))
+                        data.tags['agenthost_domain_id'] = cluster_id
                         data.tags['host'] = cluster_host
                         data.fields['cmd'] = str(cypher_cmd)
                         self.data.append(data)
@@ -691,8 +682,7 @@ class DBRelayAgent(MetricsAgent):
                     'MDSContainsFS'
                 )
                 data.fields['agenthost'] = cluster_host
-                data.tags['agenthost_domain_id'] = \
-                    str('%s_%s' % (cluster_id, data.fields['agenthost']))
+                data.tags['agenthost_domain_id'] = cluster_id
                 data.tags['host'] = cluster_host
                 data.fields['cmd'] = str(cypher_cmd)
                 self.data.append(data)

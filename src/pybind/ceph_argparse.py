@@ -23,10 +23,13 @@ import sys
 import threading
 import uuid
 
-
 # Flags are from MonCommand.h
-FLAG_MGR = 8   # command is intended for mgr
-FLAG_POLL = 16 # command is intended to be ran continuously by the client
+FLAG_NOFORWARD = (1 << 0)
+FLAG_OBSOLETE = (1 << 1)
+FLAG_DEPRECATED = (1 << 2)
+FLAG_MGR = (1<<3)
+FLAG_POLL = (1 << 4)
+FLAG_HIDDEN = (1 << 5)
 
 KWARG_EQUALS = "--([^=]+)=(.+)"
 KWARG_SPACE = "--([^=]+)"
@@ -159,7 +162,7 @@ class CephInt(CephArgtype):
 
     def valid(self, s, partial=False):
         try:
-            val = int(s)
+            val = int(s, 0)
         except ValueError:
             raise ArgumentValid("{0} doesn't represent an int".format(s))
         if len(self.range) == 2:
@@ -1129,6 +1132,9 @@ def validate_command(sigdict, args, verbose=False):
     best_match_cnt = 0
     bestcmds = []
     for cmd in sigdict.values():
+        flags = cmd.get('flags', 0)
+        if flags & FLAG_OBSOLETE:
+            continue
         sig = cmd['sig']
         matched = matchnum(args, sig, partial=True)
         if (matched >= math.floor(best_match_cnt) and
@@ -1138,7 +1144,7 @@ def validate_command(sigdict, args, verbose=False):
         if matched < best_match_cnt:
             continue
         if verbose:
-            print("better match: {0} > {1}: {3} ".format(
+            print("better match: {0} > {1}: {2} ".format(
                 matched, best_match_cnt, concise_sig(sig)
             ), file=sys.stderr)
         if matched > best_match_cnt:
@@ -1193,7 +1199,8 @@ def validate_command(sigdict, args, verbose=False):
             print("Invalid command:", ex, file=sys.stderr)
             print(concise_sig(sig), ': ', cmd['help'], file=sys.stderr)
     else:
-        bestcmds = bestcmds[:10]
+        bestcmds = [c for c in bestcmds if not c.get('flags', 0) & (FLAG_DEPRECATED | FLAG_HIDDEN)]
+        bestcmds = bestcmds[:10] # top 10
         print('no valid command found; {0} closest matches:'.format(len(bestcmds)), file=sys.stderr)
         for cmd in bestcmds:
             print(concise_sig(cmd['sig']), file=sys.stderr)
@@ -1284,14 +1291,13 @@ class RadosThread(threading.Thread):
             self.exception = e
 
 
-# time in seconds between each call to t.join() for child thread
-POLL_TIME_INCR = 0.5
-
-
 def run_in_thread(func, *args, **kwargs):
     interrupt = False
     timeout = kwargs.pop('timeout', 0)
-    countdown = timeout
+    if timeout == 0 or timeout == None:
+        # python threading module will just get blocked if timeout is `None`,
+        # otherwise it will keep polling until timeout or thread stops.
+        timeout = 2 ** 32
     t = RadosThread(func, *args, **kwargs)
 
     # allow the main thread to exit (presumably, avoid a join() on this
@@ -1300,30 +1306,19 @@ def run_in_thread(func, *args, **kwargs):
     t.daemon = True
 
     t.start()
-    try:
-        # poll for thread exit
-        while t.is_alive():
-            t.join(POLL_TIME_INCR)
-            if timeout and t.is_alive():
-                countdown = countdown - POLL_TIME_INCR
-                if countdown <= 0:
-                    raise KeyboardInterrupt
-
-        t.join()        # in case t exits before reaching the join() above
-    except KeyboardInterrupt:
-        # ..but allow SIGINT to terminate the waiting.  Note: this
-        # relies on the Linux kernel behavior of delivering the signal
-        # to the main thread in preference to any subthread (all that's
-        # strictly guaranteed is that *some* thread that has the signal
-        # unblocked will receive it).  But there doesn't seem to be
-        # any interface to create t with SIGINT blocked.
-        interrupt = True
-
-    if interrupt:
-        t.retval = -errno.EINTR, None, 'Interrupted!'
-    if t.exception:
+    t.join(timeout=timeout)
+    # ..but allow SIGINT to terminate the waiting.  Note: this
+    # relies on the Linux kernel behavior of delivering the signal
+    # to the main thread in preference to any subthread (all that's
+    # strictly guaranteed is that *some* thread that has the signal
+    # unblocked will receive it).  But there doesn't seem to be
+    # any interface to create a thread with SIGINT blocked.
+    if t.is_alive():
+        raise Exception("timed out")
+    elif t.exception:
         raise t.exception
-    return t.retval
+    else:
+        return t.retval
 
 
 def send_command_retry(*args, **kwargs):

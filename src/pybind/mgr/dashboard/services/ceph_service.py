@@ -1,9 +1,6 @@
 # -*- coding: utf-8 -*-
 from __future__ import absolute_import
 
-import time
-import collections
-from collections import defaultdict
 import json
 
 import rados
@@ -103,15 +100,7 @@ class CephService(object):
         pools_w_stats = []
 
         pg_summary = mgr.get("pg_summary")
-        pool_stats = defaultdict(lambda: defaultdict(
-            lambda: collections.deque(maxlen=10)))
-
-        df = mgr.get("df")
-        pool_stats_dict = dict([(p['id'], p['stats']) for p in df['pools']])
-        now = time.time()
-        for pool_id, stats in pool_stats_dict.items():
-            for stat_name, stat_val in stats.items():
-                pool_stats[pool_id][stat_name].appendleft((now, stat_val))
+        pool_stats = mgr.get_updated_pool_stats()
 
         for pool in pools:
             pool['pg_status'] = pg_summary['by_pool'][pool['pool'].__str__()]
@@ -120,7 +109,7 @@ class CephService(object):
 
             def get_rate(series):
                 if len(series) >= 2:
-                    return differentiate(*series[0:1])
+                    return differentiate(*list(series)[-2:])
                 return 0
 
             for stat_name, stat_series in stats.items():
@@ -187,7 +176,7 @@ class CephService(object):
         data = mgr.get_counter(svc_type, svc_name, path)[path]
         if not data:
             return [(0, 0.0)]
-        elif len(data) == 1:
+        if len(data) == 1:
             return [(data[0][0], 0.0)]
         return [(data2[0], differentiate(data1, data2)) for data1, data2 in pairwise(data)]
 
@@ -246,10 +235,10 @@ class CephService(object):
     def get_pg_info(cls):
         pg_summary = mgr.get('pg_summary')
 
-        pgs_per_osd = 0
+        pgs_per_osd = 0.0
         total_osds = len(pg_summary['by_osd'])
         if total_osds > 0:
-            total_pgs = 0
+            total_pgs = 0.0
             for _, osd_pg_statuses in pg_summary['by_osd'].items():
                 for _, pg_amount in osd_pg_statuses.items():
                     total_pgs += pg_amount

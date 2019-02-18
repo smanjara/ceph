@@ -19,8 +19,8 @@ def pool_task(name, metadata, wait_for=2.0):
 @ApiController('/pool', Scope.POOL)
 class Pool(RESTController):
 
-    @classmethod
-    def _serialize_pool(cls, pool, attrs):
+    @staticmethod
+    def _serialize_pool(pool, attrs):
         if not attrs or not isinstance(attrs, list):
             attrs = pool.keys()
 
@@ -65,9 +65,8 @@ class Pool(RESTController):
             raise cherrypy.NotFound('No such pool')
         return pool[0]
 
-    # '_get' will be wrapped into JSON through '_request_wrapper'
     def get(self, pool_name, attrs=None, stats=False):
-        # type: (str, str, bool) -> str
+        # type: (str, str, bool) -> dict
         return self._get(pool_name, attrs, stats)
 
     @pool_task('delete', ['{pool_name}'])
@@ -92,6 +91,7 @@ class Pool(RESTController):
         self._set_pool_values(pool, application_metadata, flags, False, kwargs)
 
     def _set_pool_values(self, pool, application_metadata, flags, update_existing, kwargs):
+        update_name = False
         if update_existing:
             current_pool = self._get(pool)
             self._handle_update_compression_args(current_pool.get('options'), kwargs)
@@ -117,9 +117,15 @@ class Pool(RESTController):
             CephService.send_command('mon', 'osd pool set', pool=pool, var=key, val=str(value))
 
         for key, value in kwargs.items():
-            set_key(key, value)
-            if key == 'pg_num':
-                set_key('pgp_num', value)
+            if key == 'pool':
+                update_name = True
+                destpool = value
+            else:
+                set_key(key, value)
+                if key == 'pg_num':
+                    set_key('pgp_num', value)
+        if update_name:
+            CephService.send_command('mon', 'osd pool rename', srcpool=pool, destpool=destpool)
 
     def _handle_update_compression_args(self, options, kwargs):
         if kwargs.get('compression_mode') == 'unset' and options is not None:
@@ -145,10 +151,10 @@ class Pool(RESTController):
                        for o in mgr.get('osd_metadata').values())
 
         def compression_enum(conf_name):
-            return [[v for v in o['enum_values'] if len(v) > 0] for o in config_options
+            return [[v for v in o['enum_values'] if len(v) > 0]
+                    for o in mgr.get('config_options')['options']
                     if o['name'] == conf_name][0]
 
-        config_options = mgr.get('config_options')['options']
         return {
             "pool_names": [p['pool_name'] for p in self._pool_list()],
             "crush_rules_replicated": rules(1),

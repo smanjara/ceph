@@ -124,7 +124,7 @@ public:
     linkage.remote_d_type = dt;
   }
 
-  const char *pin_name(int p) const override {
+  std::string_view pin_name(int p) const override {
     switch (p) {
     case PIN_INODEPIN: return "inodepin";
     case PIN_FRAGMENTING: return "fragmenting";
@@ -137,7 +137,7 @@ public:
   // -- wait --
   //static const int WAIT_LOCK_OFFSET = 8;
 
-  void add_waiter(uint64_t tag, MDSInternalContextBase *c) override;
+  void add_waiter(uint64_t tag, MDSContext *c) override;
 
   bool is_lt(const MDSCacheObject *r) const override {
     return *this < *static_cast<const CDentry*>(r);

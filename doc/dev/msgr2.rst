@@ -1,3 +1,5 @@
+.. _msgr2:
+
 msgr2 protocol
 ==============
 
@@ -82,9 +84,13 @@ the form::
 
   frame_len (le32)
   tag (TAG_* le32)
+  frame_header_checksum (le32)
   payload
   [payload padding -- only present after stream auth phase]
   [signature -- only present after stream auth phase]
+
+
+* The frame_header_checksum is over just the frame_len and tag values (8 bytes).
 
 * frame_len includes everything after the frame_len le32 up to the end of the
   frame (all payloads, signatures, and padding).
@@ -95,6 +101,17 @@ the form::
   has completed (TAG_AUTH_DONE has been sent) and signatures are
   enabled.
 
+Hello
+-----
+
+* TAG_HELLO: client->server and server->client::
+
+    __u8 entity_type
+    entity_addr_t peer_socket_address
+
+  - We immediately share our entity type and the address of the peer (which can be useful
+    for detecting our effective IP address, especially in the presence of NAT).
+
 
 Authentication
 --------------
@@ -102,40 +119,41 @@ Authentication
 * TAG_AUTH_REQUEST: client->server::
 
     __le32 method;  // CEPH_AUTH_{NONE, CEPHX, ...}
+    __le32 num_preferred_modes;
+    list<__le32> mode  // CEPH_CON_MODE_*
+    method specific payload
+
+* TAG_AUTH_BAD_METHOD server -> client: reject client-selected auth method::
+
+    __le32 method
+    __le32 negative error result code
+    __le32 num_methods
+    list<__le32> allowed_methods // CEPH_AUTH_{NONE, CEPHX, ...}
+    __le32 num_modes
+    list<__le32> allowed_modes   // CEPH_CON_MODE_*
+
+  - Returns the attempted auth method, and error code (-EOPNOTSUPP if
+    the method is unsupported), and the list of allowed authentication
+    methods.
+
+* TAG_AUTH_REPLY_MORE: server->client::
+
     __le32 len;
     method specific payload
 
-* TAG_AUTH_BAD_METHOD (server only): reject client-selected auth method::
-
-    __le32 method
-    __le32 num_methods
-    __le32 allowed_methods[num_methods] // CEPH_AUTH_{NONE, CEPHX, ...}
-
-  - Returns the unsupported/forbidden method along with the list of allowed
-    authentication methods.
-
-* TAG_AUTH_BAD_AUTH: server->client::
-
-    __le32 error code (e.g., EPERM, EACCESS)
-    __le32 len;
-    error string;
-
-  - Sent when the authentication fails
-
-* TAG_AUTH_MORE: server->client or client->server::
+* TAG_AUTH_REQUEST_MORE: client->server::
 
     __le32 len;
     method specific payload
 
 * TAG_AUTH_DONE: (server->client)::
 
-    confounder (block_size bytes of random garbage)
-    __le64 flags
-      FLAG_ENCRYPTED  1
-      FLAG_SIGNED     2
-    signature
+    __le64 global_id
+    __le32 connection mode // CEPH_CON_MODE_*
+    method specific payload
 
-  - The server is the one to decide authentication has completed.
+  - The server is the one to decide authentication has completed and what
+    the final connection mode will be.
 
 
 Example of authentication phase interaction when the client uses an
@@ -228,19 +246,24 @@ Message flow handshake
 In this phase the peers identify each other and (if desired) reconnect to
 an established session.
 
-* TAG_IDENT: identify ourselves::
+* TAG_CLIENT_IDENT (client->server): identify ourselves::
 
-    entity_addrvec_t addr(s)
-    __u8   my type (CEPH_ENTITY_TYPE_*)
+    __le32 num_addrs
+    entity_addrvec_t*num_addrs entity addrs
+    entity_addr_t target entity addr
     __le64 gid (numeric part of osd.0, client.123456, ...)
+    __le64 global_seq
     __le64 features supported (CEPH_FEATURE_* bitmask)
     __le64 features required (CEPH_FEATURE_* bitmask)
     __le64 flags (CEPH_MSG_CONNECT_* bitmask)
-    __le64 cookie (a client identifier, assigned by the sender. unique on the sender.)
 
   - client will send first, server will reply with same.  if this is a
     new session, the client and server can proceed to the message exchange.
-  - type.gid (entity_name_t) is set here.  this means we don't need it
+  - the target addr is who the client is trying to connect *to*, so
+    that the server side can close the connection if the client is
+    talking to the wrong daemon.
+  - type.gid (entity_name_t) is set here, by combinging the type shared in the hello
+    frame with the gid here.  this means we don't need it
     in the header of every message.  it also means that we can't send
     messages "from" other entity_name_t's.  the current
     implementations set this at the top of _send_message etc so this
@@ -248,24 +271,40 @@ an established session.
     likely want to mask this against what the authenticated credential
     allows.
   - we've dropped the 'protocol_version' field from msgr1
-  - for lossy sessions, cookie is meaningless.  for lossless sessions,
-    we assign a local value that identifies the local Connection
-    state.  when we receive this from a peer, we make a note of their
-    cookie, so that on reconnect we can reattach (see below).
 
-* TAG_IDENT_MISSING_FEATURES (server only): complain about a TAG_IDENT
+* TAG_IDENT_MISSING_FEATURES (server->client): complain about a TAG_IDENT
   with too few features::
 
     __le64 features we require that the peer didn't advertise
 
-* TAG_RECONNECT (client only): reconnect to an established session::
+* TAG_SERVER_IDENT (server->client): accept client ident and identify server::
 
+    __le32 num_addrs
+    entity_addrvec_t*num_addrs entity addrs
+    __le64 gid (numeric part of osd.0, client.123456, ...)
+    __le64 global_seq
+    __le64 features supported (CEPH_FEATURE_* bitmask)
+    __le64 features required (CEPH_FEATURE_* bitmask)
+    __le64 flags (CEPH_MSG_CONNECT_* bitmask)
     __le64 cookie
+
+  - The cookie can be used by the client if it is later disconnected and wants to
+    reconnect and resume the session.
+
+* TAG_RECONNECT (client->server): reconnect to an established session::
+
+    __le32 num_addrs
+    entity_addr_t * num_addrs
+    entity_addr_t target entity addr
+    __le64 cookie
+    __le64 id (of name.id, e.g., osd.123 -> 123)
     __le64 global_seq
     __le64 connect_seq
+    __le64 supported_features
+    __le64 required_features
     __le64 msg_seq (the last msg seq received)
 
-* TAG_RECONNECT_OK (server only): acknowledge a reconnect attempt::
+* TAG_RECONNECT_OK (server->client): acknowledge a reconnect attempt::
 
     __le64 msg_seq (last msg seq received)
 

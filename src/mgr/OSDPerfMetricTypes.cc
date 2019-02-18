@@ -2,52 +2,40 @@
 // vim: ts=8 sw=2 smarttab
 
 #include "mgr/OSDPerfMetricTypes.h"
-#include "messages/MOSDOp.h"
-#include "osd/OpRequest.h"
 
-void PerformanceCounterDescriptor::update_counter(
-    const OpRequest& op, uint64_t inb, uint64_t outb, const utime_t &now,
-    PerformanceCounter *c) const {
-  switch(type) {
-  case PerformanceCounterType::WRITE_OPS:
-    if (op.may_write() || op.may_cache()) {
-      c->first++;
-    }
-    return;
-  case PerformanceCounterType::READ_OPS:
-    if (op.may_read()) {
-      c->first++;
-    }
-    return;
-  case PerformanceCounterType::WRITE_BYTES:
-    if (op.may_write() || op.may_cache()) {
-      c->first += inb;
-      c->second++;
-    }
-    return;
-  case PerformanceCounterType::READ_BYTES:
-    if (op.may_read()) {
-      c->first += outb;
-      c->second++;
-    }
-    return;
-  case PerformanceCounterType::WRITE_LATENCY:
-    if (op.may_write() || op.may_cache()) {
-      const MOSDOp* const m = static_cast<const MOSDOp*>(op.get_req());
-      c->first += (now - m->get_recv_stamp()).to_nsec();
-      c->second++;
-    }
-    return;
-  case PerformanceCounterType::READ_LATENCY:
-    if (op.may_read()) {
-      const MOSDOp* const m = static_cast<const MOSDOp*>(op.get_req());
-      c->first += (now - m->get_recv_stamp()).to_nsec();
-      c->second++;
-    }
-    return;
+#include <ostream>
+
+std::ostream& operator<<(std::ostream& os,
+                         const OSDPerfMetricSubKeyDescriptor &d) {
+  switch(d.type) {
+  case OSDPerfMetricSubKeyType::CLIENT_ID:
+    os << "client_id";
+    break;
+  case OSDPerfMetricSubKeyType::CLIENT_ADDRESS:
+    os << "client_address";
+    break;
+  case OSDPerfMetricSubKeyType::POOL_ID:
+    os << "pool_id";
+    break;
+  case OSDPerfMetricSubKeyType::NAMESPACE:
+    os << "namespace";
+    break;
+  case OSDPerfMetricSubKeyType::OSD_ID:
+    os << "osd_id";
+    break;
+  case OSDPerfMetricSubKeyType::PG_ID:
+    os << "pg_id";
+    break;
+  case OSDPerfMetricSubKeyType::OBJECT_NAME:
+    os << "object_name";
+    break;
+  case OSDPerfMetricSubKeyType::SNAP_ID:
+    os << "snap_id";
+    break;
   default:
-    ceph_abort_msg("unknown counter type");
+    os << "unknown (" << static_cast<int>(d.type) << ")";
   }
+  return os << "~/" << d.regex_str << "/";
 }
 
 void PerformanceCounterDescriptor::pack_counter(const PerformanceCounter &c,
@@ -55,11 +43,14 @@ void PerformanceCounterDescriptor::pack_counter(const PerformanceCounter &c,
   using ceph::encode;
   encode(c.first, *bl);
   switch(type) {
+  case PerformanceCounterType::OPS:
   case PerformanceCounterType::WRITE_OPS:
   case PerformanceCounterType::READ_OPS:
-    break;
+  case PerformanceCounterType::BYTES:
   case PerformanceCounterType::WRITE_BYTES:
   case PerformanceCounterType::READ_BYTES:
+    break;
+  case PerformanceCounterType::LATENCY:
   case PerformanceCounterType::WRITE_LATENCY:
   case PerformanceCounterType::READ_LATENCY:
     encode(c.second, *bl);
@@ -74,11 +65,14 @@ void PerformanceCounterDescriptor::unpack_counter(
   using ceph::decode;
   decode(c->first, bl);
   switch(type) {
+  case PerformanceCounterType::OPS:
   case PerformanceCounterType::WRITE_OPS:
   case PerformanceCounterType::READ_OPS:
-    break;
+  case PerformanceCounterType::BYTES:
   case PerformanceCounterType::WRITE_BYTES:
   case PerformanceCounterType::READ_BYTES:
+    break;
+  case PerformanceCounterType::LATENCY:
   case PerformanceCounterType::WRITE_LATENCY:
   case PerformanceCounterType::READ_LATENCY:
     decode(c->second, bl);
@@ -91,43 +85,32 @@ void PerformanceCounterDescriptor::unpack_counter(
 std::ostream& operator<<(std::ostream& os,
                          const PerformanceCounterDescriptor &d) {
   switch(d.type) {
+  case PerformanceCounterType::OPS:
+    return os << "ops";
   case PerformanceCounterType::WRITE_OPS:
     return os << "write ops";
   case PerformanceCounterType::READ_OPS:
     return os << "read ops";
+  case PerformanceCounterType::BYTES:
+    return os << "bytes";
   case PerformanceCounterType::WRITE_BYTES:
     return os << "write bytes";
   case PerformanceCounterType::READ_BYTES:
     return os << "read bytes";
+  case PerformanceCounterType::LATENCY:
+    return os << "latency";
   case PerformanceCounterType::WRITE_LATENCY:
     return os << "write latency";
   case PerformanceCounterType::READ_LATENCY:
     return os << "read latency";
   default:
-    return os << "unknown (" << d.type << ")";
+    return os << "unknown (" << static_cast<int>(d.type) << ")";
   }
 }
 
-bool OSDPerfMetricQuery::get_key(const OpRequest& op, std::string *key) const {
-  const MOSDOp* const m = static_cast<const MOSDOp*>(op.get_req());
-
-  *key = stringify(m->get_reqid().name);
-  return true;
-}
-
-void OSDPerfMetricQuery::update_counters(const OpRequest& op, uint64_t inb,
-                                         uint64_t outb, const utime_t &now,
-                                         PerformanceCounters *counters) const {
-  auto it = counters->begin();
-  for (auto &descriptor : performance_counter_descriptors) {
-    // TODO: optimize
-    if (it == counters->end()) {
-      counters->push_back(PerformanceCounter());
-      it = std::prev(counters->end());
-    }
-    descriptor.update_counter(op, inb, outb, now, &(*it));
-    it++;
-  }
+std::ostream& operator<<(std::ostream& os, const OSDPerfMetricLimit &limit) {
+  return os << "{order_by=" << limit.order_by << ", max_count="
+            << limit.max_count << "}";
 }
 
 void OSDPerfMetricQuery::pack_counters(const PerformanceCounters &counters,
@@ -144,5 +127,6 @@ void OSDPerfMetricQuery::pack_counters(const PerformanceCounters &counters,
 }
 
 std::ostream& operator<<(std::ostream& os, const OSDPerfMetricQuery &query) {
-  return os << "simple";
+  return os << "{key=" << query.key_descriptor << ", counters="
+            << query.performance_counter_descriptors << "}";
 }

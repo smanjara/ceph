@@ -76,14 +76,6 @@ DaemonServer::DaemonServer(MonClient *monc_,
       py_modules(py_modules_),
       clog(clog_),
       audit_clog(audit_clog_),
-      auth_cluster_registry(g_ceph_context,
-                    g_conf()->auth_supported.empty() ?
-                      g_conf()->auth_cluster_required :
-                      g_conf()->auth_supported),
-      auth_service_registry(g_ceph_context,
-                   g_conf()->auth_supported.empty() ?
-                      g_conf()->auth_service_required :
-                      g_conf()->auth_supported),
       lock("DaemonServer"),
       pgmap_ready(false),
       timer(g_ceph_context, lock),
@@ -110,6 +102,8 @@ int DaemonServer::init(uint64_t gid, entity_addrvec_t client_addrs)
 			   "mgr",
 			   getpid(), 0);
   msgr->set_default_policy(Messenger::Policy::stateless_server(0));
+
+  msgr->set_auth_client(monc);
 
   // throttle clients
   msgr->set_policy_throttlers(entity_name_t::TYPE_CLIENT,
@@ -144,6 +138,9 @@ int DaemonServer::init(uint64_t gid, entity_addrvec_t client_addrs)
 
   msgr->start();
   msgr->add_dispatcher_tail(this);
+
+  msgr->set_auth_server(monc);
+  monc->set_handle_authentication_dispatcher(this);
 
   started_at = ceph_clock_now();
 
@@ -217,18 +214,14 @@ int DaemonServer::ms_handle_authentication(Connection *con)
   return ret;
 }
 
-bool DaemonServer::ms_get_authorizer(int dest_type,
-    AuthAuthorizer **authorizer, bool force_new)
+bool DaemonServer::ms_get_authorizer(
+  int dest_type,
+  AuthAuthorizer **authorizer)
 {
   dout(10) << "type=" << ceph_entity_type_name(dest_type) << dendl;
 
   if (dest_type == CEPH_ENTITY_TYPE_MON) {
     return true;
-  }
-
-  if (force_new) {
-    if (monc->wait_auth_rotating(10) < 0)
-      return false;
   }
 
   *authorizer = monc->build_authorizer(dest_type);
@@ -553,7 +546,7 @@ bool DaemonServer::handle_report(MMgrReport *m)
 
     // issue metadata request in background
     if (!daemon_state.is_updating(key) && 
-	(key.first == "osd" || key.first == "mds")) {
+	(key.first == "osd" || key.first == "mds" || key.first == "mon")) {
 
       std::ostringstream oss;
       auto c = new MetadataUpdate(daemon_state, key);
@@ -566,6 +559,9 @@ bool DaemonServer::handle_report(MMgrReport *m)
         oss << "{\"prefix\": \"mds metadata\", \"who\": \""
             << key.second << "\"}";
  
+      } else if (key.first == "mon") {
+        oss << "{\"prefix\": \"mon metadata\", \"id\": \""
+            << key.second << "\"}";
       } else {
 	ceph_abort();
       }
@@ -905,11 +901,7 @@ bool DaemonServer::_handle_command(
       f.reset(Formatter::create("json-pretty"));
     // only include state from services that are in the persisted service map
     f->open_object_section("service_status");
-    ServiceMap s;
-    cluster_state.with_servicemap([&](const ServiceMap& service_map) {
-	s = service_map;
-      });
-    for (auto& p : s.services) {
+    for (auto& p : pending_service_map.services) {
       f->open_object_section(p.first.c_str());
       for (auto& q : p.second.daemons) {
 	f->open_object_section(q.first.c_str());
@@ -1630,12 +1622,16 @@ bool DaemonServer::_handle_command(
     key.first = who.substr(0, dot);
     key.second = who.substr(dot + 1);
     DaemonStatePtr daemon = daemon_state.get(key);
-    std::lock_guard l(daemon->lock);
     string name;
     if (!daemon) {
       ss << "no config state for daemon " << who;
-      r = -ENOENT;
-    } else if (cmd_getval(g_ceph_context, cmdctx->cmdmap, "key", name)) {
+      cmdctx->reply(-ENOENT, ss);
+      return true;
+    }
+
+    std::lock_guard l(daemon->lock);
+
+    if (cmd_getval(g_ceph_context, cmdctx->cmdmap, "key", name)) {
       auto p = daemon->config.find(name);
       if (p != daemon->config.end() &&
 	  !p->second.empty()) {
@@ -2050,9 +2046,11 @@ bool DaemonServer::_handle_command(
 
     if (f) {
       f->close_section();
-      f->flush(cmdctx->odata);
     }
     if (r != -EOPNOTSUPP) {
+      if (f) {
+	f->flush(cmdctx->odata);
+      }
       cmdctx->reply(r, ss);
       return true;
     }
@@ -2084,6 +2082,7 @@ bool DaemonServer::_handle_command(
 
     // Validate that the module is enabled
     PyModuleRef module = py_modules.get_module(handler_name);
+    ceph_assert(module);
     if (!module->is_enabled()) {
       ss << "Module '" << handler_name << "' is not enabled (required by "
             "command '" << prefix << "'): use `ceph mgr module enable "
@@ -2191,6 +2190,7 @@ void DaemonServer::send_report()
 
   auto m = new MMonMgrReport();
   py_modules.get_health_checks(&m->health_checks);
+  py_modules.get_progress_events(&m->progress_events);
 
   cluster_state.with_mutable_pgmap([&](PGMap& pg_map) {
       cluster_state.update_delta_stats();
@@ -2222,6 +2222,9 @@ void DaemonServer::send_report()
 	  jf.dump_object("health_checks", m->health_checks);
 	  jf.flush(*_dout);
 	  *_dout << dendl;
+          if (osdmap.require_osd_release >= CEPH_RELEASE_LUMINOUS) {
+              clog->debug() << "pgmap v" << pg_map.version << ": " << pg_map;
+          }
 	});
     });
 
@@ -2322,25 +2325,6 @@ void DaemonServer::adjust_pgs()
 	    pg_t merge_target = merge_source.get_parent();
 	    bool ok = true;
 
-	    if (osdmap.have_pg_upmaps(merge_target)) {
-	      dout(10) << "pool " << i.first
-		       << " pg_num_target " << p.get_pg_num_target()
-		       << " pg_num " << p.get_pg_num()
-		       << " - merge target " << merge_target
-		       << " has upmap" << dendl;
-	      upmaps_to_clear.insert(merge_target);
-	      ok = false;
-	    } else if (osdmap.have_pg_upmaps(merge_source)) {
-	      dout(10) << "pool " << i.first
-		       << " pg_num_target " << p.get_pg_num_target()
-		       << " pg_num " << p.get_pg_num()
-		       << " - merge source " << merge_source
-		       << " has upmap" << dendl;
-	      upmaps_to_clear.insert(merge_source);
-	      ok = false;
-	    }
-
-	    auto q = pg_map.pg_stat.find(merge_source);
 	    if (p.get_pg_num() != p.get_pg_num_pending()) {
 	      dout(10) << "pool " << i.first
 		       << " pg_num_target " << p.get_pg_num_target()
@@ -2356,58 +2340,41 @@ void DaemonServer::adjust_pgs()
 		       << p.get_pgp_num()
 		       << dendl;
 	      ok = false;
-	    } else if (q == pg_map.pg_stat.end()) {
-	      dout(10) << "pool " << i.first
-		       << " pg_num_target " << p.get_pg_num_target()
-		       << " pg_num " << p.get_pg_num()
-		       << " - no state for " << merge_source
-		       << " (merge source)"
-		       << dendl;
-	      ok = false;
-	    } else if (!(q->second.state & (PG_STATE_ACTIVE |
-					    PG_STATE_CLEAN))) {
-	      dout(10) << "pool " << i.first
-		       << " pg_num_target " << p.get_pg_num_target()
-		       << " pg_num " << p.get_pg_num()
-		       << " - merge source " << merge_source
-		       << " not clean (" << pg_state_string(q->second.state)
-		       << ")" << dendl;
-	      ok = false;
-	    } else if (q->second.state & PG_STATE_REMAPPED) {
-	      dout(10) << "pool " << i.first
-		       << " pg_num_target " << p.get_pg_num_target()
-		       << " pg_num " << p.get_pg_num()
-		       << " - merge source " << merge_source
-		       << " remapped" << dendl;
-	      ok = false;
 	    }
+            for (auto &merge_participant : {merge_source, merge_target}) {
+              bool is_merge_source = merge_participant == merge_source;
+              if (osdmap.have_pg_upmaps(merge_participant)) {
+                dout(10) << "pool " << i.first
+                         << " pg_num_target " << p.get_pg_num_target()
+                         << " pg_num " << p.get_pg_num()
+                         << (is_merge_source ? " - merge source " : " - merge target ")
+                         << merge_participant
+                         << " has upmap" << dendl;
+                upmaps_to_clear.insert(merge_participant);
+                ok = false;
+              }
+              auto q = pg_map.pg_stat.find(merge_participant);
+              if (q == pg_map.pg_stat.end()) {
+	        dout(10) << "pool " << i.first
+		         << " pg_num_target " << p.get_pg_num_target()
+		         << " pg_num " << p.get_pg_num()
+		         << " - no state for " << merge_participant
+		         << (is_merge_source ? " (merge source)" : " (merge target)")
+		         << dendl;
+	        ok = false;
+	      } else if ((q->second.state & (PG_STATE_ACTIVE | PG_STATE_CLEAN)) !=
+                                            (PG_STATE_ACTIVE | PG_STATE_CLEAN)) {
+	        dout(10) << "pool " << i.first
+		         << " pg_num_target " << p.get_pg_num_target()
+		         << " pg_num " << p.get_pg_num()
+		         << (is_merge_source ? " - merge source " : " - merge target ")
+                         << merge_participant
+		         << " not clean (" << pg_state_string(q->second.state)
+		         << ")" << dendl;
+	        ok = false;
+	      }
+            }
 
-	    q = pg_map.pg_stat.find(merge_target);
-	    if (q == pg_map.pg_stat.end()) {
-	      dout(10) << "pool " << i.first
-		       << " pg_num_target " << p.get_pg_num_target()
-		       << " pg_num " << p.get_pg_num()
-		       << " - no state for " << merge_target
-		       << " (merge target)"
-		       << dendl;
-	      ok = false;
-	    } else if (!(q->second.state & (PG_STATE_ACTIVE |
-					    PG_STATE_CLEAN))) {
-	      dout(10) << "pool " << i.first
-		       << " pg_num_target " << p.get_pg_num_target()
-		       << " pg_num " << p.get_pg_num()
-		       << " - merge target " << merge_target
-		       << " not clean (" << pg_state_string(q->second.state)
-		       << ")" << dendl;
-	      ok = false;
-	    } else if (q->second.state & PG_STATE_REMAPPED) {
-	      dout(10) << "pool " << i.first
-		       << " pg_num_target " << p.get_pg_num_target()
-		       << " pg_num " << p.get_pg_num()
-		       << " - merge target " << merge_target
-		       << " remapped" << dendl;
-	      ok = false;
-	    }
 	    if (ok) {
 	      unsigned target = p.get_pg_num() - 1;
 	      dout(10) << "pool " << i.first
@@ -2609,8 +2576,9 @@ void DaemonServer::got_mgr_map()
       auto md_update = [&] (DaemonKey key) {
         std::ostringstream oss;
         auto c = new MetadataUpdate(daemon_state, key);
+	// FIXME remove post-nautilus: include 'id' for luminous mons
         oss << "{\"prefix\": \"mgr metadata\", \"who\": \""
-              << key.second << "\"}";
+	    << key.second << "\", \"id\": \"" << key.second << "\"}";
         monc->start_mon_command({oss.str()}, {}, &c->outbl, &c->outs, c);
       };
       if (mgrmap.active_name.size()) {
@@ -2682,12 +2650,20 @@ void DaemonServer::_send_configure(ConnectionRef c)
 }
 
 OSDPerfMetricQueryID DaemonServer::add_osd_perf_query(
-  const OSDPerfMetricQuery &query)
+    const OSDPerfMetricQuery &query,
+    const std::optional<OSDPerfMetricLimit> &limit)
 {
-  return osd_perf_metric_collector.add_query(query);
+  return osd_perf_metric_collector.add_query(query, limit);
 }
 
 int DaemonServer::remove_osd_perf_query(OSDPerfMetricQueryID query_id)
 {
   return osd_perf_metric_collector.remove_query(query_id);
+}
+
+int DaemonServer::get_osd_perf_counters(
+    OSDPerfMetricQueryID query_id,
+    std::map<OSDPerfMetricKey, PerformanceCounters> *counters)
+{
+  return osd_perf_metric_collector.get_counters(query_id, counters);
 }

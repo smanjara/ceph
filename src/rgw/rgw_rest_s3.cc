@@ -290,12 +290,20 @@ int RGWGetObj_ObjStore_S3::send_response_data(bufferlist& bl, off_t bl_ofs,
       if (aiter != rgw_to_http_attrs.end()) {
         if (response_attrs.count(aiter->second) == 0) {
           /* Was not already overridden by a response param. */
-          response_attrs[aiter->second] = iter->second.c_str();
+
+          size_t len = iter->second.length();
+          string s(iter->second.c_str(), len);
+          while (len && !s[len - 1]) {
+            --len;
+            s.resize(len);
+          }
+          response_attrs[aiter->second] = s;
         }
       } else if (iter->first.compare(RGW_ATTR_CONTENT_TYPE) == 0) {
         /* Special handling for content_type. */
         if (!content_type) {
-          content_type = iter->second.c_str();
+          content_type_str = rgw_bl_str(iter->second);
+          content_type = content_type_str.c_str();
         }
       } else if (strcmp(name, RGW_ATTR_SLO_UINDICATOR) == 0) {
         // this attr has an extra length prefix from encode() in prior versions
@@ -402,7 +410,7 @@ void RGWGetObjTags_ObjStore_S3::send_response_data(bufferlist& bl)
 
 int RGWPutObjTags_ObjStore_S3::get_params()
 {
-  RGWObjTagsXMLParser parser;
+  RGWXMLParser parser;
 
   if (!parser.init()){
     return -EINVAL;
@@ -421,17 +429,17 @@ int RGWPutObjTags_ObjStore_S3::get_params()
     return -ERR_MALFORMED_XML;
   }
 
-  RGWObjTagSet_S3 *obj_tags_s3;
-  RGWObjTagging_S3 *tagging;
+  RGWObjTagging_S3 tagging;
 
-  tagging = static_cast<RGWObjTagging_S3 *>(parser.find_first("Tagging"));
-  obj_tags_s3 = static_cast<RGWObjTagSet_S3 *>(tagging->find_first("TagSet"));
-  if(!obj_tags_s3){
+  try {
+    RGWXMLDecoder::decode_xml("Tagging", tagging, &parser);
+  } catch (RGWXMLDecoder::err& err) {
+    ldout(s->cct, 5) << "Malformed tagging request: " << err << dendl;
     return -ERR_MALFORMED_XML;
   }
 
   RGWObjTags obj_tags;
-  r = obj_tags_s3->rebuild(obj_tags);
+  r = tagging.rebuild(obj_tags);
   if (r < 0)
     return r;
 
@@ -754,7 +762,8 @@ void RGWListBucket_ObjStore_S3::send_versioned_response()
       if (!iter->is_delete_marker()) {
 	s->formatter->dump_format("ETag", "\"%s\"", iter->meta.etag.c_str());
 	s->formatter->dump_int("Size", iter->meta.accounted_size);
-	s->formatter->dump_string("StorageClass", "STANDARD");
+	auto& storage_class = rgw_placement_rule::get_canonical_storage_class(iter->meta.storage_class);
+	s->formatter->dump_string("StorageClass", storage_class.c_str());
       }
       dump_owner(s, iter->meta.owner, iter->meta.owner_display_name);
       s->formatter->close_section();
@@ -831,7 +840,8 @@ void RGWListBucket_ObjStore_S3::send_response()
       dump_time(s, "LastModified", &iter->meta.mtime);
       s->formatter->dump_format("ETag", "\"%s\"", iter->meta.etag.c_str());
       s->formatter->dump_int("Size", iter->meta.accounted_size);
-      s->formatter->dump_string("StorageClass", "STANDARD");
+      auto& storage_class = rgw_placement_rule::get_canonical_storage_class(iter->meta.storage_class);
+      s->formatter->dump_string("StorageClass", storage_class.c_str());
       dump_owner(s, iter->meta.owner, iter->meta.owner_display_name);
       if (s->system_request) {
         s->formatter->dump_string("RgwxTag", iter->tag);
@@ -1241,8 +1251,10 @@ int RGWCreateBucket_ObjStore_S3::get_params()
 
   size_t pos = location_constraint.find(':');
   if (pos != string::npos) {
-    placement_rule = location_constraint.substr(pos + 1);
+    placement_rule.init(location_constraint.substr(pos + 1), s->info.storage_class);
     location_constraint = location_constraint.substr(0, pos);
+  } else {
+    placement_rule.storage_class = s->info.storage_class;
   }
 
   return 0;
@@ -1292,6 +1304,19 @@ void RGWDeleteBucket_ObjStore_S3::send_response()
   }
 }
 
+static inline void map_qs_metadata(struct req_state* s)
+{
+  /* merge S3 valid user metadata from the query-string into
+   * x_meta_map, which maps them to attributes */
+  const auto& params = const_cast<RGWHTTPArgs&>(s->info.args).get_params();
+  for (const auto& elt : params) {
+    std::string k = boost::algorithm::to_lower_copy(elt.first);
+    if (k.find("x-amz-meta-") == /* offset */ 0) {
+      add_amz_meta_header(s->info.x_meta_map, k, elt.second);
+    }
+  }
+}
+
 int RGWPutObj_ObjStore_S3::get_params()
 {
   if (!s->length)
@@ -1300,6 +1325,8 @@ int RGWPutObj_ObjStore_S3::get_params()
   map<string, bufferlist> src_attrs;
   size_t pos;
   int ret;
+
+  map_qs_metadata(s);
 
   RGWAccessControlPolicy_S3 s3policy(s->cct);
   ret = create_s3_policy(s, store, s3policy, s->owner);
@@ -1602,6 +1629,8 @@ int RGWPostObj_ObjStore_S3::get_params()
     return op_ret;
   }
 
+  map_qs_metadata(s);
+
   ldout(s->cct, 20) << "adding bucket to policy env: " << s->bucket.name
 		    << dendl;
   env.add_var("bucket", s->bucket.name);
@@ -1737,7 +1766,7 @@ int RGWPostObj_ObjStore_S3::get_tags()
 {
   string tags_str;
   if (part_str(parts, "tagging", &tags_str)) {
-    RGWObjTagsXMLParser parser;
+    RGWXMLParser parser;
     if (!parser.init()){
       ldout(s->cct, 0) << "Couldn't init RGWObjTags XML parser" << dendl;
       err_msg = "Server couldn't process the request";
@@ -1749,17 +1778,17 @@ int RGWPostObj_ObjStore_S3::get_tags()
       return -EINVAL;
     }
 
-    RGWObjTagSet_S3 *obj_tags_s3;
-    RGWObjTagging_S3 *tagging;
+    RGWObjTagging_S3 tagging;
 
-    tagging = static_cast<RGWObjTagging_S3 *>(parser.find_first("Tagging"));
-    obj_tags_s3 = static_cast<RGWObjTagSet_S3 *>(tagging->find_first("TagSet"));
-    if(!obj_tags_s3){
-      return -ERR_MALFORMED_XML;
+    try {
+      RGWXMLDecoder::decode_xml("Tagging", tagging, &parser);
+    } catch (RGWXMLDecoder::err& err) {
+      ldout(s->cct, 5) << "Malformed tagging request: " << err << dendl;
+      return -EINVAL;
     }
 
     RGWObjTags obj_tags;
-    int r = obj_tags_s3->rebuild(obj_tags);
+    int r = tagging.rebuild(obj_tags);
     if (r < 0)
       return r;
 
@@ -2178,10 +2207,19 @@ int RGWCopyObj_ObjStore_S3::get_params()
       (dest_object.compare(src_object.name) == 0) &&
       src_object.instance.empty() &&
       (attrs_mod != RGWRados::ATTRSMOD_REPLACE)) {
+    need_to_check_storage_class = true;
+  }
+
+  return 0;
+}
+
+int RGWCopyObj_ObjStore_S3::check_storage_class(const rgw_placement_rule& src_placement)
+{
+  if (src_placement == s->dest_placement) {
     /* can only copy object into itself if replacing attrs */
     s->err.message = "This copy request is illegal because it is trying to copy "
-                     "an object to itself without changing the object's metadata, "
-                     "storage class, website redirect location or encryption attributes.";
+      "an object to itself without changing the object's metadata, "
+      "storage class, website redirect location or encryption attributes.";
     ldout(s->cct, 0) << s->err.message << dendl;
     return -ERR_INVALID_REQUEST;
   }
@@ -2316,7 +2354,7 @@ void RGWGetLC_ObjStore_S3::send_response()
   if (op_ret < 0)
     return;
 
-  config.dump_xml(s->formatter);
+  encode_xml("LifecycleConfiguration", XMLNS_AWS_S3, config, s->formatter);
   rgw_flush_formatter_and_reset(s, s->formatter);
 }
 
@@ -2509,7 +2547,7 @@ public:
     if (!field)
       return 0;
 
-    string& s = field->get_data();
+    auto& s = field->get_data();
 
     if (stringcasecmp(s, "Requester") == 0) {
       *requester_pays = true;
@@ -2603,6 +2641,8 @@ int RGWCompleteMultipart_ObjStore_S3::get_params()
   if (ret < 0) {
     return ret;
   }
+
+  map_qs_metadata(s);
 
   return do_aws4_auth_completion();
 }
@@ -2866,10 +2906,16 @@ void RGWGetObjLayout_ObjStore_S3::send_response()
   for (auto miter = manifest->obj_begin(); miter != manifest->obj_end(); ++miter) {
     f.open_object_section("obj");
     rgw_raw_obj raw_loc = miter.get_location().get_raw_obj(store);
+    uint64_t ofs = miter.get_ofs();
+    uint64_t left = manifest->get_obj_size() - ofs;
     ::encode_json("ofs", miter.get_ofs(), &f);
     ::encode_json("loc", raw_loc, &f);
     ::encode_json("loc_ofs", miter.location_ofs(), &f);
-    ::encode_json("loc_size", miter.get_stripe_size(), &f);
+    uint64_t loc_size = miter.get_stripe_size();
+    if (loc_size > left) {
+      loc_size = left;
+    }
+    ::encode_json("loc_size", loc_size, &f);
     f.close_section();
     rgw_flush_formatter(s, &f);
   }
@@ -3168,9 +3214,6 @@ RGWOp *RGWHandler_REST_Bucket_S3::op_options()
 
 RGWOp *RGWHandler_REST_Obj_S3::get_obj_op(bool get_data)
 {
-  if (is_acl_op()) {
-    return new RGWGetACLs_ObjStore_S3;
-  }
   RGWGetObj_ObjStore_S3 *get_obj_op = new RGWGetObj_ObjStore_S3;
   get_obj_op->set_get_data(get_data);
   return get_obj_op;
@@ -3419,7 +3462,20 @@ int RGWHandler_REST_S3::init(RGWRados *store, struct req_state *s,
     }
   }
 
+  const char *sc = s->info.env->get("HTTP_X_AMZ_STORAGE_CLASS");
+  if (sc) {
+    s->info.storage_class = sc;
+  }
+
   return RGWHandler_REST::init(store, s, cio);
+}
+
+int RGWHandler_REST_S3::authorize(const DoutPrefixProvider *dpp)
+{
+  if (s->info.args.exists("Action") && s->info.args.get("Action") == "AssumeRoleWithWebIdentity") {
+    return RGW_Auth_STS::authorize(dpp, store, auth_registry, s);
+  }
+  return RGW_Auth_S3::authorize(dpp, store, auth_registry, s);
 }
 
 enum class AwsVersion {
@@ -3851,14 +3907,14 @@ AWSGeneralAbstractor::get_auth_data_v4(const req_state* const s,
   boost::string_view client_signature;
   boost::string_view session_token;
 
-  int ret = rgw::auth::s3::parse_credentials(s->info,
-                                             access_key_id,
-                                             credential_scope,
-                                             signed_hdrs,
-                                             client_signature,
-                                             date,
-                                             session_token,
-                                             using_qs);
+  int ret = rgw::auth::s3::parse_v4_credentials(s->info,
+						access_key_id,
+						credential_scope,
+						signed_hdrs,
+						client_signature,
+						date,
+						session_token,
+						using_qs);
   if (ret < 0) {
     throw ret;
   }
@@ -3867,14 +3923,30 @@ AWSGeneralAbstractor::get_auth_data_v4(const req_state* const s,
   boost::optional<std::string> canonical_headers = \
     get_v4_canonical_headers(s->info, signed_hdrs, using_qs);
   if (canonical_headers) {
-    ldout(s->cct, 10) << "canonical headers format = " << *canonical_headers
-                      << dendl;
+    using sanitize = rgw::crypt_sanitize::log_content;
+    ldout(s->cct, 10) << "canonical headers format = "
+                      << sanitize{*canonical_headers} << dendl;
   } else {
     throw -EPERM;
   }
 
-  /* Get the expected hash. */
-  auto exp_payload_hash = rgw::auth::s3::get_v4_exp_payload_hash(s->info);
+  bool is_non_s3_op = false;
+  if (s->op_type == RGW_STS_GET_SESSION_TOKEN ||
+      s->op_type == RGW_STS_ASSUME_ROLE ||
+      s->op_type == RGW_STS_ASSUME_ROLE_WEB_IDENTITY) {
+    is_non_s3_op = true;
+  }
+
+  const char* exp_payload_hash = nullptr;
+  string payload_hash;
+  if (is_non_s3_op) {
+    //For non s3 ops, we need to calculate the payload hash
+    payload_hash = s->info.args.get("PayloadHash");
+    exp_payload_hash = payload_hash.c_str();
+  } else {
+    /* Get the expected hash. */
+    exp_payload_hash = rgw::auth::s3::get_v4_exp_payload_hash(s->info);
+  }
 
   /* Craft canonical URI. Using std::move later so let it be non-const. */
   auto canonical_uri = rgw::auth::s3::get_v4_canonical_uri(s->info);
@@ -3917,7 +3989,7 @@ AWSGeneralAbstractor::get_auth_data_v4(const req_state* const s,
    * This means we have absolutely no business in spawning completer. Both
    * aws4_auth_needs_complete and aws4_auth_streaming_mode are set to false
    * by default. We don't need to change that. */
-  if (is_v4_payload_unsigned(exp_payload_hash) || is_v4_payload_empty(s)) {
+  if (is_v4_payload_unsigned(exp_payload_hash) || is_v4_payload_empty(s) || is_non_s3_op) {
     return {
       access_key_id,
       client_signature,
@@ -3953,8 +4025,6 @@ AWSGeneralAbstractor::get_auth_data_v4(const req_state* const s,
         case RGW_OP_PUT_OBJ_TAGGING:
         case RGW_OP_PUT_LC:
         case RGW_OP_SET_REQUEST_PAYMENT:
-        case RGW_STS_GET_SESSION_TOKEN:
-        case RGW_STS_ASSUME_ROLE:
           break;
         default:
           dout(10) << "ERROR: AWS4 completion for this operation NOT IMPLEMENTED" << dendl;
@@ -4198,6 +4268,11 @@ std::mutex rgw::auth::s3::LDAPEngine::mtx;
 
 void rgw::auth::s3::LDAPEngine::init(CephContext* const cct)
 {
+  if (! cct->_conf->rgw_s3_auth_use_ldap ||
+      ! cct->_conf->rgw_ldap_uri.empty()) {
+    return;
+  }
+
   if (! ldh) {
     std::lock_guard<std::mutex> lck(mtx);
     if (! ldh) {
@@ -4215,6 +4290,11 @@ void rgw::auth::s3::LDAPEngine::init(CephContext* const cct)
       ldh->bind();
     }
   }
+}
+
+bool rgw::auth::s3::LDAPEngine::valid() {
+  std::lock_guard<std::mutex> lck(mtx);
+  return (!!ldh);
 }
 
 rgw::auth::RemoteApplier::acl_strategy_t
@@ -4345,7 +4425,7 @@ rgw::auth::s3::LocalEngine::authenticate(
     return result_t::deny(-ERR_SIGNATURE_NO_MATCH);
   }
 
-  auto apl = apl_factory->create_apl_local(cct, s, user_info, k.subuser, boost::none, boost::none);
+  auto apl = apl_factory->create_apl_local(cct, s, user_info, k.subuser, boost::none);
   return result_t::grant(std::move(apl), completer_factory(k.key));
 }
 
@@ -4465,7 +4545,9 @@ rgw::auth::s3::STSEngine::authenticate(
 
   // Get all the authorization info
   RGWUserInfo user_info;
+  rgw_user user_id;
   vector<string> role_policies;
+  string role_name;
   if (! token.roleId.empty()) {
     RGWRole role(s->cct, store, token.roleId);
     if (role.get_by_id() < 0) {
@@ -4478,9 +4560,15 @@ rgw::auth::s3::STSEngine::authenticate(
         role_policies.push_back(std::move(perm_policy));
       }
     }
-    role_policies.push_back(std::move(token.policy));
+    if (! token.policy.empty()) {
+      role_policies.push_back(std::move(token.policy));
+    }
+    // This is mostly needed to assign the owner of a bucket during its creation
+    user_id = token.user;
+    role_name = role.get_name();
   }
-  if (! token.user.empty()) {
+
+  if (! token.user.empty() && token.acct_type != TYPE_ROLE) {
     // get user info
     int ret = rgw_get_user_info_by_uid(store, token.user, user_info, NULL);
     if (ret < 0) {
@@ -4493,9 +4581,12 @@ rgw::auth::s3::STSEngine::authenticate(
     auto apl = remote_apl_factory->create_apl_remote(cct, s, get_acl_strategy(),
                                             get_creds_info(token));
     return result_t::grant(std::move(apl), completer_factory(boost::none));
-  } else {
+  } else if (token.acct_type == TYPE_ROLE) {
+    auto apl = role_apl_factory->create_apl_role(cct, s, role_name, user_id, role_policies);
+    return result_t::grant(std::move(apl), completer_factory(token.secret_access_key));
+  } else { // This is for all local users of type TYPE_RGW or TYPE_NONE
     string subuser;
-    auto apl = local_apl_factory->create_apl_local(cct, s, user_info, subuser, role_policies, token.perm_mask);
+    auto apl = local_apl_factory->create_apl_local(cct, s, user_info, subuser, token.perm_mask);
     return result_t::grant(std::move(apl), completer_factory(token.secret_access_key));
   }
 }
