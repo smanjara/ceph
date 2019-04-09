@@ -35,6 +35,7 @@ extern "C" {
 #include "rgw_user.h"
 #include "rgw_bucket.h"
 #include "rgw_otp.h"
+#include "rgw_op.h"
 #include "rgw_rados.h"
 #include "rgw_acl.h"
 #include "rgw_acl_s3.h"
@@ -102,6 +103,7 @@ void usage()
   cout << "  bucket stats               returns bucket statistics\n";
   cout << "  bucket rm                  remove bucket\n";
   cout << "  bucket check               check bucket index\n";
+  cout << "  bucket chown               update object owner ACL after bucket link\n";
   cout << "  bucket reshard             reshard bucket\n";
   cout << "  bucket rewrite             rewrite all objects in the specified bucket\n";
   cout << "  bucket sync disable        disable bucket sync\n";
@@ -407,6 +409,7 @@ enum {
   OPT_BUCKET_RM,
   OPT_BUCKET_REWRITE,
   OPT_BUCKET_RESHARD,
+  OPT_BUCKET_CHOWN,
   OPT_POLICY,
   OPT_POOL_ADD,
   OPT_POOL_RM,
@@ -667,6 +670,8 @@ static int get_cmd(const char *cmd, const char *prev_cmd, const char *prev_prev_
       return OPT_BUCKET_STATS;
     if (strcmp(cmd, "rm") == 0)
       return OPT_BUCKET_RM;
+    if (strcmp(cmd, "chown") == 0)
+      return OPT_BUCKET_CHOWN;
     if (strcmp(cmd, "rewrite") == 0)
       return OPT_BUCKET_REWRITE;
     if (strcmp(cmd, "reshard") == 0)
@@ -5496,6 +5501,122 @@ int main(int argc, const char **argv)
       return -r;
     }
   }
+
+  if (opt_cmd == OPT_BUCKET_CHOWN) {
+    int ret = 0;
+    std::string tenant;
+    std::vector<rgw_bucket_dir_entry> objs;
+    map<string, bool> common_prefixes;
+    RGWObjectCtx obj_ctx(store);
+
+    //Get bucket info
+    RGWBucketInfo bucket_info;
+    RGWSysObjectCtx sys_ctx = store->svc.sysobj->init_obj_ctx();
+    map<string, bufferlist> attrs;
+
+    //split tenant/bucket
+    auto pos = bucket_name.find('/');
+    if (pos != boost::string_ref::npos) {
+      tenant = bucket_name.substr(0, pos);
+      bucket_name = bucket_name.substr(pos + 1);
+    }
+
+    ret = store->get_bucket_info(sys_ctx, tenant, bucket_name, bucket_info, NULL, &attrs);
+    if (ret < 0) {
+      cerr << " Bucket info failed: tenant: "<< tenant << "bucket_name: " << bucket_name << " " << ret << std::endl;
+      return ret;
+    }
+
+    //Get User info - for display name
+    RGWUserInfo user_info;
+    ret = rgw_get_user_info_by_uid(store, bucket_info.owner, user_info);
+    if (ret < 0) {
+      cerr << " User info failed: "<< ret << std::endl;
+      return ret;
+    }
+
+    RGWRados::Bucket target(store, bucket_info);
+    RGWRados::Bucket::List list_op(&target);
+    int max = 1000;
+
+    list_op.params.list_versions = true;
+    list_op.params.allow_unordered = true;
+
+    bool is_truncated = false;
+
+    do {
+      objs.clear();
+      ret = list_op.list_objects(max, &objs, &common_prefixes, &is_truncated);
+      if (ret < 0) {
+        cerr << " List objects failed: "<< ret << std::endl;
+        return ret;
+      }
+
+      //Loop through the results
+      for (const auto& obj : objs) {
+
+        const rgw_obj r_obj(bucket_info.bucket, obj.key);
+        ret = get_obj_attrs(store, obj_ctx, bucket_info, r_obj, attrs);
+        if (ret < 0){
+          cerr << "Get object attrs failed" << ret << std::endl;
+          return (ret);
+        }
+        const auto& aiter = attrs.find(RGW_ATTR_ACL);
+        if (aiter == attrs.end()){
+          cerr << "No acls found for object. Continuing with the next object" << std::endl;
+          continue;
+        } else {
+          bufferlist& bl = aiter->second;
+          RGWAccessControlPolicy policy(g_ceph_context);
+          //RGWAccessControlPolicy_S3 new_policy(g_ceph_context);
+          //RGWAccessControlPolicy_S3 old_policy(g_ceph_context);
+          
+          ACLOwner owner;
+          try {
+            decode(policy, bl);
+            owner = policy.get_owner();
+          } catch (buffer::error& err) {
+            cerr << " Decode policy failed: " << std::endl;
+            return -EIO;
+          }
+
+          //Get the ACL from the policy
+          RGWAccessControlList& acl = policy.get_acl();
+
+          //Remove grant that is set to old owner
+          acl.remove_canon_user_grant(owner.get_id());
+
+          //Create a grant and add grant
+          ACLGrant grant;
+          grant.set_canon(bucket_info.owner, user_info.display_name, RGW_PERM_FULL_CONTROL);
+          acl.add_grant(&grant);
+          
+          //Add the ACL back to policy
+          policy.set_acl(acl);
+
+          //Update the ACL owner to the new user
+          owner.set_id(bucket_info.owner);
+          owner.set_name(user_info.display_name);
+          policy.set_owner(owner);
+
+          //old_policy = static_cast<RGWAccessControlPolicy_S3>(policy);
+
+          //ret = policy.rebuild(store, &owner, new_policy);
+          //if (ret < 0)
+          //    return ret;
+
+          bl.clear();
+          encode(policy, bl);
+
+          ret = modify_obj_attr(store, obj_ctx, bucket_info, r_obj, RGW_ATTR_ACL, bl);
+          if (ret < 0) {
+            cerr << " Modify attr failed: "<< ret << std::endl;
+            return ret;
+          }
+        }
+      }// for loop
+    } while(is_truncated);
+  } // if
 
   if (opt_cmd == OPT_LOG_LIST) {
     // filter by date?

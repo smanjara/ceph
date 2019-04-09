@@ -319,6 +319,17 @@ vector<Policy> get_iam_user_policy_from_attr(CephContext* cct,
   return policies;
 }
 
+int get_obj_attrs(RGWRados *store, RGWObjectCtx& obj_ctx, RGWBucketInfo& bucket_info, const rgw_obj& obj, map<string, bufferlist>& attrs)
+{
+  RGWRados::Object op_target(store, bucket_info, obj_ctx, obj);
+  RGWRados::Object::Read read_op(&op_target);
+
+  read_op.params.attrs = &attrs;
+
+  return read_op.prepare();
+}
+
+#if 0
 static int get_obj_attrs(RGWRados *store, struct req_state *s, const rgw_obj& obj, map<string, bufferlist>& attrs)
 {
   RGWRados::Object op_target(store, s->bucket_info, *static_cast<RGWObjectCtx *>(s->obj_ctx), obj);
@@ -328,6 +339,7 @@ static int get_obj_attrs(RGWRados *store, struct req_state *s, const rgw_obj& ob
 
   return read_op.prepare();
 }
+#endif
 
 static int get_obj_head(RGWRados *store, struct req_state *s,
                         const rgw_obj& obj,
@@ -438,6 +450,24 @@ static int get_multipart_info(RGWRados *store, struct req_state *s,
   return get_multipart_info(store, s, meta_obj, policy, attrs, upload_info);
 }
 
+int modify_obj_attr(RGWRados *store, RGWObjectCtx& obj_ctx, RGWBucketInfo& bucket_info, const rgw_obj& obj, const char* attr_name, bufferlist& attr_val)
+{
+  map<string, bufferlist> attrs;
+  RGWRados::Object op_target(store, bucket_info, obj_ctx, obj);
+  RGWRados::Object::Read read_op(&op_target);
+
+  read_op.params.attrs = &attrs;
+  
+  int r = read_op.prepare();
+  if (r < 0) {
+    return r;
+  }
+  store->set_atomic(&obj_ctx, read_op.state.obj);
+  attrs[attr_name] = attr_val;
+  return store->set_attrs(&obj_ctx, bucket_info, read_op.state.obj, attrs, NULL);
+}
+
+#if 0
 static int modify_obj_attr(RGWRados *store, struct req_state *s, const rgw_obj& obj, const char* attr_name, bufferlist& attr_val)
 {
   map<string, bufferlist> attrs;
@@ -454,6 +484,7 @@ static int modify_obj_attr(RGWRados *store, struct req_state *s, const rgw_obj& 
   attrs[attr_name] = attr_val;
   return store->set_attrs(s->obj_ctx, s->bucket_info, read_op.state.obj, attrs, NULL);
 }
+#endif
 
 static int read_bucket_policy(RGWRados *store,
                               struct req_state *s,
@@ -805,7 +836,7 @@ static int rgw_iam_add_tags_from_bl(struct req_state* s, bufferlist& bl){
 static int rgw_iam_add_existing_objtags(RGWRados* store, struct req_state* s, rgw_obj& obj, std::uint64_t action){
   map <string, bufferlist> attrs;
   store->set_atomic(s->obj_ctx, obj);
-  int op_ret = get_obj_attrs(store, s, obj, attrs);
+  int op_ret = get_obj_attrs(store, *(s->obj_ctx), s->bucket_info, obj, attrs);
   if (op_ret < 0)
     return op_ret;
   auto tags = attrs.find(RGW_ATTR_TAGS);
@@ -1032,7 +1063,7 @@ void RGWGetObjTags::execute()
 
   store->set_atomic(s->obj_ctx, obj);
 
-  op_ret = get_obj_attrs(store, s, obj, attrs);
+  op_ret = get_obj_attrs(store, *(s->obj_ctx), s->bucket_info, obj, attrs);
   if (op_ret < 0) {
     ldpp_dout(this, 0) << "ERROR: failed to get obj attrs, obj=" << obj
         << " ret=" << op_ret << dendl;
@@ -1084,7 +1115,7 @@ void RGWPutObjTags::execute()
   rgw_obj obj;
   obj = rgw_obj(s->bucket, s->object);
   store->set_atomic(s->obj_ctx, obj);
-  op_ret = modify_obj_attr(store, s, obj, RGW_ATTR_TAGS, tags_bl);
+  op_ret = modify_obj_attr(store, *(s->obj_ctx), s->bucket_info, obj, RGW_ATTR_TAGS, tags_bl);
   if (op_ret == -ECANCELED){
     op_ret = -ERR_TAG_CONFLICT;
   }
@@ -4370,7 +4401,7 @@ void RGWPutMetadataObject::execute()
   }
 
   /* check if obj exists, read orig attrs */
-  op_ret = get_obj_attrs(store, s, obj, orig_attrs);
+  op_ret = get_obj_attrs(store, *(s->obj_ctx), s->bucket_info, obj, orig_attrs);
   if (op_ret < 0) {
     return;
   }
@@ -4514,7 +4545,7 @@ void RGWDeleteObj::execute()
   if (!s->object.empty()) {
     if (need_object_expiration() || multipart_delete) {
       /* check if obj exists, read orig attrs */
-      op_ret = get_obj_attrs(store, s, obj, attrs);
+      op_ret = get_obj_attrs(store, *(s->obj_ctx), s->bucket_info, obj, attrs);
       if (op_ret < 0) {
         return;
       }
@@ -5126,7 +5157,7 @@ void RGWPutACLs::execute()
     obj = rgw_obj(s->bucket, s->object);
     store->set_atomic(s->obj_ctx, obj);
     //if instance is empty, we should modify the latest object
-    op_ret = modify_obj_attr(store, s, obj, RGW_ATTR_ACL, bl);
+    op_ret = modify_obj_attr(store, *(s->obj_ctx), s->bucket_info, obj, RGW_ATTR_ACL, bl);
   } else {
     attrs = s->bucket_attrs;
     attrs[RGW_ATTR_ACL] = bl;
@@ -5653,7 +5684,7 @@ void RGWCompleteMultipart::execute()
     return;
   }
 
-  op_ret = get_obj_attrs(store, s, meta_obj, attrs);
+  op_ret = get_obj_attrs(store, *(s->obj_ctx), s->bucket_info, meta_obj, attrs);
 
   if (op_ret < 0) {
     ldpp_dout(this, 0) << "ERROR: failed to get obj attrs, obj=" << meta_obj
