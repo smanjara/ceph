@@ -102,7 +102,7 @@ void usage()
   cout << "  bucket stats               returns bucket statistics\n";
   cout << "  bucket rm                  remove bucket\n";
   cout << "  bucket check               check bucket index\n";
-  cout << "  bucket chown               update object owner ACL after bucket link\n";
+  cout << "  bucket chown               change the owner to --uid for all object ACLs\n";
   cout << "  bucket reshard             reshard bucket\n";
   cout << "  bucket rewrite             rewrite all objects in the specified bucket\n";
   cout << "  bucket sync disable        disable bucket sync\n";
@@ -5514,85 +5514,35 @@ int main(int argc, const char **argv)
     }
   }
 
+
   if (opt_cmd == OPT_BUCKET_CHOWN) {
-    int ret = 0;
-    std::string tenant;
-    std::vector<rgw_bucket_dir_entry> objs;
-    map<string, bool> common_prefixes;
-    RGWObjectCtx obj_ctx(store);
 
-    //Get bucket info
-    RGWBucketInfo bucket_info;
-    RGWSysObjectCtx sys_ctx = store->svc.sysobj->init_obj_ctx();
-    map<string, bufferlist> attrs;
-    
-    //split tenant/bucket
-    auto pos = bucket_name.find('/');
-    if (pos != boost::string_ref::npos) {
-      tenant = bucket_name.substr(0, pos);
-      bucket_name = bucket_name.substr(pos + 1);
+    if (bucket_name.empty()) {
+      cerr << "ERROR: bucket name was not provided (via --bucket)" << std::endl;
+      return EINVAL;
     }
-    
-    ret = store->get_bucket_info(sys_ctx, tenant, bucket_name, bucket_info, NULL, &attrs);
+
+    if (user_id.empty()) {
+      cerr << "ERROR: user id was not provided (via --uid)" << std::endl;
+      return EINVAL;
+    }
+
+    if (! max_entries_specified) {
+      max_entries = 1000;
+    }
+
+    bucket_op.set_bucket_name(bucket_name);
+    bucket_op.set_new_bucket_name(new_bucket_name);
+    string err;
+
+    RGWBucket bucket;
+    ret = bucket.chown(store, bucket_op, marker, max_entries, &err);
     if (ret < 0) {
-      cerr << " Bucket info failed: tenant: "<< tenant << "bucket_name: " << bucket_name << " " << ret << std::endl; 
+      cerr << "Failed to modify bucket and object acl owner with error " << cpp_strerror(-ret) << err << std::endl;
       return ret;
     }
+  }
 
-    //Get User info - for display name
-    RGWUserInfo user_info;
-    ret = rgw_get_user_info_by_uid(store, bucket_info.owner, user_info);
-    if (ret < 0) {
-      cerr << " User info failed: "<< ret << std::endl;
-      return ret;
-    }
-
-    RGWRados::Bucket target(store, bucket_info);
-    RGWRados::Bucket::List list_op(&target);
-    int max = 1000;
-
-    list_op.params.list_versions = true;
-    list_op.params.allow_unordered = true;
-
-    bool is_truncated = false;
-
-    do {
-      objs.clear();
-      ret = list_op.list_objects(max, &objs, &common_prefixes, &is_truncated);
-      if (ret < 0) {
-        cerr << " List objects failed: "<< ret << std::endl;
-        return ret;
-      }
-      //Loop through the results
-      for (const auto& obj : objs) {
-        const auto& aiter = attrs.find(RGW_ATTR_ACL);
-        bufferlist& bl = aiter->second;
-        RGWAccessControlPolicy policy;
-        ACLOwner owner;
-        try {
-          decode(policy, bl);
-          owner = policy.get_owner();
-        } catch (buffer::error& err) {
-          cerr << " Decode policy failed: " << std::endl;
-          return -EIO;
-        }
-
-        owner.set_id(bucket_info.owner);
-        owner.set_name(user_info.display_name);
-        policy.set_owner(owner);
-
-        bl.clear();
-        encode(policy, bl);
-
-        const rgw_obj r_obj(bucket_info.bucket, obj.key);
-        ret = modify_obj_attr(store, obj_ctx, bucket_info, r_obj, RGW_ATTR_ACL, bl);
-        if (ret < 0) {
-          cerr << " Modify attr failed: "<< ret << std::endl;
-          return ret;
-        }
-      }// for loop
-    } while(is_truncated);
-  } // if
 
   if (opt_cmd == OPT_LOG_LIST) {
     // filter by date?
