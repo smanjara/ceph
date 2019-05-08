@@ -81,7 +81,8 @@ class StreamIO : public rgw::asio::ClientIO {
 using SharedMutex = ceph::async::SharedMutex<boost::asio::io_context::executor_type>;
 
 template <typename Stream>
-void handle_connection(RGWProcessEnv& env, Stream& stream,
+void handle_connection(boost::asio::io_context& context,
+                       RGWProcessEnv& env, Stream& stream,
                        boost::beast::flat_buffer& buffer, bool is_ssl,
                        SharedMutex& pause_mutex,
                        rgw::dmclock::Scheduler *scheduler,
@@ -152,7 +153,7 @@ void handle_connection(RGWProcessEnv& env, Stream& stream,
                                   rgw::io::add_conlen_controlling(
                                     &real_client))));
       RGWRestfulIO client(cct, &real_client_io);
-      auto y = optional_yield{socket.get_io_context(), yield};
+      auto y = optional_yield{context, yield};
       process_request(env.store, env.rest, &req, env.uri_prefix,
                       *env.auth_registry, &client, env.olog, y, scheduler);
     }
@@ -238,6 +239,7 @@ class AsioFrontend {
     tcp::acceptor acceptor;
     tcp::socket socket;
     bool use_ssl = false;
+    bool use_nodelay = false;
 
     explicit Listener(boost::asio::io_context& context)
       : acceptor(context), socket(context) {}
@@ -301,7 +303,7 @@ unsigned short parse_port(const char *input, boost::system::error_code& ec)
   }
   return port;
 }
-
+	
 tcp::endpoint parse_endpoint(boost::asio::string_view input,
                              unsigned short default_port,
                              boost::system::error_code& ec)
@@ -329,6 +331,8 @@ tcp::endpoint parse_endpoint(boost::asio::string_view input,
         auto port_str = input.substr(addr_end + 2);
         endpoint.port(parse_port(port_str.data(), ec));
       }
+    } else {
+      endpoint.port(default_port);
     }
     auto addr = input.substr(addr_begin, addr_end - addr_begin);
     endpoint.address(boost::asio::ip::make_address_v6(addr, ec));
@@ -340,6 +344,8 @@ tcp::endpoint parse_endpoint(boost::asio::string_view input,
       if (ec) {
         return endpoint;
       }
+    } else {
+      endpoint.port(default_port);
     }
     auto addr = input.substr(0, colon);
     endpoint.address(boost::asio::ip::make_address_v4(addr, ec));
@@ -404,7 +410,14 @@ int AsioFrontend::init()
     listeners.emplace_back(context);
     listeners.back().endpoint = endpoint;
   }
-
+  // parse tcp nodelay
+  auto nodelay = config.find("tcp_nodelay");
+  if (nodelay != config.end()) {
+    for (auto& l : listeners) {
+      l.use_nodelay = (nodelay->second == "1");
+    }
+  }
+  
   // start listeners
   for (auto& l : listeners) {
     l.acceptor.open(l.endpoint.protocol(), ec);
@@ -522,6 +535,8 @@ void AsioFrontend::accept(Listener& l, boost::system::error_code ec)
     throw ec;
   }
   auto socket = std::move(l.socket);
+  tcp::no_delay options(l.use_nodelay);
+  socket.set_option(options,ec);
   l.acceptor.async_accept(l.socket,
                           [this, &l] (boost::system::error_code ec) {
                             accept(l, ec);
@@ -546,7 +561,7 @@ void AsioFrontend::accept(Listener& l, boost::system::error_code ec)
           return;
         }
         buffer.consume(bytes);
-        handle_connection(env, stream, buffer, true, pause_mutex,
+        handle_connection(context, env, stream, buffer, true, pause_mutex,
                           scheduler.get(), ec, yield);
         if (!ec) {
           // ssl shutdown (ignoring errors)
@@ -564,7 +579,7 @@ void AsioFrontend::accept(Listener& l, boost::system::error_code ec)
         auto c = connections.add(conn);
         boost::beast::flat_buffer buffer;
         boost::system::error_code ec;
-        handle_connection(env, s, buffer, false, pause_mutex,
+        handle_connection(context, env, s, buffer, false, pause_mutex,
                           scheduler.get(), ec, yield);
         s.shutdown(tcp::socket::shutdown_both, ec);
       });

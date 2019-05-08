@@ -10,6 +10,7 @@
 
 #include <errno.h>
 #include <map>
+#include <sstream>
 
 #include "include/types.h"
 #include "include/utime.h"
@@ -198,7 +199,14 @@ static int lock_obj(cls_method_context_t hctx,
 
   if (!lockers.empty()) {
     if (exclusive) {
-      CLS_LOG(20, "could not exclusive-lock object, already locked");
+      auto locker_lister =
+	[&lockers]() -> std::string {
+	  std::stringstream locker_list;
+	  locker_list << lockers;
+	  return locker_list.str();
+	};
+      CLS_LOG(20, "could not exclusive-lock object, already locked by %s",
+	      locker_lister().c_str());
       return -EBUSY;
     }
 

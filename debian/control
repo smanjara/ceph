@@ -7,9 +7,7 @@ Vcs-Browser: https://github.com/ceph/ceph
 Maintainer: Ceph Maintainers <ceph-maintainers@lists.ceph.com>
 Uploaders: Ken Dreyer <kdreyer@redhat.com>,
            Alfredo Deza <adeza@redhat.com>,
-Build-Depends: bc,
-               btrfs-tools,
-               cmake (>= 3.5),
+Build-Depends: cmake (>= 3.5),
                cpio,
                cryptsetup-bin | cryptsetup,
                cython,
@@ -22,7 +20,7 @@ Build-Depends: bc,
                git,
                gperf,
                javahelper,
-               jq,
+# Make-Check   jq,
                junit4,
                libaio-dev,
                libbabeltrace-ctf-dev,
@@ -48,33 +46,36 @@ Build-Depends: bc,
                libtool,
                libudev-dev,
                libxml2-dev,
+               librabbitmq-dev,
                lsb-release,
                parted,
                pkg-config,
                python (>= 2.7),
                python-all-dev,
                python-cherrypy3,
-               python-jwt,
-               python-nose,
-               python-pecan,
-               python-bcrypt,
-               python-six,
-               python-tox,
-               python-coverage,
-               python-prettytable,
+# Make-Check   python-jwt,
+# Make-Check   python-nose,
+# Make-Check   python-pecan,
+# Make-Check   python-bcrypt,
+# Make-Check   python-six,
+# Make-Check   python-tox,
+# Make-Check   python-coverage,
+# Make-Check   python-openssl,
+# Make-Check   python-prettytable,
+# Make-Check   python-requests,
                python-setuptools,
                python-sphinx,
-               python-werkzeug,
+# Make-Check   python-werkzeug,
                python3-all-dev,
                python3-setuptools,
-               socat,
+# Make-Check   socat,
                uuid-dev,
                uuid-runtime,
                valgrind,
                virtualenv | python-virtualenv,
                xfslibs-dev,
-               xfsprogs,
-               xmlstarlet,
+# Make-Check   xfsprogs,
+# Make-Check   xmlstarlet,
                yasm [amd64],
                zlib1g-dev,
 Standards-Version: 3.9.3
@@ -108,7 +109,7 @@ Depends: binutils,
          ${shlibs:Depends},
 Recommends: btrfs-tools,
             ceph-mds (= ${binary:Version}),
-            librados3 (= ${binary:Version}),
+            librados2 (= ${binary:Version}),
             libradosstriper1 (= ${binary:Version}),
             librbd1 (= ${binary:Version}),
             ntp | time-daemon,
@@ -190,7 +191,8 @@ Depends: ceph-base (= ${binary:Version}),
 Recommends: ceph-mgr-dashboard,
             ceph-mgr-diskprediction-local,
             ceph-mgr-diskprediction-cloud,
-            ceph-mgr-rook
+            ceph-mgr-rook,
+            ceph-mgr-ssh
 Suggests: python-influxdb
 Replaces: ceph (<< 0.93-417),
 Breaks: ceph (<< 0.93-417),
@@ -206,6 +208,7 @@ Package: ceph-mgr-dashboard
 Architecture: all
 Depends: ceph-mgr (= ${binary:Version}),
          python-cherrypy3,
+         python-ipaddress,
          python-jwt,
          python-openssl,
          python-bcrypt,
@@ -271,6 +274,21 @@ Description: rook plugin for ceph-mgr
  This package contains the rook plugin for ceph-mgr's orchestration
  functionality, to allow ceph-mgr to install and configure ceph using
  Rook.
+
+Package: ceph-mgr-ssh
+Architecture: all
+Depends: ceph-mgr (= ${binary:Version}),
+	 python-six,
+         ${misc:Depends},
+         ${python:Depends},
+Description: ssh orchestrator plugin for ceph-mgr
+ Ceph is a massively scalable, open-source, distributed
+ storage system that runs on commodity hardware and delivers object,
+ block and file system storage.
+ .
+ This package contains the SSH plugin for ceph-mgr's orchestration
+ functionality, to allow ceph-mgr to perform orchestration functions
+ over a standard SSH connection.
 
 Package: ceph-mgr-dbg
 Architecture: linux-any
@@ -408,10 +426,35 @@ Description: debugging symbols for rbd-fuse
  .
  This package contains the debugging symbols for rbd-fuse.
 
+Package: ceph-immutable-object-cache
+Architecture: linux-any
+Depends: librados2 (= ${binary:Version}),
+         ${misc:Depends},
+         ${shlibs:Depends},
+Description: Ceph daemon for immutable object cache
+ Ceph is a massively scalable, open-source, distributed
+ storage system that runs on commodity hardware and delivers object,
+ block and file system storage.  This is a daemon for immutable
+ object cache.
+
+Package: ceph-immutable-object-cache-dbg
+Architecture: linux-any
+Section: debug
+Priority: extra
+Depends: ceph-immutable-object-cache (= ${binary:Version}),
+	 ${misc:Depends},
+Description: debugging symbols for ceph-immutable-object-cache
+ Ceph is a massively scalable, open-source, distributed
+ storage system that runs on commodity hardware and delivers object,
+ block and file system storage.  This is a daemon for immutable
+ object cache.
+ .
+ This package contains the debugging symbols for ceph-immutable-object-cache.
+
 Package: rbd-mirror
 Architecture: linux-any
 Depends: ceph-common (= ${binary:Version}),
-         librados3 (= ${binary:Version}),
+         librados2 (= ${binary:Version}),
          ${misc:Depends},
          ${shlibs:Depends},
 Description: Ceph daemon for mirroring RBD images
@@ -534,7 +577,7 @@ Description: OCF-compliant resource agents for Ceph
  Ceph with OCF-compliant cluster resource managers,
  such as Pacemaker.
 
-Package: librados3
+Package: librados2
 Conflicts: librados
 Replaces: librados
 Architecture: linux-any
@@ -547,11 +590,11 @@ Description: RADOS distributed object store client library
  shared library allowing applications to access the distributed object
  store using a simple file-like interface.
 
-Package: librados3-dbg
+Package: librados2-dbg
 Architecture: linux-any
 Section: debug
 Priority: extra
-Depends: librados3 (= ${binary:Version}),
+Depends: librados2 (= ${binary:Version}),
          ${misc:Depends},
 Description: debugging symbols for librados
  RADOS is a reliable, autonomic distributed object storage cluster
@@ -564,7 +607,7 @@ Description: debugging symbols for librados
 Package: librados-dev
 Architecture: linux-any
 Section: libdevel
-Depends: librados3 (= ${binary:Version}),
+Depends: librados2 (= ${binary:Version}),
          ${misc:Depends},
          ${shlibs:Depends},
 Conflicts: librados1-dev,
@@ -580,36 +623,10 @@ Description: RADOS distributed object store client library (development files)
  This package contains development files needed for building applications that
  link against librados.
 
-Package: libradospp1
-Architecture: linux-any
-Section: libs
-Depends: ${misc:Depends},
-         ${shlibs:Depends},
-Description: RADOS distributed object store client C++ library
- RADOS is a reliable, autonomic distributed object storage cluster
- developed as part of the Ceph distributed storage system.  This is a
- shared library allowing C++ applications to access the distributed object
- store using a simple file-like C++ interface.
-
-Package: libradospp1-dbg
-Architecture: linux-any
-Section: debug
-Priority: extra
-Depends: libradospp1 (= ${binary:Version}),
-         ${misc:Depends},
-Description: debugging symbols for libradospp1
- RADOS is a reliable, autonomic distributed object storage cluster
- developed as part of the Ceph distributed storage system.  This is a
- shared library allowing applications to access the distributed object
- store using a simple file-like interface in C++.
- .
- This package contains debugging symbols for libradospp.
-
 Package: libradospp-dev
 Architecture: linux-any
 Section: libdevel
 Depends: librados-dev (= ${binary:Version}),
-         libradospp1 (= ${binary:Version}),
          ${misc:Depends},
          ${shlibs:Depends},
 Description: RADOS distributed object store client C++ library (development files)
@@ -624,7 +641,7 @@ Description: RADOS distributed object store client C++ library (development file
 Package: libradosstriper1
 Architecture: linux-any
 Section: libs
-Depends: librados3 (= ${binary:Version}),
+Depends: librados2 (= ${binary:Version}),
          ${misc:Depends},
          ${shlibs:Depends},
 Description: RADOS striping interface
@@ -661,7 +678,7 @@ Description: RADOS striping interface (development files)
 Package: librbd1
 Architecture: linux-any
 Section: libs
-Depends: librados3 (= ${binary:Version}),
+Depends: librados2 (= ${binary:Version}),
          ${misc:Depends},
          ${shlibs:Depends},
 Description: RADOS block device client library
@@ -760,7 +777,7 @@ Description: Ceph distributed file system client library (development files)
 Package: librgw2
 Architecture: linux-any
 Section: libs
-Depends: librados3 (= ${binary:Version}),
+Depends: librados2 (= ${binary:Version}),
          ${misc:Depends},
          ${shlibs:Depends},
 Description: RADOS Gateway client library
@@ -873,7 +890,7 @@ Description: Meta-package for python libraries for the Ceph libraries
 Package: python-rados
 Architecture: linux-any
 Section: python
-Depends: librados2 | librados3
+Depends: librados2
          ${misc:Depends},
          ${python:Depends},
          ${shlibs:Depends},
@@ -907,7 +924,7 @@ Description: Python 2 libraries for the Ceph librados library
 Package: python3-rados
 Architecture: linux-any
 Section: python
-Depends: librados2 | librados3,
+Depends: librados2,
          ${misc:Depends},
          ${python3:Depends},
          ${shlibs:Depends},

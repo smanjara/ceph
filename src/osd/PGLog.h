@@ -59,6 +59,7 @@ struct PGLog : DoutPrefixProvider {
       version_t v) = 0;
     virtual ~LogEntryHandler() {}
   };
+  using LogEntryHandlerRef = unique_ptr<LogEntryHandler>;
 
 public:
   /**
@@ -587,9 +588,12 @@ protected:
       dirty_from_dups = from;
   }
 public:
+  bool needs_write() const {
+    return !touched_log || is_dirty();
+  }
+
   bool is_dirty() const {
-    return !touched_log ||
-      (dirty_to != eversion_t()) ||
+    return (dirty_to != eversion_t()) ||
       (dirty_from != eversion_t::max()) ||
       (writeout_from != eversion_t::max()) ||
       !(trimmed.empty()) ||
@@ -600,6 +604,7 @@ public:
       (write_from_dups != eversion_t::max()) ||
       rebuilt_missing_with_deletes;
   }
+
   void mark_log_for_rewrite() {
     mark_dirty_to(eversion_t::max());
     mark_dirty_from(eversion_t());
@@ -728,6 +733,10 @@ public:
       h);
   }
 
+  void skip_rollforward() {
+    log.skip_can_rollback_to_to_head();
+  }
+
   //////////////////// get or set log & missing ////////////////////
 
   void reset_backfill_claim_log(const pg_log_t &o, LogEntryHandler *h) {
@@ -793,6 +802,8 @@ public:
   }
 
   void reset_complete_to(pg_info_t *info) {
+    if (log.log.empty()) // caller is split_into()
+      return;
     log.complete_to = log.log.begin();
     ceph_assert(log.complete_to != log.log.end());
     auto oldest_need = missing.get_oldest_need();
@@ -863,6 +874,7 @@ protected:
     const mempool::osd_pglog::list<pg_log_entry_t> &orig_entries, ///< [in] entries for hoid to merge
     const pg_info_t &info,              ///< [in] info for merging entries
     eversion_t olog_can_rollback_to,     ///< [in] rollback boundary
+    eversion_t original_can_rollback_to,     ///< [in] original rollback boundary
     missing_type &missing,               ///< [in,out] missing to adjust, use
     LogEntryHandler *rollbacker,         ///< [in] optional rollbacker object
     const DoutPrefixProvider *dpp        ///< [in] logging provider
@@ -926,6 +938,8 @@ protected:
     const bool object_not_in_store =
       !missing.is_missing(hoid) &&
       entries.rbegin()->is_delete();
+    ldpp_dout(dpp, 10) << __func__ << ": hoid " << " object_not_in_store: "
+                       << object_not_in_store << dendl;
     ldpp_dout(dpp, 10) << __func__ << ": hoid " << hoid
 		       << " prior_version: " << prior_version
 		       << " first_divergent_update: " << first_divergent_update
@@ -1019,11 +1033,22 @@ protected:
 		       << " attempting to rollback"
 		       << dendl;
     bool can_rollback = true;
+    // We are going to make an important decision based on the
+    // olog_can_rollback_to value we have received, better known it.
+    ldpp_dout(dpp, 10) << __func__ << ": hoid " << hoid
+                       << " olog_can_rollback_to: "
+                       << olog_can_rollback_to << dendl;
+    ldpp_dout(dpp, 10) << __func__ << ": hoid " << hoid
+                       << " original_crt: "
+                       << original_can_rollback_to << dendl;
     /// Distinguish between 4) and 5)
     for (list<pg_log_entry_t>::const_reverse_iterator i = entries.rbegin();
 	 i != entries.rend();
 	 ++i) {
-      if (!i->can_rollback() || i->version <= olog_can_rollback_to) {
+      /// Use original_can_rollback_to instead of olog_can_rollback_to to check
+      //  if we can rollback or not. This is to ensure that we don't try to rollback
+      //  to an object that has been deleted and doesn't exist.
+      if (!i->can_rollback() || i->version <= original_can_rollback_to) {
 	ldpp_dout(dpp, 10) << __func__ << ": hoid " << hoid << " cannot rollback "
 			   << *i << dendl;
 	can_rollback = false;
@@ -1036,7 +1061,7 @@ protected:
       for (list<pg_log_entry_t>::const_reverse_iterator i = entries.rbegin();
 	   i != entries.rend();
 	   ++i) {
-	ceph_assert(i->can_rollback() && i->version > olog_can_rollback_to);
+	ceph_assert(i->can_rollback() && i->version > original_can_rollback_to);
 	ldpp_dout(dpp, 10) << __func__ << ": hoid " << hoid
 			   << " rolling back " << *i << dendl;
 	if (rollbacker)
@@ -1073,6 +1098,7 @@ protected:
     mempool::osd_pglog::list<pg_log_entry_t> &entries,       ///< [in] entries to merge
     const pg_info_t &oinfo,              ///< [in] info for merging entries
     eversion_t olog_can_rollback_to,     ///< [in] rollback boundary
+    eversion_t original_can_rollback_to, ///< [in] original rollback boundary
     missing_type &omissing,              ///< [in,out] missing to adjust, use
     LogEntryHandler *rollbacker,         ///< [in] optional rollbacker object
     const DoutPrefixProvider *dpp        ///< [in] logging provider
@@ -1088,6 +1114,7 @@ protected:
 	i->second,
 	oinfo,
 	olog_can_rollback_to,
+        original_can_rollback_to,
 	omissing,
 	rollbacker,
 	dpp);
@@ -1110,6 +1137,7 @@ protected:
       oe.soid,
       entries,
       info,
+      log.get_can_rollback_to(),
       log.get_can_rollback_to(),
       missing,
       rollbacker,

@@ -53,6 +53,7 @@
 #include "rgw_lib_frontend.h"
 #include "rgw_http_client.h"
 #include "rgw_http_client_curl.h"
+#include "rgw_perf_counters.h"
 
 #include <errno.h>
 #include <thread>
@@ -233,6 +234,9 @@ namespace rgw {
     s->cio = io;
 
     RGWObjectCtx rados_ctx(store, s); // XXX holds std::map
+
+    auto sysobj_ctx = store->svc.sysobj->init_obj_ctx();
+    s->sysobj_ctx = &sysobj_ctx;
 
     /* XXX and -then- stash req_state pointers everywhere they are needed */
     ret = req->init(rgw_env, &rados_ctx, io, s);

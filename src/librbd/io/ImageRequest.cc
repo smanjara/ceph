@@ -19,12 +19,12 @@
 #include "common/perf_counters.h"
 #include "common/WorkQueue.h"
 #include "osdc/Striper.h"
+#include <algorithm>
 #include <functional>
 
 #define dout_subsys ceph_subsys_rbd
 #undef dout_prefix
-#define dout_prefix *_dout << "librbd::io::ImageRequest: " << this \
-                           << " " << __func__ << ": "
+#define dout_prefix *_dout << "librbd::io::ImageRequest: " << __func__ << ": "
 
 namespace librbd {
 namespace io {
@@ -32,6 +32,83 @@ namespace io {
 using librbd::util::get_image_ctx;
 
 namespace {
+
+template <typename I>
+struct C_RBD_Readahead : public Context {
+  I *ictx;
+  object_t oid;
+  uint64_t offset;
+  uint64_t length;
+
+  bufferlist read_data;
+  io::ExtentMap extent_map;
+
+  C_RBD_Readahead(I *ictx, object_t oid, uint64_t offset, uint64_t length)
+    : ictx(ictx), oid(oid), offset(offset), length(length) {
+    ictx->readahead.inc_pending();
+  }
+
+  void finish(int r) override {
+    ldout(ictx->cct, 20) << "C_RBD_Readahead on " << oid << ": "
+                         << offset << "~" << length << dendl;
+    ictx->readahead.dec_pending();
+  }
+};
+
+template <typename I>
+void readahead(I *ictx, const Extents& image_extents) {
+  uint64_t total_bytes = 0;
+  for (auto& image_extent : image_extents) {
+    total_bytes += image_extent.second;
+  }
+
+  ictx->image_lock.get_read();
+  auto total_bytes_read = ictx->total_bytes_read.fetch_add(total_bytes);
+  bool abort = (
+    ictx->readahead_disable_after_bytes != 0 &&
+    total_bytes_read > ictx->readahead_disable_after_bytes);
+  if (abort) {
+    ictx->image_lock.put_read();
+    return;
+  }
+
+  uint64_t image_size = ictx->get_image_size(ictx->snap_id);
+  auto snap_id = ictx->snap_id;
+  ictx->image_lock.put_read();
+
+  auto readahead_extent = ictx->readahead.update(image_extents, image_size);
+  uint64_t readahead_offset = readahead_extent.first;
+  uint64_t readahead_length = readahead_extent.second;
+
+  if (readahead_length > 0) {
+    ldout(ictx->cct, 20) << "(readahead logical) " << readahead_offset << "~"
+                         << readahead_length << dendl;
+    std::map<object_t, std::vector<ObjectExtent> > readahead_object_extents;
+    Striper::file_to_extents(ictx->cct, ictx->format_string, &ictx->layout,
+                             readahead_offset, readahead_length, 0,
+                             readahead_object_extents);
+    for (auto& readahead_object_extent : readahead_object_extents) {
+      for (auto& object_extent : readahead_object_extent.second) {
+        ldout(ictx->cct, 20) << "(readahead) oid " << object_extent.oid << " "
+                             << object_extent.offset << "~"
+                             << object_extent.length << dendl;
+
+        auto req_comp = new C_RBD_Readahead<I>(ictx, object_extent.oid,
+                                               object_extent.offset,
+                                               object_extent.length);
+        auto req = io::ObjectDispatchSpec::create_read(
+          ictx, io::OBJECT_DISPATCH_LAYER_NONE, object_extent.oid.name,
+          object_extent.objectno, object_extent.offset, object_extent.length,
+          snap_id, 0, {}, &req_comp->read_data, &req_comp->extent_map,
+          req_comp);
+        req->send();
+      }
+    }
+
+    ictx->perfcounter->inc(l_librbd_readahead);
+    ictx->perfcounter->inc(l_librbd_readahead_bytes, readahead_length);
+  }
+}
 
 template <typename I>
 struct C_UpdateTimestamp : public Context {
@@ -75,6 +152,10 @@ bool should_update_timestamp(const utime_t& now, const utime_t& timestamp,
 
 } // anonymous namespace
 
+#undef dout_prefix
+#define dout_prefix *_dout << "librbd::io::ImageRequest: " << this \
+                           << " " << __func__ << ": "
+
 template <typename I>
 void ImageRequest<I>::aio_read(I *ictx, AioCompletion *c,
                                Extents &&image_extents,
@@ -98,10 +179,10 @@ void ImageRequest<I>::aio_write(I *ictx, AioCompletion *c,
 template <typename I>
 void ImageRequest<I>::aio_discard(I *ictx, AioCompletion *c,
                                   Extents &&image_extents,
-                                  bool skip_partial_discard,
+                                  uint32_t discard_granularity_bytes,
 				  const ZTracer::Trace &parent_trace) {
   ImageDiscardRequest<I> req(*ictx, c, std::move(image_extents),
-                             skip_partial_discard, parent_trace);
+                             discard_granularity_bytes, parent_trace);
   req.send();
 }
 
@@ -142,14 +223,13 @@ template <typename I>
 void ImageRequest<I>::send() {
   I &image_ctx = this->m_image_ctx;
   ceph_assert(m_aio_comp->is_initialized(get_aio_type()));
-  ceph_assert(m_aio_comp->is_started() ^ (get_aio_type() == AIO_TYPE_FLUSH));
+  ceph_assert(m_aio_comp->is_started());
 
   CephContext *cct = image_ctx.cct;
   AioCompletion *aio_comp = this->m_aio_comp;
   ldout(cct, 20) << get_request_type() << ": ictx=" << &image_ctx << ", "
                  << "completion=" << aio_comp << dendl;
 
-  aio_comp->get();
   int r = clip_request();
   if (r < 0) {
     m_aio_comp->fail(r);
@@ -166,7 +246,7 @@ void ImageRequest<I>::send() {
 
 template <typename I>
 int ImageRequest<I>::clip_request() {
-  RWLock::RLocker snap_locker(m_image_ctx.snap_lock);
+  RWLock::RLocker image_locker(m_image_ctx.image_lock);
   for (auto &image_extent : m_image_extents) {
     auto clip_len = image_extent.second;
     int r = clip_io(get_image_ctx(&m_image_ctx), image_extent.first, &clip_len);
@@ -276,7 +356,7 @@ void ImageReadRequest<I>::send_request() {
   {
     // prevent image size from changing between computing clip and recording
     // pending async operation
-    RWLock::RLocker snap_locker(image_ctx.snap_lock);
+    RWLock::RLocker image_locker(image_ctx.image_lock);
     snap_id = image_ctx.snap_id;
 
     // map image extents to object extents
@@ -317,8 +397,6 @@ void ImageReadRequest<I>::send_request() {
     }
   }
 
-  aio_comp->put();
-
   image_ctx.perfcounter->inc(l_librbd_rd);
   image_ctx.perfcounter->inc(l_librbd_rd_bytes, buffer_ofs);
 }
@@ -343,8 +421,6 @@ void AbstractImageWriteRequest<I>::send_request() {
   I &image_ctx = this->m_image_ctx;
   CephContext *cct = image_ctx.cct;
 
-  RWLock::RLocker md_locker(image_ctx.md_lock);
-
   bool journaling = false;
 
   AioCompletion *aio_comp = this->m_aio_comp;
@@ -354,7 +430,7 @@ void AbstractImageWriteRequest<I>::send_request() {
   {
     // prevent image size from changing between computing clip and recording
     // pending async operation
-    RWLock::RLocker snap_locker(image_ctx.snap_lock);
+    RWLock::RLocker image_locker(image_ctx.image_lock);
     if (image_ctx.snap_id != CEPH_NOSNAP || image_ctx.read_only) {
       aio_comp->fail(-EROFS);
       return;
@@ -376,7 +452,7 @@ void AbstractImageWriteRequest<I>::send_request() {
                   image_ctx.journal->is_journal_appending());
   }
 
-  int ret = validate_object_extents(object_extents);
+  int ret = prune_object_extents(&object_extents);
   if (ret < 0) {
     aio_comp->fail(ret);
     return;
@@ -394,11 +470,10 @@ void AbstractImageWriteRequest<I>::send_request() {
     send_object_requests(object_extents, snapc, journal_tid);
   } else {
     // no IO to perform -- fire completion
-    aio_comp->unblock();
+    aio_comp->set_request_count(0);
   }
 
   update_stats(clip_len);
-  aio_comp->put();
 }
 
 template <typename I>
@@ -497,7 +572,7 @@ uint64_t ImageDiscardRequest<I>::append_journal_event(bool synchronous) {
     journal::EventEntry event_entry(
       journal::AioDiscardEvent(extent.first,
                                extent.second,
-                               this->m_skip_partial_discard));
+                               this->m_discard_granularity_bytes));
     tid = image_ctx.journal->append_io_event(std::move(event_entry),
                                              extent.first, extent.second,
                                              synchronous, 0);
@@ -516,7 +591,8 @@ void ImageDiscardRequest<I>::send_image_cache_request() {
   for (auto &extent : this->m_image_extents) {
     C_AioRequest *req_comp = new C_AioRequest(aio_comp);
     image_ctx.image_cache->aio_discard(extent.first, extent.second,
-                                       this->m_skip_partial_discard, req_comp);
+                                       this->m_discard_granularity_bytes,
+                                       req_comp);
   }
 }
 
@@ -525,14 +601,11 @@ ObjectDispatchSpec *ImageDiscardRequest<I>::create_object_request(
     const ObjectExtent &object_extent, const ::SnapContext &snapc,
     uint64_t journal_tid, Context *on_finish) {
   I &image_ctx = this->m_image_ctx;
-  int discard_flags = OBJECT_DISCARD_FLAG_DISABLE_CLONE_REMOVE;
-  if (m_skip_partial_discard) {
-    discard_flags |=  OBJECT_DISCARD_FLAG_SKIP_PARTIAL;
-  }
   auto req = ObjectDispatchSpec::create_discard(
     &image_ctx, OBJECT_DISPATCH_LAYER_NONE, object_extent.oid.name,
     object_extent.objectno, object_extent.offset, object_extent.length, snapc,
-    discard_flags, journal_tid, this->m_trace, on_finish);
+    OBJECT_DISCARD_FLAG_DISABLE_CLONE_REMOVE, journal_tid, this->m_trace,
+    on_finish);
   return req;
 }
 
@@ -544,12 +617,64 @@ void ImageDiscardRequest<I>::update_stats(size_t length) {
 }
 
 template <typename I>
+int ImageDiscardRequest<I>::prune_object_extents(
+    ObjectExtents* object_extents) const {
+  if (m_discard_granularity_bytes == 0) {
+    return 0;
+  }
+
+  // Align the range to discard_granularity_bytes boundary and skip
+  // and discards that are too small to free up any space.
+  //
+  // discard_granularity_bytes >= object_size && tail truncation
+  // is a special case for filestore
+  bool prune_required = false;
+  auto object_size = this->m_image_ctx.layout.object_size;
+  auto discard_granularity_bytes = std::min(m_discard_granularity_bytes,
+                                            object_size);
+  auto xform_lambda =
+    [discard_granularity_bytes, object_size, &prune_required]
+    (ObjectExtent& object_extent) {
+      auto& offset = object_extent.offset;
+      auto& length = object_extent.length;
+      auto next_offset = offset + length;
+
+      if ((discard_granularity_bytes < object_size) ||
+          (next_offset < object_size)) {
+        offset = p2roundup<uint64_t>(offset, discard_granularity_bytes);
+        next_offset = p2align<uint64_t>(next_offset, discard_granularity_bytes);
+        if (offset >= next_offset) {
+          prune_required = true;
+          length = 0;
+        } else {
+          length = next_offset - offset;
+        }
+      }
+    };
+  std::for_each(object_extents->begin(), object_extents->end(),
+                xform_lambda);
+
+  if (prune_required) {
+    // one or more object extents were skipped
+    auto remove_lambda =
+      [](const ObjectExtent& object_extent) {
+        return (object_extent.length == 0);
+      };
+    object_extents->erase(
+      std::remove_if(object_extents->begin(), object_extents->end(),
+                     remove_lambda),
+      object_extents->end());
+  }
+  return 0;
+}
+
+template <typename I>
 void ImageFlushRequest<I>::send_request() {
   I &image_ctx = this->m_image_ctx;
 
   bool journaling = false;
   {
-    RWLock::RLocker snap_locker(image_ctx.snap_lock);
+    RWLock::RLocker image_locker(image_ctx.image_lock);
     journaling = (m_flush_source == FLUSH_SOURCE_USER &&
                   image_ctx.journal != nullptr &&
                   image_ctx.journal->is_journal_appending());
@@ -563,34 +688,23 @@ void ImageFlushRequest<I>::send_request() {
   // ensure no locks are held when flush is complete
   ctx = librbd::util::create_async_context_callback(image_ctx, ctx);
 
+  uint64_t journal_tid = 0;
   if (journaling) {
     // in-flight ops are flushed prior to closing the journal
-    uint64_t journal_tid = image_ctx.journal->append_io_event(
+    ceph_assert(image_ctx.journal != NULL);
+    journal_tid = image_ctx.journal->append_io_event(
       journal::EventEntry(journal::AioFlushEvent()), 0, 0, false, 0);
-
-    ctx = new FunctionContext(
-      [&image_ctx, journal_tid, ctx](int r) {
-        image_ctx.journal->commit_io_event(journal_tid, r);
-        ctx->complete(r);
-      });
-    ctx = new FunctionContext(
-      [&image_ctx, journal_tid, ctx](int r) {
-        image_ctx.journal->flush_event(journal_tid, ctx);
-      });
-  } else {
-    // flush rbd cache only when journaling is not enabled
-    auto object_dispatch_spec = ObjectDispatchSpec::create_flush(
-      &image_ctx, OBJECT_DISPATCH_LAYER_NONE, m_flush_source, this->m_trace,
-      ctx);
-    ctx = new FunctionContext([object_dispatch_spec](int r) {
-        object_dispatch_spec->send();
-      });
   }
 
+  auto object_dispatch_spec = ObjectDispatchSpec::create_flush(
+    &image_ctx, OBJECT_DISPATCH_LAYER_NONE, m_flush_source, journal_tid,
+    this->m_trace, ctx);
+  ctx = new FunctionContext([object_dispatch_spec](int r) {
+      object_dispatch_spec->send();
+    });
+
   // ensure all in-flight IOs are settled if non-user flush request
-  image_ctx.flush_async_operations(ctx);
-  aio_comp->start_op(true);
-  aio_comp->put();
+  aio_comp->async_op.flush(ctx);
 
   // might be flushing during image shutdown
   if (image_ctx.perfcounter != nullptr) {
@@ -744,15 +858,15 @@ void ImageCompareAndWriteRequest<I>::update_stats(size_t length) {
 }
 
 template <typename I>
-int ImageCompareAndWriteRequest<I>::validate_object_extents(
-    const ObjectExtents &object_extents) const {
-  if (object_extents.size() > 1)
+int ImageCompareAndWriteRequest<I>::prune_object_extents(
+    ObjectExtents* object_extents) const {
+  if (object_extents->size() > 1)
     return -EINVAL;
 
   I &image_ctx = this->m_image_ctx;
   uint64_t sector_size = 512ULL;
   uint64_t su = image_ctx.layout.stripe_unit;
-  ObjectExtent object_extent = object_extents.front();
+  ObjectExtent object_extent = object_extents->front();
   if (object_extent.offset % sector_size + object_extent.length > sector_size ||
       (su != 0 && (object_extent.offset % su + object_extent.length > su)))
     return -EINVAL;

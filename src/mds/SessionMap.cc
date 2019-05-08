@@ -586,7 +586,7 @@ void SessionMapStore::dump(Formatter *f) const
   f->close_section(); // Sessions
 }
 
-void SessionMapStore::generate_test_instances(list<SessionMapStore*>& ls)
+void SessionMapStore::generate_test_instances(std::list<SessionMapStore*>& ls)
 {
   // pretty boring for now
   ls.push_back(new SessionMapStore());
@@ -883,6 +883,7 @@ uint64_t Session::notify_recall_sent(size_t new_limit)
    * throttle future RECALL messages).
    */
   recall_caps_throttle.hit(count);
+  recall_caps_throttle2o.hit(count);
   recall_caps.hit(count);
   return new_change;
 }

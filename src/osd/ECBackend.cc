@@ -220,13 +220,11 @@ void ECBackend::_failed_push(const hobject_t &hoid,
   eversion_t v = recovery_ops[hoid].v;
   recovery_ops.erase(hoid);
 
-  list<pg_shard_t> fl;
+  set<pg_shard_t> fl;
   for (auto&& i : res.errors) {
-    fl.push_back(i.first);
+    fl.insert(i.first);
   }
-  get_parent()->failed_push(fl, hoid);
-  get_parent()->backfill_add_missing(hoid, v);
-  get_parent()->finish_degraded_object(hoid);
+  get_parent()->on_failed_pull(fl, hoid, v);
 }
 
 struct OnRecoveryReadComplete :
@@ -285,7 +283,8 @@ struct RecoveryMessages {
 
 void ECBackend::handle_recovery_push(
   const PushOp &op,
-  RecoveryMessages *m)
+  RecoveryMessages *m,
+  bool is_repair)
 {
   if (get_parent()->check_failsafe_full()) {
     dout(10) << __func__ << " Out of space (failsafe) processing push request." << dendl;
@@ -361,6 +360,8 @@ void ECBackend::handle_recovery_push(
     if ((get_parent()->pgb_is_primary())) {
       ceph_assert(recovery_ops.count(op.soid));
       ceph_assert(recovery_ops[op.soid].obc);
+      if (get_parent()->pg_is_repair())
+        get_parent()->inc_osd_stat_repaired();
       get_parent()->on_local_recover(
 	op.soid,
 	op.recovery_info,
@@ -368,6 +369,9 @@ void ECBackend::handle_recovery_push(
 	false,
 	&m->t);
     } else {
+      // If primary told us this is a repair, bump osd_stat_t::num_objects_repaired
+      if (is_repair)
+        get_parent()->inc_osd_stat_repaired();
       get_parent()->on_local_recover(
 	op.soid,
 	op.recovery_info,
@@ -517,6 +521,7 @@ void ECBackend::dispatch_recovery_messages(RecoveryMessages &m, int priority)
     msg->pgid = spg_t(get_parent()->get_info().pgid.pgid, i->first.shard);
     msg->pushes.swap(i->second);
     msg->compute_cost(cct);
+    msg->is_repair = get_parent()->pg_is_repair();
     get_parent()->send_message(
       i->first.osd,
       msg);
@@ -682,6 +687,8 @@ void ECBackend::continue_recovery_op(
 	  stat.num_bytes_recovered = op.recovery_info.size;
 	  stat.num_keys_recovered = 0; // ??? op ... omap_entries.size(); ?
 	  stat.num_objects_recovered = 1;
+	  if (get_parent()->pg_is_repair())
+	    stat.num_objects_repaired = 1;
 	  get_parent()->on_global_recover(op.hoid, stat, false);
 	  dout(10) << __func__ << ": WRITING return " << op << dendl;
 	  recovery_ops.erase(op.hoid);
@@ -823,7 +830,7 @@ bool ECBackend::_handle_message(
     for (vector<PushOp>::const_iterator i = op->pushes.begin();
 	 i != op->pushes.end();
 	 ++i) {
-      handle_recovery_push(*i, &rm);
+      handle_recovery_push(*i, &rm, op->is_repair);
     }
     dispatch_recovery_messages(rm, priority);
     return true;

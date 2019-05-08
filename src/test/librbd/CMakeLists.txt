@@ -18,6 +18,7 @@ set(librbd_test
   test_MirroringWatcher.cc
   test_ObjectMap.cc
   test_Operations.cc
+  test_Trash.cc
   journal/test_Entries.cc
   journal/test_Replay.cc)
 add_library(rbd_test STATIC ${librbd_test})
@@ -49,6 +50,7 @@ set(unittest_librbd_srcs
   test_mock_ObjectMap.cc
   test_mock_TrashWatcher.cc
   test_mock_Watcher.cc
+  cache/test_mock_WriteAroundObjectDispatch.cc
   deep_copy/test_mock_ImageCopyRequest.cc
   deep_copy/test_mock_MetadataCopyRequest.cc
   deep_copy/test_mock_ObjectCopyRequest.cc
@@ -58,16 +60,21 @@ set(unittest_librbd_srcs
   exclusive_lock/test_mock_PreAcquireRequest.cc
   exclusive_lock/test_mock_PostAcquireRequest.cc
   exclusive_lock/test_mock_PreReleaseRequest.cc
+  image/test_mock_AttachChildRequest.cc
   image/test_mock_AttachParentRequest.cc
   image/test_mock_CloneRequest.cc
   image/test_mock_DetachChildRequest.cc
   image/test_mock_DetachParentRequest.cc
   image/test_mock_ListWatchersRequest.cc
+  image/test_mock_PreRemoveRequest.cc
   image/test_mock_RefreshRequest.cc
   image/test_mock_RemoveRequest.cc
+  image/test_mock_ValidatePoolRequest.cc
+  io/test_mock_CopyupRequest.cc
   io/test_mock_ImageRequest.cc
   io/test_mock_ImageRequestWQ.cc
   io/test_mock_ObjectRequest.cc
+  io/test_mock_SimpleSchedulerObjectDispatch.cc
   journal/test_mock_OpenRequest.cc
   journal/test_mock_PromoteRequest.cc
   journal/test_mock_Replay.cc
@@ -98,6 +105,7 @@ set(unittest_librbd_srcs
   operation/test_mock_SnapshotUnprotectRequest.cc
   operation/test_mock_TrimRequest.cc
   trash/test_mock_MoveRequest.cc
+  trash/test_mock_RemoveRequest.cc
   watcher/test_mock_RewatchRequest.cc
   )
 add_executable(unittest_librbd
@@ -137,24 +145,9 @@ target_link_libraries(ceph_test_librbd
   cls_journal_client
   cls_rbd_client
   librados
-  librados-cxx
   ${UNITTEST_LIBS}
   radostest)
 target_compile_definitions(ceph_test_librbd PRIVATE "TEST_LIBRBD_INTERNALS")
-
-add_executable(ceph_test_librbd_api
-  test_support.cc
-  test_librbd.cc
-  test_main.cc
-  $<TARGET_OBJECTS:common_texttable_obj>)
-target_link_libraries(ceph_test_librbd_api
-  ceph-common
-  radostest
-  radostest-cxx
-  librbd
-  librados
-  librados-cxx
-  ${UNITTEST_LIBS})
 
 add_executable(ceph_test_librbd_fsx
   fsx.cc
@@ -163,7 +156,6 @@ add_executable(ceph_test_librbd_fsx
 target_link_libraries(ceph_test_librbd_fsx
   librbd
   librados
-  librados-cxx
   journal
   global
   m
@@ -181,5 +173,4 @@ install(TARGETS
 
 install(TARGETS
   ceph_test_librbd
-  ceph_test_librbd_api
   DESTINATION ${CMAKE_INSTALL_BINDIR})

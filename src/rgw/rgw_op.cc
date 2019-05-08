@@ -47,6 +47,7 @@
 #include "rgw_tag_s3.h"
 #include "rgw_putobj_processor.h"
 #include "rgw_crypt.h"
+#include "rgw_perf_counters.h"
 
 #include "services/svc_zone.h"
 #include "services/svc_quota.h"
@@ -78,7 +79,7 @@ using ceph::crypto::MD5;
 using boost::optional;
 using boost::none;
 
-using rgw::IAM::ARN;
+using rgw::ARN;
 using rgw::IAM::Effect;
 using rgw::IAM::Policy;
 
@@ -423,7 +424,7 @@ static int get_multipart_info(RGWRados *store, struct req_state *s,
 }
 
 static int get_multipart_info(RGWRados *store, struct req_state *s,
-			      string& meta_oid,
+			      const string& meta_oid,
                               RGWAccessControlPolicy *policy,
 			      map<string, bufferlist> *attrs,
                               multipart_upload_info *upload_info)
@@ -522,13 +523,20 @@ static int read_obj_policy(RGWRados *store,
     if (ret < 0) {
       return ret;
     }
-
     const rgw_user& bucket_owner = bucket_policy.get_owner().get_id();
     if (bucket_owner.compare(s->user->user_id) != 0 &&
-        ! s->auth.identity->is_admin_of(bucket_owner) &&
-        ! bucket_policy.verify_permission(s, *s->auth.identity, s->perm_mask,
-                                          RGW_PERM_READ)) {
-      ret = -EACCES;
+        ! s->auth.identity->is_admin_of(bucket_owner)) {
+      if (policy) {
+        auto r =  policy->eval(s->env, *s->auth.identity, rgw::IAM::s3ListBucket, ARN(bucket));
+        if (r == Effect::Allow)
+          return -ENOENT;
+        if (r == Effect::Deny)
+          return -EACCES;
+      }
+      if (! bucket_policy.verify_permission(s, *s->auth.identity, s->perm_mask, RGW_PERM_READ))
+        ret = -EACCES;
+      else
+        ret = -ENOENT;
     } else {
       ret = -ENOENT;
     }
@@ -626,8 +634,7 @@ int rgw_build_bucket_policies(RGWRados* store, struct req_state* s)
         s->bucket_acl->get_owner().get_display_name(),
       };
     } else {
-      s->bucket_acl->create_default(s->user->user_id, s->user->display_name);
-      ret = -ERR_NO_SUCH_BUCKET;
+      return -ERR_NO_SUCH_BUCKET;
     }
 
     s->bucket_owner = s->bucket_acl->get_owner();
@@ -1451,7 +1458,7 @@ int RGWGetObj::read_user_manifest_part(rgw_bucket& bucket,
 
   perfcounter->inc(l_rgw_get_b, cur_end - cur_ofs);
   filter->fixup_range(cur_ofs, cur_end);
-  op_ret = read_op.iterate(cur_ofs, cur_end, filter);
+  op_ret = read_op.iterate(cur_ofs, cur_end, filter, s->yield);
   if (op_ret >= 0)
 	  op_ret = filter->flush();
   return op_ret;
@@ -2099,7 +2106,7 @@ void RGWGetObj::execute()
   ofs_x = ofs;
   end_x = end;
   filter->fixup_range(ofs_x, end_x);
-  op_ret = read_op.iterate(ofs_x, end_x, filter);
+  op_ret = read_op.iterate(ofs_x, end_x, filter, s->yield);
 
   if (op_ret >= 0)
     op_ret = filter->flush();
@@ -2146,8 +2153,8 @@ int RGWGetObj::init_common()
 
 int RGWListBuckets::verify_permission()
 {
-  rgw::IAM::Partition partition = rgw::IAM::Partition::aws;
-  rgw::IAM::Service service = rgw::IAM::Service::s3;
+  rgw::Partition partition = rgw::Partition::aws;
+  rgw::Service service = rgw::Service::s3;
 
   if (!verify_user_permission(this, s, ARN(partition, service, "", s->user->user_id.tenant, "*"), rgw::IAM::s3ListAllMyBuckets)) {
     return -EACCES;
@@ -3328,7 +3335,7 @@ int RGWPutObj::verify_permission()
 			      cs_object.instance.empty() ?
 			      rgw::IAM::s3GetObject :
 			      rgw::IAM::s3GetObjectVersion,
-			      rgw::IAM::ARN(obj)); usr_policy_res == Effect::Deny)
+			      rgw::ARN(obj)); usr_policy_res == Effect::Deny)
             return -EACCES;
           else if (usr_policy_res == Effect::Allow)
             break;
@@ -3339,7 +3346,7 @@ int RGWPutObj::verify_permission()
 			      cs_object.instance.empty() ?
 			      rgw::IAM::s3GetObject :
 			      rgw::IAM::s3GetObjectVersion,
-			      rgw::IAM::ARN(obj));
+			      rgw::ARN(obj));
   }
 	if (e == Effect::Deny) {
 	  return -EACCES; 
@@ -3415,6 +3422,7 @@ int RGWPutObj::verify_permission()
 
   return 0;
 }
+
 
 void RGWPutObj::pre_exec()
 {
@@ -3504,7 +3512,7 @@ int RGWPutObj::get_data(const off_t fst, const off_t lst, bufferlist& bl)
     return ret;
 
   filter->fixup_range(new_ofs, new_end);
-  ret = read_op.iterate(new_ofs, new_end, filter);
+  ret = read_op.iterate(new_ofs, new_end, filter, s->yield);
 
   if (ret >= 0)
     ret = filter->flush();
@@ -3620,17 +3628,20 @@ void RGWPutObj::execute()
     op_ret = store->swift_versioning_copy(obj_ctx,
                                           s->bucket_owner.get_id(),
                                           s->bucket_info,
-                                          obj);
+                                          obj,
+                                          this);
     if (op_ret < 0) {
       return;
     }
   }
 
   // create the object processor
-  rgw::AioThrottle aio(store->ctx()->_conf->rgw_put_obj_min_window_size);
+  auto aio = rgw::make_throttle(s->cct->_conf->rgw_put_obj_min_window_size,
+                                s->yield);
   using namespace rgw::putobj;
-  constexpr auto max_processor_size = std::max(sizeof(MultipartObjectProcessor),
-                                               sizeof(AtomicObjectProcessor));
+  constexpr auto max_processor_size = std::max({sizeof(MultipartObjectProcessor),
+                                               sizeof(AtomicObjectProcessor),
+                                               sizeof(AppendObjectProcessor)});
   ceph::static_ptr<ObjectProcessor, max_processor_size> processor;
 
   rgw_placement_rule *pdest_placement;
@@ -3651,9 +3662,19 @@ void RGWPutObj::execute()
     pdest_placement = &upload_info.dest_placement;
     ldpp_dout(this, 20) << "dest_placement for part=" << upload_info.dest_placement << dendl;
     processor.emplace<MultipartObjectProcessor>(
-        &aio, store, s->bucket_info, pdest_placement,
+        &*aio, store, s->bucket_info, pdest_placement,
         s->owner.get_id(), obj_ctx, obj,
-        multipart_upload_id, multipart_part_num, multipart_part_str);
+        multipart_upload_id, multipart_part_num, multipart_part_str,
+        this, s->yield);
+  } else if(append) {
+    if (s->bucket_info.versioned()) {
+      op_ret = -ERR_INVALID_BUCKET_STATE;
+      return;
+    }
+    pdest_placement = &s->dest_placement;
+    processor.emplace<AppendObjectProcessor>(
+            &*aio, store, s->bucket_info, pdest_placement, s->bucket_owner.get_id(),obj_ctx, obj,
+            s->req_id, position, &cur_accounted_size, this, s->yield);
   } else {
     if (s->bucket_info.versioning_enabled()) {
       if (!version_id.empty()) {
@@ -3665,8 +3686,9 @@ void RGWPutObj::execute()
     }
     pdest_placement = &s->dest_placement;
     processor.emplace<AtomicObjectProcessor>(
-        &aio, store, s->bucket_info, pdest_placement,
-        s->bucket_owner.get_id(), obj_ctx, obj, olh_epoch, s->req_id);
+        &*aio, store, s->bucket_info, pdest_placement,
+        s->bucket_owner.get_id(), obj_ctx, obj, olh_epoch,
+        s->req_id, this, s->yield);
   }
 
   op_ret = processor->prepare();
@@ -3830,18 +3852,12 @@ void RGWPutObj::execute()
       ldpp_dout(this, 0) << "bad user manifest: " << dlo_manifest << dendl;
       return;
     }
-    complete_etag(hash, &etag);
-    ldpp_dout(this, 10) << __func__ << ": calculated md5 for user manifest: " << etag << dendl;
   }
 
   if (slo_info) {
     bufferlist manifest_bl;
     encode(*slo_info, manifest_bl);
     emplace_attr(RGW_ATTR_SLO_MANIFEST, std::move(manifest_bl));
-
-    hash.Update((unsigned char *)(slo_info->raw_data.c_str()), slo_info->raw_data.length());
-    complete_etag(hash, &etag);
-    ldpp_dout(this, 10) << __func__ << ": calculated md5 for user manifest: " << etag << dendl;
   }
 
   if (supplied_etag && etag.compare(supplied_etag) != 0) {
@@ -3986,14 +4002,15 @@ void RGWPostObj::execute()
       store->gen_rand_obj_instance_name(&obj);
     }
 
-    rgw::AioThrottle aio(s->cct->_conf->rgw_put_obj_min_window_size);
+    auto aio = rgw::make_throttle(s->cct->_conf->rgw_put_obj_min_window_size,
+                                  s->yield);
 
     using namespace rgw::putobj;
-    AtomicObjectProcessor processor(&aio, store, s->bucket_info,
+    AtomicObjectProcessor processor(&*aio, store, s->bucket_info,
                                     &s->dest_placement,
                                     s->bucket_owner.get_id(),
                                     *static_cast<RGWObjectCtx*>(s->obj_ctx),
-                                    obj, 0, s->req_id);
+                                    obj, 0, s->req_id, this, s->yield);
     op_ret = processor.prepare();
     if (op_ret < 0) {
       return;
@@ -4540,7 +4557,7 @@ void RGWDeleteObj::execute()
 
     bool ver_restored = false;
     op_ret = store->swift_versioning_restore(*s->sysobj_ctx, *obj_ctx, s->bucket_owner.get_id(),
-                                             s->bucket_info, obj, ver_restored);
+                                             s->bucket_info, obj, ver_restored, this);
     if (op_ret < 0) {
       return;
     }
@@ -4855,7 +4872,8 @@ void RGWCopyObj::execute()
   op_ret = store->swift_versioning_copy(obj_ctx,
                                         dest_bucket_info.owner,
                                         dest_bucket_info,
-                                        dst_obj);
+                                        dst_obj,
+                                        this);
   if (op_ret < 0) {
     return;
   }
@@ -4884,8 +4902,8 @@ void RGWCopyObj::execute()
 			   (version_id.empty() ? NULL : &version_id),
 			   &s->req_id, /* use req_id as tag */
 			   &etag,
-			   copy_obj_progress_cb, (void *)this
-    );
+			   copy_obj_progress_cb, (void *)this, 
+                           this);
 }
 
 int RGWGetACLs::verify_permission()
@@ -5085,7 +5103,7 @@ void RGWPutACLs::execute()
   if (grants_num > max_num) {
     ldpp_dout(this, 4) << "An acl can have up to " << max_num
         << " grants, request acl grants num: " << grants_num << dendl;
-    op_ret = -ERR_MALFORMED_ACL_ERROR;
+    op_ret = -ERR_LIMIT_EXCEEDED;
     s->err.message = "The request is rejected, because the acl grants number you requested is larger than the maximum "
                      + std::to_string(max_num)
                      + " grants allowed in an acl.";
@@ -5646,7 +5664,7 @@ void RGWCompleteMultipart::execute()
   store->obj_to_raw((s->bucket_info).placement_rule, meta_obj, &raw_obj);
   store->get_obj_data_pool((s->bucket_info).placement_rule,
 			   meta_obj,&meta_pool);
-  store->open_pool_ctx(meta_pool, serializer.ioctx);
+  store->open_pool_ctx(meta_pool, serializer.ioctx, true);
 
   op_ret = serializer.try_lock(raw_obj.oid, dur);
   if (op_ret < 0) {
@@ -6015,8 +6033,35 @@ void RGWGetHealthCheck::execute()
 
 int RGWDeleteMultiObj::verify_permission()
 {
+  if (s->iam_policy || ! s->iam_user_policies.empty()) {
+    auto usr_policy_res = eval_user_policies(s->iam_user_policies, s->env,
+                                              boost::none,
+                                              s->object.instance.empty() ?
+                                              rgw::IAM::s3DeleteObject :
+                                              rgw::IAM::s3DeleteObjectVersion,
+                                              ARN(s->bucket));
+    if (usr_policy_res == Effect::Deny) {
+      return -EACCES;
+    }
+
+    rgw::IAM::Effect r = Effect::Pass;
+    if (s->iam_policy) {
+      r = s->iam_policy->eval(s->env, *s->auth.identity,
+				 s->object.instance.empty() ?
+				 rgw::IAM::s3DeleteObject :
+				 rgw::IAM::s3DeleteObjectVersion,
+				 ARN(s->bucket));
+    }
+    if (r == Effect::Allow)
+      return 0;
+    else if (r == Effect::Deny)
+      return -EACCES;
+    else if (usr_policy_res == Effect::Allow)
+      return 0;
+  }
+
   acl_allowed = verify_bucket_permission_no_policy(this, s, RGW_PERM_WRITE);
-  if (!acl_allowed && !s->iam_policy && s->iam_user_policies.empty())
+  if (!acl_allowed)
     return -EACCES;
 
   return 0;
@@ -6106,7 +6151,7 @@ void RGWDeleteMultiObj::execute()
                                               iter->instance.empty() ?
                                               rgw::IAM::s3DeleteObject :
                                               rgw::IAM::s3DeleteObjectVersion,
-                                              obj);
+                                              ARN(obj));
       if (usr_policy_res == Effect::Deny) {
         send_partial_response(*iter, false, "", -EACCES);
         continue;
@@ -6119,7 +6164,7 @@ void RGWDeleteMultiObj::execute()
 				   iter->instance.empty() ?
 				   rgw::IAM::s3DeleteObject :
 				   rgw::IAM::s3DeleteObjectVersion,
-				   obj);
+				   ARN(obj));
       }
       if ((e == Effect::Deny) ||
 	  (usr_policy_res == Effect::Pass && e == Effect::Pass && !acl_allowed)) {
@@ -6704,12 +6749,12 @@ int RGWBulkUploadOp::handle_file(const boost::string_ref path,
   rgw_placement_rule dest_placement = s->dest_placement;
   dest_placement.inherit_from(binfo.placement_rule);
 
-  rgw::AioThrottle aio(store->ctx()->_conf->rgw_put_obj_min_window_size);
+  auto aio = rgw::make_throttle(s->cct->_conf->rgw_put_obj_min_window_size,
+                                s->yield);
 
   using namespace rgw::putobj;
-
-  AtomicObjectProcessor processor(&aio, store, binfo, &s->dest_placement, bowner.get_id(),
-                                  obj_ctx, obj, 0, s->req_id);
+  AtomicObjectProcessor processor(&*aio, store, binfo, &s->dest_placement, bowner.get_id(),
+                                  obj_ctx, obj, 0, s->req_id, this, s->yield);
 
   op_ret = processor.prepare();
   if (op_ret < 0) {

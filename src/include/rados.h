@@ -7,6 +7,7 @@
  */
 
 #include <string.h>
+#include <stdbool.h>
 #include "msgr.h"
 
 /*
@@ -123,6 +124,7 @@ struct ceph_eversion {
 #define CEPH_OSD_NODOWN       (1<<9)  /* osd can not be marked down */
 #define CEPH_OSD_NOIN         (1<<10) /* osd can not be marked in */
 #define CEPH_OSD_NOOUT        (1<<11) /* osd can not be marked out */
+#define CEPH_OSD_STOP         (1<<12) /* osd has been stopped by admin */
 
 extern const char *ceph_osd_state_name(int s);
 
@@ -190,7 +192,8 @@ extern const char *ceph_osd_state_name(int s);
 #define CEPH_RELEASE_LUMINOUS   12
 #define CEPH_RELEASE_MIMIC      13
 #define CEPH_RELEASE_NAUTILUS   14
-#define CEPH_RELEASE_MAX        15  /* highest + 1 */
+#define CEPH_RELEASE_OCTOPUS    15
+#define CEPH_RELEASE_MAX        16  /* highest + 1 */
 
 extern const char *ceph_release_name(int r);
 extern int ceph_release_from_name(const char *s);
@@ -394,7 +397,7 @@ static inline int ceph_osd_op_mode_cache(int op)
 {
 	return op & CEPH_OSD_OP_MODE_CACHE;
 }
-static inline int ceph_osd_op_uses_extent(int op)
+static inline bool ceph_osd_op_uses_extent(int op)
 {
 	switch(op) {
 	case CEPH_OSD_OP_READ:

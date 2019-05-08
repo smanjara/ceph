@@ -951,6 +951,7 @@ void RGWZoneParams::dump(Formatter *f) const
   encode_json("log_pool", log_pool, f);
   encode_json("intent_log_pool", intent_log_pool, f);
   encode_json("usage_log_pool", usage_log_pool, f);
+  encode_json("roles_pool", roles_pool, f);
   encode_json("reshard_pool", reshard_pool, f);
   encode_json("user_keys_pool", user_keys_pool, f);
   encode_json("user_email_pool", user_email_pool, f);
@@ -1046,6 +1047,7 @@ void RGWZoneParams::decode_json(JSONObj *obj)
   JSONDecoder::decode_json("lc_pool", lc_pool, obj);
   JSONDecoder::decode_json("log_pool", log_pool, obj);
   JSONDecoder::decode_json("intent_log_pool", intent_log_pool, obj);
+  JSONDecoder::decode_json("roles_pool", roles_pool, obj);
   JSONDecoder::decode_json("reshard_pool", reshard_pool, obj);
   JSONDecoder::decode_json("usage_log_pool", usage_log_pool, obj);
   JSONDecoder::decode_json("user_keys_pool", user_keys_pool, obj);
@@ -1527,7 +1529,7 @@ void rgw::keystone::AdminTokenRequestVer2::dump(Formatter* const f) const
     f->open_object_section("auth");
       f->open_object_section("passwordCredentials");
         encode_json("username", to_string(conf.get_admin_user()), f);
-        encode_json("password", to_string(conf.get_admin_password()), f);
+        encode_json("password", ::to_string(conf.get_admin_password()), f);
       f->close_section();
       encode_json("tenantName", to_string(conf.get_admin_tenant()), f);
     f->close_section();
@@ -1548,7 +1550,7 @@ void rgw::keystone::AdminTokenRequestVer3::dump(Formatter* const f) const
               encode_json("name", to_string(conf.get_admin_domain()), f);
             f->close_section();
             encode_json("name", to_string(conf.get_admin_user()), f);
-            encode_json("password", to_string(conf.get_admin_password()), f);
+            encode_json("password", ::to_string(conf.get_admin_password()), f);
           f->close_section();
         f->close_section();
       f->close_section();

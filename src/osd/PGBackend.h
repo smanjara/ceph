@@ -105,33 +105,33 @@ typedef std::shared_ptr<const OSDMap> OSDMapRef;
        pg_shard_t peer,
        const hobject_t oid) = 0;
 
-     virtual void failed_push(const list<pg_shard_t> &from, const hobject_t &soid) = 0;
-     virtual void finish_degraded_object(const hobject_t& oid) = 0;
-     virtual void primary_failed(const hobject_t &soid) = 0;
-     virtual bool primary_error(const hobject_t& soid, eversion_t v) = 0;
-     virtual void cancel_pull(const hobject_t &soid) = 0;
-
      virtual void apply_stats(
        const hobject_t &soid,
        const object_stat_sum_t &delta_stats) = 0;
 
      /**
-      * Called when a read on the primary fails when pushing
+      * Called when a read from a set of replicas/primary fails
       */
-     virtual void on_primary_error(
-       const hobject_t &oid,
-       eversion_t v
+     virtual void on_failed_pull(
+       const set<pg_shard_t> &from,
+       const hobject_t &soid,
+       const eversion_t &v
        ) = 0;
 
-     virtual void backfill_add_missing(
+     /**
+      * Called when a pull on soid cannot be completed due to
+      * down peers
+      */
+     virtual void cancel_pull(
+       const hobject_t &soid) = 0;
+
+     /**
+      * Called to remove an object.
+      */
+     virtual void remove_missing_object(
        const hobject_t &oid,
-       eversion_t v
-       ) = 0;
-
-     virtual void remove_missing_object(const hobject_t &oid,
-					eversion_t v,
-					Context *on_complete) = 0;
-
+       eversion_t v,
+       Context *on_complete) = 0;
 
      /**
       * Bless a context
@@ -227,6 +227,7 @@ typedef std::shared_ptr<const OSDMap> OSDMapRef;
        const hobject_t &hoid) = 0;
 
      virtual bool pg_is_undersized() const = 0;
+     virtual bool pg_is_repair() const = 0;
 
      virtual void log_operation(
        const vector<pg_log_entry_t> &logv,
@@ -291,8 +292,8 @@ typedef std::shared_ptr<const OSDMap> OSDMapRef;
 
      virtual bool check_failsafe_full() = 0;
 
-     virtual bool check_osdmap_full(const set<pg_shard_t> &missing_on) = 0;
-
+     virtual bool pg_is_repair() = 0;
+     virtual void inc_osd_stat_repaired() = 0;
      virtual bool pg_is_remote_backfilling() = 0;
      virtual void pg_add_local_num_bytes(int64_t num_bytes) = 0;
      virtual void pg_sub_local_num_bytes(int64_t num_bytes) = 0;
@@ -607,10 +608,10 @@ typedef std::shared_ptr<const OSDMap> OSDMapRef;
      ScrubMap &map,
      ScrubMapBuilder &pos,
      ScrubMap::object &o) = 0;
-   void be_large_omap_check(
+   void be_omap_checks(
      const map<pg_shard_t,ScrubMap*> &maps,
      const set<hobject_t> &master_set,
-     int& large_omap_objects,
+     omap_stat_t& omap_stats,
      ostream &warnstream) const;
 
    static PGBackend *build_pg_backend(

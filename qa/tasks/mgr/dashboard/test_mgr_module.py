@@ -3,14 +3,15 @@ from __future__ import absolute_import
 
 import logging
 import requests
-import time
 
-from .helper import DashboardTestCase, JObj, JList, JLeaf
+from .helper import DashboardTestCase, JAny, JObj, JList, JLeaf
 
 logger = logging.getLogger(__name__)
 
 
 class MgrModuleTestCase(DashboardTestCase):
+    MGRS_REQUIRED = 1
+
     @classmethod
     def tearDownClass(cls):
         cls._ceph_cmd(['mgr', 'module', 'disable', 'telemetry'])
@@ -31,7 +32,7 @@ class MgrModuleTestCase(DashboardTestCase):
                 pass
             return False
 
-        self.wait_until_true(_check_connection, timeout=20, period=2)
+        self.wait_until_true(_check_connection, timeout=30)
 
 
 class MgrModuleTest(MgrModuleTestCase):
@@ -45,7 +46,24 @@ class MgrModuleTest(MgrModuleTestCase):
             JList(
                 JObj(sub_elems={
                     'name': JLeaf(str),
-                    'enabled': JLeaf(bool)
+                    'enabled': JLeaf(bool),
+                    'options': JObj(
+                        {},
+                        allow_unknown=True,
+                        unknown_schema=JObj({
+                            'name': str,
+                            'type': str,
+                            'level': str,
+                            'flags': int,
+                            'default_value': JAny(none=False),
+                            'min': JAny(none=False),
+                            'max': JAny(none=False),
+                            'enum_allowed': JList(str),
+                            'see_also': JList(str),
+                            'desc': str,
+                            'long_desc': str,
+                            'tags': JList(str)
+                        }))
                 })))
         module_info = self.find_object_in_list('name', 'telemetry', data)
         self.assertIsNotNone(module_info)
@@ -61,7 +79,24 @@ class MgrModuleTest(MgrModuleTestCase):
             JList(
                 JObj(sub_elems={
                     'name': JLeaf(str),
-                    'enabled': JLeaf(bool)
+                    'enabled': JLeaf(bool),
+                    'options': JObj(
+                        {},
+                        allow_unknown=True,
+                        unknown_schema=JObj({
+                            'name': str,
+                            'type': str,
+                            'level': str,
+                            'flags': int,
+                            'default_value': JAny(none=False),
+                            'min': JAny(none=False),
+                            'max': JAny(none=False),
+                            'enum_allowed': JList(str),
+                            'see_also': JList(str),
+                            'desc': str,
+                            'long_desc': str,
+                            'tags': JList(str)
+                        }))
                 })))
         module_info = self.find_object_in_list('name', 'telemetry', data)
         self.assertIsNotNone(module_info)
@@ -138,6 +173,8 @@ class MgrModuleTelemetryTest(MgrModuleTestCase):
         self.assertTrue(module_info['enabled'])
 
     def test_disable(self):
+        # Enable the 'telemetry' module (all CephMgr modules are restarted)
+        # and wait until the Dashboard REST API is accessible.
         self._ceph_cmd(['mgr', 'module', 'enable', 'telemetry'])
         self.wait_until_rest_api_accessible()
         try:

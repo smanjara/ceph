@@ -9,11 +9,12 @@ import { of } from 'rxjs';
 
 import { configureTestBed, i18nProviders } from '../../../../testing/unit-test-helper';
 import { PoolService } from '../../../shared/api/pool.service';
-import { DeletionModalComponent } from '../../../shared/components/deletion-modal/deletion-modal.component';
+import { CriticalConfirmationModalComponent } from '../../../shared/components/critical-confirmation-modal/critical-confirmation-modal.component';
 import { ExecutingTask } from '../../../shared/models/executing-task';
 import { SummaryService } from '../../../shared/services/summary.service';
 import { TaskWrapperService } from '../../../shared/services/task-wrapper.service';
 import { SharedModule } from '../../../shared/shared.module';
+import { RbdConfigurationListComponent } from '../../block/rbd-configuration-list/rbd-configuration-list.component';
 import { PgCategoryService } from '../../shared/pg-category.service';
 import { Pool } from '../pool';
 import { PoolDetailsComponent } from '../pool-details/pool-details.component';
@@ -39,7 +40,7 @@ describe('PoolListComponent', () => {
   };
 
   configureTestBed({
-    declarations: [PoolListComponent, PoolDetailsComponent],
+    declarations: [PoolListComponent, PoolDetailsComponent, RbdConfigurationListComponent],
     imports: [
       SharedModule,
       ToastModule.forRoot(),
@@ -62,6 +63,10 @@ describe('PoolListComponent', () => {
     expect(component).toBeTruthy();
   });
 
+  it('should have columns that are sortable', () => {
+    expect(component.columns.every((column) => Boolean(column.prop))).toBeTruthy();
+  });
+
   describe('pool deletion', () => {
     let taskWrapper: TaskWrapperService;
 
@@ -72,7 +77,7 @@ describe('PoolListComponent', () => {
 
     const callDeletion = () => {
       component.deletePoolModal();
-      const deletion: DeletionModalComponent = component.modalRef.content;
+      const deletion: CriticalConfirmationModalComponent = component.modalRef.content;
       deletion.submitActionObservable();
     };
 
@@ -176,7 +181,7 @@ describe('PoolListComponent', () => {
 
   describe('getPgStatusCellClass', () => {
     const testMethod = (value, expected) =>
-      expect(component.getPgStatusCellClass({ row: '', column: '', value: value })).toEqual({
+      expect(component.getPgStatusCellClass('', '', value)).toEqual({
         'text-right': true,
         [expected]: true
       });
@@ -205,7 +210,11 @@ describe('PoolListComponent', () => {
     it('transforms pools data correctly', () => {
       const pools = [
         {
-          stats: { rd_bytes: { latest: 6, rate: 4, series: [[0, 2], [1, 6]] } },
+          stats: {
+            bytes_used: { latest: 5, rate: 0, series: [] },
+            max_avail: { latest: 15, rate: 0, series: [] },
+            rd_bytes: { latest: 6, rate: 4, series: [[0, 2], [1, 6]] }
+          },
           pg_status: { 'active+clean': 8, down: 2 }
         }
       ];
@@ -214,23 +223,42 @@ describe('PoolListComponent', () => {
           cdIsBinary: true,
           pg_status: '8 active+clean, 2 down',
           stats: {
-            bytes_used: { latest: 0, rate: 0, series: [] },
-            max_avail: { latest: 0, rate: 0, series: [] },
+            bytes_used: { latest: 5, rate: 0, series: [] },
+            max_avail: { latest: 15, rate: 0, series: [] },
             rd: { latest: 0, rate: 0, series: [] },
             rd_bytes: { latest: 6, rate: 4, series: [2, 6] },
             wr: { latest: 0, rate: 0, series: [] },
             wr_bytes: { latest: 0, rate: 0, series: [] }
-          }
+          },
+          usage: 0.25
         }
       ];
+      expect(component.transformPoolsData(pools)).toEqual(expected);
+    });
 
+    it('transforms pools data correctly if stats are missing', () => {
+      const pools = [{}];
+      const expected = [
+        {
+          cdIsBinary: true,
+          pg_status: '',
+          stats: {
+            bytes_used: { latest: 0, rate: 0, series: [] },
+            max_avail: { latest: 0, rate: 0, series: [] },
+            rd: { latest: 0, rate: 0, series: [] },
+            rd_bytes: { latest: 0, rate: 0, series: [] },
+            wr: { latest: 0, rate: 0, series: [] },
+            wr_bytes: { latest: 0, rate: 0, series: [] }
+          },
+          usage: 0
+        }
+      ];
       expect(component.transformPoolsData(pools)).toEqual(expected);
     });
 
     it('transforms empty pools data correctly', () => {
       const pools = undefined;
       const expected = undefined;
-
       expect(component.transformPoolsData(pools)).toEqual(expected);
     });
   });

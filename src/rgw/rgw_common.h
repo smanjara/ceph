@@ -23,7 +23,6 @@
 #include <boost/utility/string_view.hpp>
 
 #include "common/ceph_crypto.h"
-#include "common/perf_counters.h"
 #include "rgw_acl.h"
 #include "rgw_cors.h"
 #include "rgw_iam_policy.h"
@@ -108,6 +107,8 @@ using ceph::crypto::MD5;
 
 #define RGW_ATTR_COMPRESSION    RGW_ATTR_PREFIX "compression"
 
+#define RGW_ATTR_APPEND_PART_NUM    RGW_ATTR_PREFIX "append_part_num"
+
 /* IAM Policy */
 #define RGW_ATTR_IAM_POLICY	RGW_ATTR_PREFIX "iam-policy"
 #define RGW_ATTR_USER_POLICY    RGW_ATTR_PREFIX "user-policy"
@@ -138,6 +139,7 @@ using ceph::crypto::MD5;
 #define RGW_REST_S3             0x4
 #define RGW_REST_WEBSITE     0x8
 #define RGW_REST_STS            0x10
+#define RGW_REST_IAM            0x20
 
 #define RGW_SUSPENDED_USER_AUID (uint64_t)-2
 
@@ -206,6 +208,7 @@ using ceph::crypto::MD5;
 #define ERR_NO_SUCH_USER         2042
 #define ERR_NO_SUCH_SUBUSER      2043
 #define ERR_MFA_REQUIRED         2044
+#define ERR_NO_SUCH_CORS_CONFIGURATION 2045
 #define ERR_USER_SUSPENDED       2100
 #define ERR_INTERNAL_ERROR       2200
 #define ERR_NOT_IMPLEMENTED      2201
@@ -226,9 +229,13 @@ using ceph::crypto::MD5;
 #define ERR_NO_CORS_FOUND        2216
 #define ERR_INVALID_WEBSITE_ROUTING_RULES_ERROR          2217
 #define ERR_RATE_LIMITED         2218
+#define ERR_POSITION_NOT_EQUAL_TO_LENGTH                 2219
+#define ERR_OBJECT_NOT_APPENDABLE                        2220
+#define ERR_INVALID_BUCKET_STATE                         2221
 
 #define ERR_BUSY_RESHARDING      2300
 #define ERR_NO_SUCH_ENTITY       2301
+#define ERR_LIMIT_EXCEEDED       2302
 
 // STS Errors
 #define ERR_PACKED_POLICY_TOO_LARGE 2400
@@ -241,40 +248,6 @@ using ceph::crypto::MD5;
 struct req_state;
 
 typedef void *RGWAccessHandle;
-
-
-/* perf counter */
-
-extern PerfCounters *perfcounter;
-
-extern int rgw_perf_start(CephContext *cct);
-extern void rgw_perf_stop(CephContext *cct);
-
-enum {
-  l_rgw_first = 15000,
-  l_rgw_req,
-  l_rgw_failed_req,
-
-  l_rgw_get,
-  l_rgw_get_b,
-  l_rgw_get_lat,
-
-  l_rgw_put,
-  l_rgw_put_b,
-  l_rgw_put_lat,
-
-  l_rgw_qlen,
-  l_rgw_qactive,
-
-  l_rgw_cache_hit,
-  l_rgw_cache_miss,
-
-  l_rgw_keystone_token_cache_hit,
-  l_rgw_keystone_token_cache_miss,
-
-  l_rgw_last,
-};
-
 
  /* size should be the required string size + 1 */
 int gen_rand_base64(CephContext *cct, char *dest, int size);
@@ -801,11 +774,15 @@ struct RGWUserInfo
       type(TYPE_NONE) {
   }
 
-  RGWAccessKey* get_key0() {
+  RGWAccessKey* get_key(const string& access_key) {
     if (access_keys.empty())
       return nullptr;
+
+    auto k = access_keys.find(access_key);
+    if (k == access_keys.end())
+      return nullptr;
     else
-      return &(access_keys.begin()->second);
+      return &(k->second);
   }
 
   void encode(bufferlist& bl) const {
@@ -1814,6 +1791,8 @@ struct rgw_obj_key {
     }
   }
 
+  // takes an oid and parses out the namespace (ns), name, and
+  // instance
   static bool parse_raw_oid(const string& oid, rgw_obj_key *key) {
     key->instance.clear();
     key->ns.clear();
@@ -2474,12 +2453,12 @@ rgw::IAM::Effect eval_user_policies(const vector<rgw::IAM::Policy>& user_policie
                           const rgw::IAM::Environment& env,
                           boost::optional<const rgw::auth::Identity&> id,
                           const uint64_t op,
-                          const rgw::IAM::ARN& arn);
+                          const rgw::ARN& arn);
 bool verify_user_permission(const DoutPrefixProvider* dpp,
                             struct req_state * const s,
                             RGWAccessControlPolicy * const user_acl,
                             const vector<rgw::IAM::Policy>& user_policies,
-                            const rgw::IAM::ARN& res,
+                            const rgw::ARN& res,
                             const uint64_t op);
 bool verify_user_permission_no_policy(const DoutPrefixProvider* dpp,
                                       struct req_state * const s,
@@ -2487,7 +2466,7 @@ bool verify_user_permission_no_policy(const DoutPrefixProvider* dpp,
                                       const int perm);
 bool verify_user_permission(const DoutPrefixProvider* dpp,
                             struct req_state * const s,
-                            const rgw::IAM::ARN& res,
+                            const rgw::ARN& res,
                             const uint64_t op);
 bool verify_user_permission_no_policy(const DoutPrefixProvider* dpp,
                                       struct req_state * const s,

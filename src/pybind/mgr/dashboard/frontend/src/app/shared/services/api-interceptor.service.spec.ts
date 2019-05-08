@@ -18,7 +18,7 @@ describe('ApiInterceptorService', () => {
   let router: Router;
   const url = 'api/xyz';
 
-  const httpError = (error, errorOpts, done = (resp) => {}) => {
+  const httpError = (error, errorOpts, done = (_resp) => {}) => {
     httpClient.get(url).subscribe(
       () => {},
       (resp) => {
@@ -170,22 +170,37 @@ describe('ApiInterceptorService', () => {
   });
 
   describe('interceptor error handling', () => {
+    const expectSaveToHaveBeenCalled = (called) => {
+      tick(510);
+      if (called) {
+        expect(notificationService.save).toHaveBeenCalled();
+      } else {
+        expect(notificationService.save).not.toHaveBeenCalled();
+      }
+    };
+
     it('should show default behaviour', fakeAsync(() => {
       httpError(undefined, { status: 500 });
-      tick(10);
-      expect(notificationService.save).toHaveBeenCalled();
+      expectSaveToHaveBeenCalled(true);
     }));
 
     it('should prevent the default behaviour with preventDefault', fakeAsync(() => {
       httpError(undefined, { status: 500 }, (resp) => resp.preventDefault());
-      tick(10);
-      expect(notificationService.save).not.toHaveBeenCalled();
+      expectSaveToHaveBeenCalled(false);
+    }));
+
+    it('should be able to use preventDefault with 400 errors', fakeAsync(() => {
+      httpError(
+        { task: { name: 'someName', metadata: { component: 'someComponent' } } },
+        { status: 400 },
+        (resp) => resp.preventDefault()
+      );
+      expectSaveToHaveBeenCalled(false);
     }));
 
     it('should prevent the default behaviour by status code', fakeAsync(() => {
       httpError(undefined, { status: 500 }, (resp) => resp.ignoreStatusCode(500));
-      tick(10);
-      expect(notificationService.save).not.toHaveBeenCalled();
+      expectSaveToHaveBeenCalled(false);
     }));
 
     it('should use different application icon (default Ceph) in error message', fakeAsync(() => {
@@ -193,7 +208,7 @@ describe('ApiInterceptorService', () => {
       httpError(undefined, { status: 500 }, (resp) => {
         (resp.application = 'Prometheus'), (resp.message = msg);
       });
-      tick(10);
+      expectSaveToHaveBeenCalled(true);
       expect(notificationService.save).toHaveBeenCalledWith(
         createCdNotification(0, '500 - Unknown Error', msg, undefined, 'Prometheus')
       );

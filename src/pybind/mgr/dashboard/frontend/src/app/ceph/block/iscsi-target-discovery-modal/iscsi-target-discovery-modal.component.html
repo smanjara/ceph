@@ -62,7 +62,7 @@
             <span class="help-block"
                   *ngIf="discoveryForm.showError('password', formDir, 'pattern')"
                   i18n>Passwords must have a length of 12 to 16 characters
-              and can only contain letters, '@', '-' or '_'.</span>
+              and can only contain letters, '@', '-', '_' or '/'.</span>
           </div>
         </div>
 
@@ -101,7 +101,7 @@
               <input id="mutual_password"
                      class="form-control"
                      formControlName="mutual_password"
-                     type="mutual_password">
+                     type="password">
 
               <span class="input-group-btn">
                 <button type="button"
@@ -121,7 +121,7 @@
             <span class="help-block"
                   *ngIf="discoveryForm.showError('mutual_password', formDir, 'pattern')"
                   i18n>Passwords must have a length of 12 to 16 characters and
-              can only contain letters, '@', '-' or '_'.</span>
+              can only contain letters, '@', '-', '_' or '/'.</span>
           </div>
         </div>
       </div>
@@ -130,11 +130,12 @@
         <div class="button-group text-right">
           <cd-submit-button (submitAction)="submitAction()"
                             [form]="discoveryForm"
+                            *ngIf="hasPermission"
                             i18n>Submit</cd-submit-button>
-
-          <button class="btn btn-link btn-sm"
-                  (click)="bsModalRef.hide()"
-                  i18n>Cancel</button>
+          <cd-back-button [back]="bsModalRef.hide"
+                          name="Cancel"
+                          i18n-name>
+          </cd-back-button>
         </div>
       </div>
     </form>

@@ -5,6 +5,12 @@ TYPE(real_time_wrapper)
 TYPE(coarse_real_time_wrapper)
 TYPE(timespan_wrapper)
 
+#include "include/utime.h"
+TYPE(utime_t)
+
+#include "include/uuid.h"
+TYPE(uuid_d)
+
 #include "sstring.h"
 TYPE(sstring_wrapper)
 
@@ -98,6 +104,7 @@ TYPE(pg_create_t)
 TYPE(OSDSuperblock)
 TYPE(SnapSet)
 TYPE_FEATUREFUL(watch_info_t)
+TYPE_FEATUREFUL(watch_item_t)
 TYPE(object_manifest_t)
 TYPE_FEATUREFUL(object_info_t)
 TYPE(SnapSet)
@@ -188,7 +195,7 @@ TYPE(LevelDBStoreStats)
 TYPE(ScrubResult)
 
 #include "mon/CreatingPGs.h"
-TYPE(creating_pgs_t)
+TYPE_FEATUREFUL(creating_pgs_t)
 
 #include "mgr/ServiceMap.h"
 TYPE_FEATUREFUL(ServiceMap)
@@ -564,9 +571,6 @@ MESSAGE(MCommandReply)
 #include "messages/MConfig.h"
 MESSAGE(MConfig)
 
-#include "messages/MDataPing.h"
-MESSAGE(MDataPing)
-
 #include "messages/MDentryLink.h"
 MESSAGE(MDentryLink)
 
@@ -764,9 +768,6 @@ MESSAGE(MMonSubscribe)
 
 #include "messages/MMonSubscribeAck.h"
 MESSAGE(MMonSubscribeAck)
-
-#include "messages/MNop.h"
-MESSAGE(MNop)
 
 #include "messages/MOSDAlive.h"
 MESSAGE(MOSDAlive)

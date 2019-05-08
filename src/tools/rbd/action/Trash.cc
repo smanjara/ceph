@@ -38,7 +38,8 @@ static const std::string EXPIRED_BEFORE("expired-before");
 static const std::string THRESHOLD("threshold");
 
 static bool is_not_trash_user(const librbd::trash_image_info_t &trash_info) {
-  return trash_info.source != RBD_TRASH_IMAGE_SOURCE_USER;
+  return trash_info.source != RBD_TRASH_IMAGE_SOURCE_USER &&
+    trash_info.source != RBD_TRASH_IMAGE_SOURCE_USER_PARENT;
 }
 
 void get_move_arguments(po::options_description *positional,
@@ -105,7 +106,7 @@ int execute_move(const po::variables_map &vm,
 void get_remove_arguments(po::options_description *positional,
                           po::options_description *options) {
   positional->add_options()
-    (at::IMAGE_ID.c_str(), "image id\n(example: [<pool-name>/[<namespace-name>/]]<image-id>)");
+    (at::IMAGE_ID.c_str(), "image id\n(example: [<pool-name>/[<namespace>/]]<image-id>)");
   at::add_pool_option(options, at::ARGUMENT_MODIFIER_NONE);
   at::add_namespace_option(options, at::ARGUMENT_MODIFIER_NONE);
   at::add_image_id_option(options);
@@ -265,6 +266,12 @@ int do_list(librbd::RBD &rbd, librados::IoCtx& io_ctx, bool long_flag,
         break;
       case RBD_TRASH_IMAGE_SOURCE_MIGRATION:
         del_source = "MIGRATION";
+        break;
+      case RBD_TRASH_IMAGE_SOURCE_REMOVING:
+        del_source = "REMOVING";
+        break;
+      case RBD_TRASH_IMAGE_SOURCE_USER_PARENT:
+        del_source = "USER_PARENT";
         break;
     }
 

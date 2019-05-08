@@ -11,6 +11,7 @@
 #include "buffer.h"
 
 #include "librados.h"
+#include "librados_fwd.hpp"
 #include "rados_types.hpp"
 
 namespace libradosstriper
@@ -18,37 +19,41 @@ namespace libradosstriper
   class RadosStriper;
 }
 
-namespace librados
-{
-  using ceph::bufferlist;
+namespace librados {
 
-  struct AioCompletionImpl;
+using ceph::bufferlist;
+
+struct AioCompletionImpl;
+struct IoCtxImpl;
+struct ListObjectImpl;
+class NObjectIteratorImpl;
+struct ObjListCtx;
+class ObjectOperationImpl;
+struct PlacementGroupImpl;
+struct PoolAsyncCompletionImpl;
+
+typedef struct rados_cluster_stat_t cluster_stat_t;
+typedef struct rados_pool_stat_t pool_stat_t;
+
+typedef void *list_ctx_t;
+typedef uint64_t auid_t;
+typedef void *config_t;
+
+typedef struct {
+  std::string client;
+  std::string cookie;
+  std::string address;
+} locker_t;
+
+typedef std::map<std::string, pool_stat_t> stats_map;
+
+typedef void *completion_t;
+typedef void (*callback_t)(completion_t cb, void *arg);
+
+inline namespace v14_2_0 {
+
   class IoCtx;
-  struct IoCtxImpl;
-  class ObjectOperationImpl;
-  struct ObjListCtx;
-  struct PoolAsyncCompletionImpl;
   class RadosClient;
-  struct ListObjectImpl;
-  class NObjectIteratorImpl;
-
-  typedef void *list_ctx_t;
-  typedef uint64_t auid_t;
-  typedef void *config_t;
-
-  typedef struct rados_cluster_stat_t cluster_stat_t;
-  typedef struct rados_pool_stat_t pool_stat_t;
-
-  typedef struct {
-    std::string client;
-    std::string cookie;
-    std::string address;
-  } locker_t;
-
-  typedef std::map<std::string, pool_stat_t> stats_map;
-
-  typedef void *completion_t;
-  typedef void (*callback_t)(completion_t cb, void *arg);
 
   class CEPH_RADOS_API ListObject
   {
@@ -64,7 +69,7 @@ namespace librados
   private:
     ListObject(ListObjectImpl *impl);
 
-    friend class NObjectIteratorImpl;
+    friend class librados::NObjectIteratorImpl;
     friend std::ostream& operator<<(std::ostream& out, const ListObject& lop);
 
     ListObjectImpl *impl;
@@ -86,7 +91,7 @@ namespace librados
     void set(rados_object_list_cursor c);
 
     friend class IoCtx;
-    friend class NObjectIteratorImpl;
+    friend class librados::NObjectIteratorImpl;
     friend std::ostream& operator<<(std::ostream& os, const librados::ObjectCursor& oc);
 
     std::string to_str() const;
@@ -112,7 +117,7 @@ namespace librados
     NObjectIterator &operator++(); //< Preincrement; errors are thrown as exceptions
     NObjectIterator operator++(int); //< Postincrement; errors are thrown as exceptions
     friend class IoCtx;
-    friend class NObjectIteratorImpl;
+    friend class librados::NObjectIteratorImpl;
 
     /// get current hash position of the iterator, rounded to the current pg
     uint32_t get_pg_hash_position() const;
@@ -298,12 +303,24 @@ namespace librados
     ObjectOperation();
     virtual ~ObjectOperation();
 
+    ObjectOperation(const ObjectOperation&) = delete;
+    ObjectOperation& operator=(const ObjectOperation&) = delete;
+
+    /**
+     * Move constructor.
+     * \warning A moved from ObjectOperation is invalid and may not be used for
+     *          any purpose. This is a hard contract violation and will
+     *          kill your program.
+     */
+    ObjectOperation(ObjectOperation&&);
+    ObjectOperation& operator =(ObjectOperation&&);
+
     size_t size();
     void set_op_flags(ObjectOperationFlags flags) __attribute__((deprecated));
     //flag mean ObjectOperationFlags
     void set_op_flags2(int flags);
 
-    void cmpext(uint64_t off, bufferlist& cmp_bl, int *prval);
+    void cmpext(uint64_t off, const bufferlist& cmp_bl, int *prval);
     void cmpxattr(const char *name, uint8_t op, const bufferlist& val);
     void cmpxattr(const char *name, uint8_t op, uint64_t v);
     void exec(const char *cls, const char *method, bufferlist& inbl);
@@ -344,9 +361,7 @@ namespace librados
       int *prval);
 
   protected:
-    ObjectOperationImpl *impl;
-    ObjectOperation(const ObjectOperation& rhs);
-    ObjectOperation& operator=(const ObjectOperation& rhs);
+    ObjectOperationImpl* impl;
     friend class IoCtx;
     friend class Rados;
   };
@@ -363,6 +378,9 @@ namespace librados
   public:
     ObjectWriteOperation() : unused(NULL) {}
     ~ObjectWriteOperation() override {}
+
+    ObjectWriteOperation(ObjectWriteOperation&&) = default;
+    ObjectWriteOperation& operator =(ObjectWriteOperation&&) = default;
 
     void mtime(time_t *pt);
     void mtime2(struct timespec *pts);
@@ -490,6 +508,9 @@ namespace librados
   public:
     ObjectReadOperation() {}
     ~ObjectReadOperation() override {}
+
+    ObjectReadOperation(ObjectReadOperation&&) = default;
+    ObjectReadOperation& operator =(ObjectReadOperation&&) = default;
 
     void stat(uint64_t *psize, time_t *pmtime, int *prval);
     void stat2(uint64_t *psize, struct timespec *pts, int *prval);
@@ -1281,7 +1302,6 @@ namespace librados
     IoCtxImpl *io_ctx_impl;
   };
 
-  struct PlacementGroupImpl;
   struct CEPH_RADOS_API PlacementGroup {
     PlacementGroup();
     PlacementGroup(const PlacementGroup&);
@@ -1453,7 +1473,9 @@ namespace librados
     const Rados& operator=(const Rados& rhs);
     RadosClient *client;
   };
-}
+
+} // namespace v14_2_0
+} // namespace librados
 
 #endif
 

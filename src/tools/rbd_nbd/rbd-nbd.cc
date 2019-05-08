@@ -89,7 +89,7 @@ static void usage()
             << "               unmap <device|image-or-snap-spec>   Unmap nbd device\n"
             << "               [options] list-mapped               List mapped nbd devices\n"
             << "Map options:\n"
-            << "  --device <device path>  Specify nbd device path\n"
+            << "  --device <device path>  Specify nbd device path (/dev/nbd{num})\n"
             << "  --read-only             Map read-only\n"
             << "  --nbds_max <limit>      Override for module param nbds_max\n"
             << "  --max_part <limit>      Override for module param max_part\n"
@@ -782,7 +782,10 @@ static int do_map(int argc, const char *argv[], Config *cfg)
     }
   } else {
     r = sscanf(cfg->devpath.c_str(), "/dev/nbd%d", &index);
-    if (r < 0) {
+    if (r <= 0) {
+      // mean an early matching failure. But some cases need a negative value.
+      if (r == 0)
+	r = -EINVAL;
       cerr << "rbd-nbd: invalid device path: " << cfg->devpath
            << " (expected /dev/nbd{num})" << std::endl;
       goto close_fd;
@@ -1044,7 +1047,7 @@ static int parse_args(vector<const char*>& args, std::ostream *err_msg,
   } else {
     config.parse_config_files(nullptr, nullptr, 0);
   }
-  config.parse_env();
+  config.parse_env(CEPH_ENTITY_TYPE_CLIENT);
   config.parse_argv(args);
   cfg->poolname = config.get_val<std::string>("rbd_default_pool");
 

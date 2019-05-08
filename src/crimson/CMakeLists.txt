@@ -70,6 +70,7 @@ add_library(crimson-common STATIC
   ${PROJECT_SOURCE_DIR}/src/common/Thread.cc
   ${PROJECT_SOURCE_DIR}/src/common/HeartbeatMap.cc
   ${PROJECT_SOURCE_DIR}/src/common/PluginRegistry.cc
+  ${PROJECT_SOURCE_DIR}/src/global/pidfile.cc
   ${PROJECT_SOURCE_DIR}/src/librbd/Features.cc
   ${PROJECT_SOURCE_DIR}/src/log/Log.cc
   ${PROJECT_SOURCE_DIR}/src/mgr/ServiceMap.cc
@@ -80,6 +81,7 @@ add_library(crimson-common STATIC
   ${PROJECT_SOURCE_DIR}/src/mds/MDSMap.cc
   ${PROJECT_SOURCE_DIR}/src/msg/msg_types.cc
   ${PROJECT_SOURCE_DIR}/src/msg/Message.cc
+  ${PROJECT_SOURCE_DIR}/src/mon/PGMap.cc
   ${PROJECT_SOURCE_DIR}/src/mon/MonCap.cc
   ${PROJECT_SOURCE_DIR}/src/mon/MonMap.cc
   ${PROJECT_SOURCE_DIR}/src/osd/osd_types.cc
@@ -111,21 +113,26 @@ target_link_libraries(crimson-common
 
 set(crimson_auth_srcs
   auth/KeyRing.cc)
+set(crimson_mgr_srcs
+  mgr/client.cc)
 set(crimson_mon_srcs
   mon/MonClient.cc
   ${PROJECT_SOURCE_DIR}/src/mon/MonSub.cc)
 set(crimson_net_srcs
-  net/Dispatcher.cc
   net/Errors.cc
   net/Messenger.cc
   net/SocketConnection.cc
   net/SocketMessenger.cc
-  net/Socket.cc)
+  net/Socket.cc
+  net/Protocol.cc
+  net/ProtocolV1.cc
+  net/ProtocolV2.cc)
 set(crimson_thread_srcs
   thread/ThreadPool.cc
   thread/Throttle.cc)
 add_library(crimson STATIC
   ${crimson_auth_srcs}
+  ${crimson_mgr_srcs}
   ${crimson_mon_srcs}
   ${crimson_net_srcs}
   ${crimson_thread_srcs}

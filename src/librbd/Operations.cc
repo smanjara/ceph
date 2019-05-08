@@ -36,6 +36,7 @@
 #include "librbd/operation/SnapshotRollbackRequest.h"
 #include "librbd/operation/SnapshotUnprotectRequest.h"
 #include "librbd/operation/SnapshotLimitRequest.h"
+#include "librbd/operation/SparsifyRequest.h"
 #include <set>
 #include <boost/bind.hpp>
 #include <boost/scope_exit.hpp>
@@ -177,15 +178,15 @@ struct C_InvokeAsyncRequest : public Context {
     // context can complete before owner_lock is unlocked
     RWLock &owner_lock(image_ctx.owner_lock);
     owner_lock.get_read();
-    image_ctx.snap_lock.get_read();
+    image_ctx.image_lock.get_read();
     if (image_ctx.read_only ||
         (!permit_snapshot && image_ctx.snap_id != CEPH_NOSNAP)) {
-      image_ctx.snap_lock.put_read();
+      image_ctx.image_lock.put_read();
       owner_lock.put_read();
       complete(-EROFS);
       return;
     }
-    image_ctx.snap_lock.put_read();
+    image_ctx.image_lock.put_read();
 
     if (image_ctx.exclusive_lock == nullptr) {
       send_local_request();
@@ -347,7 +348,7 @@ int Operations<I>::flatten(ProgressContext &prog_ctx) {
   }
 
   {
-    RWLock::RLocker parent_locker(m_image_ctx.parent_lock);
+    RWLock::RLocker image_locker(m_image_ctx.image_lock);
     if (m_image_ctx.parent_md.spec.pool_id == -1) {
       lderr(cct) << "image has no parent" << dendl;
       return -EINVAL;
@@ -384,21 +385,18 @@ void Operations<I>::execute_flatten(ProgressContext &prog_ctx,
     return;
   }
 
-  m_image_ctx.snap_lock.get_read();
-  m_image_ctx.parent_lock.get_read();
+  m_image_ctx.image_lock.get_read();
 
   // can't flatten a non-clone
   if (m_image_ctx.parent_md.spec.pool_id == -1) {
     lderr(cct) << "image has no parent" << dendl;
-    m_image_ctx.parent_lock.put_read();
-    m_image_ctx.snap_lock.put_read();
+    m_image_ctx.image_lock.put_read();
     on_finish->complete(-EINVAL);
     return;
   }
   if (m_image_ctx.snap_id != CEPH_NOSNAP) {
     lderr(cct) << "snapshots cannot be flattened" << dendl;
-    m_image_ctx.parent_lock.put_read();
-    m_image_ctx.snap_lock.put_read();
+    m_image_ctx.image_lock.put_read();
     on_finish->complete(-EROFS);
     return;
   }
@@ -413,8 +411,7 @@ void Operations<I>::execute_flatten(ProgressContext &prog_ctx,
   uint64_t overlap_objects = Striper::get_num_objects(m_image_ctx.layout,
                                                       overlap);
 
-  m_image_ctx.parent_lock.put_read();
-  m_image_ctx.snap_lock.put_read();
+  m_image_ctx.image_lock.put_read();
 
   operation::FlattenRequest<I> *req = new operation::FlattenRequest<I>(
     m_image_ctx, new C_NotifyUpdate<I>(m_image_ctx, on_finish), overlap_objects,
@@ -576,13 +573,13 @@ void Operations<I>::execute_rename(const std::string &dest_name,
     return;
   }
 
-  m_image_ctx.snap_lock.get_read();
+  m_image_ctx.image_lock.get_read();
   if (m_image_ctx.name == dest_name) {
-    m_image_ctx.snap_lock.put_read();
+    m_image_ctx.image_lock.put_read();
     on_finish->complete(-EEXIST);
     return;
   }
-  m_image_ctx.snap_lock.put_read();
+  m_image_ctx.image_lock.put_read();
 
   CephContext *cct = m_image_ctx.cct;
   ldout(cct, 5) << this << " " << __func__ << ": dest_name=" << dest_name
@@ -615,11 +612,11 @@ template <typename I>
 int Operations<I>::resize(uint64_t size, bool allow_shrink, ProgressContext& prog_ctx) {
   CephContext *cct = m_image_ctx.cct;
 
-  m_image_ctx.snap_lock.get_read();
+  m_image_ctx.image_lock.get_read();
   ldout(cct, 5) << this << " " << __func__ << ": "
                 << "size=" << m_image_ctx.size << ", "
                 << "new_size=" << size << dendl;
-  m_image_ctx.snap_lock.put_read();
+  m_image_ctx.image_lock.put_read();
 
   int r = m_image_ctx.state->refresh_if_required();
   if (r < 0) {
@@ -654,24 +651,24 @@ void Operations<I>::execute_resize(uint64_t size, bool allow_shrink, ProgressCon
               m_image_ctx.exclusive_lock->is_lock_owner());
 
   CephContext *cct = m_image_ctx.cct;
-  m_image_ctx.snap_lock.get_read();
+  m_image_ctx.image_lock.get_read();
   ldout(cct, 5) << this << " " << __func__ << ": "
                 << "size=" << m_image_ctx.size << ", "
                 << "new_size=" << size << dendl;
 
   if (m_image_ctx.snap_id != CEPH_NOSNAP || m_image_ctx.read_only ||
       m_image_ctx.operations_disabled) {
-    m_image_ctx.snap_lock.put_read();
+    m_image_ctx.image_lock.put_read();
     on_finish->complete(-EROFS);
     return;
   } else if (m_image_ctx.test_features(RBD_FEATURE_OBJECT_MAP,
-                                       m_image_ctx.snap_lock) &&
+                                       m_image_ctx.image_lock) &&
              !ObjectMap<>::is_compatible(m_image_ctx.layout, size)) {
-    m_image_ctx.snap_lock.put_read();
+    m_image_ctx.image_lock.put_read();
     on_finish->complete(-EINVAL);
     return;
   }
-  m_image_ctx.snap_lock.put_read();
+  m_image_ctx.image_lock.put_read();
 
   operation::ResizeRequest<I> *req = new operation::ResizeRequest<I>(
     m_image_ctx, new C_NotifyUpdate<I>(m_image_ctx, on_finish), size, allow_shrink,
@@ -716,13 +713,13 @@ void Operations<I>::snap_create(const cls::rbd::SnapshotNamespace &snap_namespac
     return;
   }
 
-  m_image_ctx.snap_lock.get_read();
+  m_image_ctx.image_lock.get_read();
   if (m_image_ctx.get_snap_id(snap_namespace, snap_name) != CEPH_NOSNAP) {
-    m_image_ctx.snap_lock.put_read();
+    m_image_ctx.image_lock.put_read();
     on_finish->complete(-EEXIST);
     return;
   }
-  m_image_ctx.snap_lock.put_read();
+  m_image_ctx.image_lock.put_read();
 
   C_InvokeAsyncRequest<I> *req = new C_InvokeAsyncRequest<I>(
     m_image_ctx, "snap_create", true,
@@ -753,13 +750,13 @@ void Operations<I>::execute_snap_create(const cls::rbd::SnapshotNamespace &snap_
     return;
   }
 
-  m_image_ctx.snap_lock.get_read();
+  m_image_ctx.image_lock.get_read();
   if (m_image_ctx.get_snap_id(snap_namespace, snap_name) != CEPH_NOSNAP) {
-    m_image_ctx.snap_lock.put_read();
+    m_image_ctx.image_lock.put_read();
     on_finish->complete(-EEXIST);
     return;
   }
-  m_image_ctx.snap_lock.put_read();
+  m_image_ctx.image_lock.put_read();
 
   operation::SnapshotCreateRequest<I> *req =
     new operation::SnapshotCreateRequest<I>(
@@ -784,8 +781,8 @@ int Operations<I>::snap_rollback(const cls::rbd::SnapshotNamespace& snap_namespa
   {
     RWLock::RLocker owner_locker(m_image_ctx.owner_lock);
     {
-      // need to drop snap_lock before invalidating cache
-      RWLock::RLocker snap_locker(m_image_ctx.snap_lock);
+      // need to drop image_lock before invalidating cache
+      RWLock::RLocker image_locker(m_image_ctx.image_lock);
       if (!m_image_ctx.snap_exists) {
         return -ENOENT;
       }
@@ -833,17 +830,17 @@ void Operations<I>::execute_snap_rollback(const cls::rbd::SnapshotNamespace& sna
     return;
   }
 
-  m_image_ctx.snap_lock.get_read();
+  m_image_ctx.image_lock.get_read();
   uint64_t snap_id = m_image_ctx.get_snap_id(snap_namespace, snap_name);
   if (snap_id == CEPH_NOSNAP) {
     lderr(cct) << "No such snapshot found." << dendl;
-    m_image_ctx.snap_lock.put_read();
+    m_image_ctx.image_lock.put_read();
     on_finish->complete(-ENOENT);
     return;
   }
 
   uint64_t new_size = m_image_ctx.get_image_size(snap_id);
-  m_image_ctx.snap_lock.put_read();
+  m_image_ctx.image_lock.put_read();
 
   // async mode used for journal replay
   operation::SnapshotRollbackRequest<I> *request =
@@ -891,16 +888,16 @@ void Operations<I>::snap_remove(const cls::rbd::SnapshotNamespace& snap_namespac
   }
 
   // quickly filter out duplicate ops
-  m_image_ctx.snap_lock.get_read();
+  m_image_ctx.image_lock.get_read();
   if (m_image_ctx.get_snap_id(snap_namespace, snap_name) == CEPH_NOSNAP) {
-    m_image_ctx.snap_lock.put_read();
+    m_image_ctx.image_lock.put_read();
     on_finish->complete(-ENOENT);
     return;
   }
 
   bool proxy_op = ((m_image_ctx.features & RBD_FEATURE_FAST_DIFF) != 0 ||
                    (m_image_ctx.features & RBD_FEATURE_JOURNALING) != 0);
-  m_image_ctx.snap_lock.put_read();
+  m_image_ctx.image_lock.put_read();
 
   if (proxy_op) {
     C_InvokeAsyncRequest<I> *req = new C_InvokeAsyncRequest<I>(
@@ -937,11 +934,11 @@ void Operations<I>::execute_snap_remove(const cls::rbd::SnapshotNamespace& snap_
     return;
   }
 
-  m_image_ctx.snap_lock.get_read();
+  m_image_ctx.image_lock.get_read();
   uint64_t snap_id = m_image_ctx.get_snap_id(snap_namespace, snap_name);
   if (snap_id == CEPH_NOSNAP) {
     lderr(m_image_ctx.cct) << "No such snapshot found." << dendl;
-    m_image_ctx.snap_lock.put_read();
+    m_image_ctx.image_lock.put_read();
     on_finish->complete(-ENOENT);
     return;
   }
@@ -949,16 +946,16 @@ void Operations<I>::execute_snap_remove(const cls::rbd::SnapshotNamespace& snap_
   bool is_protected;
   int r = m_image_ctx.is_snap_protected(snap_id, &is_protected);
   if (r < 0) {
-    m_image_ctx.snap_lock.put_read();
+    m_image_ctx.image_lock.put_read();
     on_finish->complete(r);
     return;
   } else if (is_protected) {
     lderr(m_image_ctx.cct) << "snapshot is protected" << dendl;
-    m_image_ctx.snap_lock.put_read();
+    m_image_ctx.image_lock.put_read();
     on_finish->complete(-EBUSY);
     return;
   }
-  m_image_ctx.snap_lock.put_read();
+  m_image_ctx.image_lock.put_read();
 
   operation::SnapshotRemoveRequest<I> *req =
     new operation::SnapshotRemoveRequest<I>(
@@ -984,7 +981,7 @@ int Operations<I>::snap_rename(const char *srcname, const char *dstname) {
     return r;
 
   {
-    RWLock::RLocker l(m_image_ctx.snap_lock);
+    RWLock::RLocker l(m_image_ctx.image_lock);
     snap_id = m_image_ctx.get_snap_id(cls::rbd::UserSnapshotNamespace(), srcname);
     if (snap_id == CEPH_NOSNAP) {
       return -ENOENT;
@@ -1036,15 +1033,15 @@ void Operations<I>::execute_snap_rename(const uint64_t src_snap_id,
     return;
   }
 
-  m_image_ctx.snap_lock.get_read();
+  m_image_ctx.image_lock.get_read();
   if (m_image_ctx.get_snap_id(cls::rbd::UserSnapshotNamespace(),
 			      dest_snap_name) != CEPH_NOSNAP) {
     // Renaming is supported for snapshots from user namespace only.
-    m_image_ctx.snap_lock.put_read();
+    m_image_ctx.image_lock.put_read();
     on_finish->complete(-EEXIST);
     return;
   }
-  m_image_ctx.snap_lock.put_read();
+  m_image_ctx.image_lock.put_read();
 
   CephContext *cct = m_image_ctx.cct;
   ldout(cct, 5) << this << " " << __func__ << ": "
@@ -1080,7 +1077,7 @@ int Operations<I>::snap_protect(const cls::rbd::SnapshotNamespace& snap_namespac
   }
 
   {
-    RWLock::RLocker snap_locker(m_image_ctx.snap_lock);
+    RWLock::RLocker image_locker(m_image_ctx.image_lock);
     bool is_protected;
     r = m_image_ctx.is_snap_protected(m_image_ctx.get_snap_id(snap_namespace, snap_name),
                                       &is_protected);
@@ -1133,20 +1130,20 @@ void Operations<I>::execute_snap_protect(const cls::rbd::SnapshotNamespace& snap
     return;
   }
 
-  m_image_ctx.snap_lock.get_read();
+  m_image_ctx.image_lock.get_read();
   bool is_protected;
   int r = m_image_ctx.is_snap_protected(m_image_ctx.get_snap_id(snap_namespace, snap_name),
                                         &is_protected);
   if (r < 0) {
-    m_image_ctx.snap_lock.put_read();
+    m_image_ctx.image_lock.put_read();
     on_finish->complete(r);
     return;
   } else if (is_protected) {
-    m_image_ctx.snap_lock.put_read();
+    m_image_ctx.image_lock.put_read();
     on_finish->complete(-EBUSY);
     return;
   }
-  m_image_ctx.snap_lock.put_read();
+  m_image_ctx.image_lock.put_read();
 
   CephContext *cct = m_image_ctx.cct;
   ldout(cct, 5) << this << " " << __func__ << ": snap_name=" << snap_name
@@ -1175,7 +1172,7 @@ int Operations<I>::snap_unprotect(const cls::rbd::SnapshotNamespace& snap_namesp
   }
 
   {
-    RWLock::RLocker snap_locker(m_image_ctx.snap_lock);
+    RWLock::RLocker image_locker(m_image_ctx.image_lock);
     bool is_unprotected;
     r = m_image_ctx.is_snap_unprotected(m_image_ctx.get_snap_id(snap_namespace, snap_name),
                                   &is_unprotected);
@@ -1228,20 +1225,20 @@ void Operations<I>::execute_snap_unprotect(const cls::rbd::SnapshotNamespace& sn
     return;
   }
 
-  m_image_ctx.snap_lock.get_read();
+  m_image_ctx.image_lock.get_read();
   bool is_unprotected;
   int r = m_image_ctx.is_snap_unprotected(m_image_ctx.get_snap_id(snap_namespace, snap_name),
                                           &is_unprotected);
   if (r < 0) {
-    m_image_ctx.snap_lock.put_read();
+    m_image_ctx.image_lock.put_read();
     on_finish->complete(r);
     return;
   } else if (is_unprotected) {
-    m_image_ctx.snap_lock.put_read();
+    m_image_ctx.image_lock.put_read();
     on_finish->complete(-EINVAL);
     return;
   }
-  m_image_ctx.snap_lock.put_read();
+  m_image_ctx.image_lock.put_read();
 
   CephContext *cct = m_image_ctx.cct;
   ldout(cct, 5) << this << " " << __func__ << ": snap_name=" << snap_name
@@ -1337,7 +1334,7 @@ int Operations<I>::update_features(uint64_t features, bool enabled) {
     return -EINVAL;
   }
   {
-    RWLock::RLocker snap_locker(m_image_ctx.snap_lock);
+    RWLock::RLocker image_locker(m_image_ctx.image_lock);
     if (enabled && (features & m_image_ctx.features) != 0) {
       lderr(cct) << "one or more requested features are already enabled"
 		 << dendl;
@@ -1354,13 +1351,13 @@ int Operations<I>::update_features(uint64_t features, bool enabled) {
   // when acquiring the exclusive lock in case the journal is corrupt
   bool disabling_journal = false;
   if (!enabled && ((features & RBD_FEATURE_JOURNALING) != 0)) {
-    RWLock::WLocker snap_locker(m_image_ctx.snap_lock);
+    RWLock::WLocker image_locker(m_image_ctx.image_lock);
     m_image_ctx.set_journal_policy(new journal::DisabledPolicy());
     disabling_journal = true;
   }
   BOOST_SCOPE_EXIT_ALL( (this)(disabling_journal) ) {
     if (disabling_journal) {
-      RWLock::WLocker snap_locker(m_image_ctx.snap_lock);
+      RWLock::WLocker image_locker(m_image_ctx.image_lock);
       m_image_ctx.set_journal_policy(
         new journal::StandardPolicy<I>(&m_image_ctx));
     }
@@ -1574,7 +1571,7 @@ int Operations<I>::migrate(ProgressContext &prog_ctx) {
   }
 
   {
-    RWLock::RLocker parent_locker(m_image_ctx.parent_lock);
+    RWLock::RLocker image_locker(m_image_ctx.image_lock);
     if (m_image_ctx.migration_info.empty()) {
       lderr(cct) << "image has no migrating parent" << dendl;
       return -EINVAL;
@@ -1611,29 +1608,75 @@ void Operations<I>::execute_migrate(ProgressContext &prog_ctx,
     return;
   }
 
-  m_image_ctx.snap_lock.get_read();
-  m_image_ctx.parent_lock.get_read();
+  m_image_ctx.image_lock.get_read();
 
   if (m_image_ctx.migration_info.empty()) {
     lderr(cct) << "image has no migrating parent" << dendl;
-    m_image_ctx.parent_lock.put_read();
-    m_image_ctx.snap_lock.put_read();
+    m_image_ctx.image_lock.put_read();
     on_finish->complete(-EINVAL);
     return;
   }
   if (m_image_ctx.snap_id != CEPH_NOSNAP) {
     lderr(cct) << "snapshots cannot be migrated" << dendl;
-    m_image_ctx.parent_lock.put_read();
-    m_image_ctx.snap_lock.put_read();
+    m_image_ctx.image_lock.put_read();
     on_finish->complete(-EROFS);
     return;
   }
 
-  m_image_ctx.parent_lock.put_read();
-  m_image_ctx.snap_lock.put_read();
+  m_image_ctx.image_lock.put_read();
 
   operation::MigrateRequest<I> *req = new operation::MigrateRequest<I>(
     m_image_ctx, new C_NotifyUpdate<I>(m_image_ctx, on_finish), prog_ctx);
+  req->send();
+}
+
+template <typename I>
+int Operations<I>::sparsify(size_t sparse_size, ProgressContext &prog_ctx) {
+  CephContext *cct = m_image_ctx.cct;
+  ldout(cct, 20) << "sparsify" << dendl;
+  
+  if (sparse_size < 4096 || sparse_size > m_image_ctx.get_object_size() ||
+      (sparse_size & (sparse_size - 1)) != 0) {
+    lderr(cct) << "sparse size should be power of two not less than 4096"
+               << " and not larger image object size" << dendl;
+    return -EINVAL;
+  }
+
+  uint64_t request_id = ++m_async_request_seq;
+  int r = invoke_async_request("sparsify", false,
+                               boost::bind(&Operations<I>::execute_sparsify,
+                                           this, sparse_size,
+                                           boost::ref(prog_ctx), _1),
+                               boost::bind(&ImageWatcher<I>::notify_sparsify,
+                                           m_image_ctx.image_watcher,
+                                           request_id, sparse_size,
+                                           boost::ref(prog_ctx), _1));
+  if (r < 0 && r != -EINVAL) {
+    return r;
+  }
+  ldout(cct, 20) << "resparsify finished" << dendl;
+  return 0;
+}
+
+template <typename I>
+void Operations<I>::execute_sparsify(size_t sparse_size,
+                                     ProgressContext &prog_ctx,
+                                     Context *on_finish) {
+  ceph_assert(m_image_ctx.owner_lock.is_locked());
+  ceph_assert(m_image_ctx.exclusive_lock == nullptr ||
+              m_image_ctx.exclusive_lock->is_lock_owner());
+
+  CephContext *cct = m_image_ctx.cct;
+  ldout(cct, 20) << "sparsify" << dendl;
+
+  if (m_image_ctx.operations_disabled) {
+    on_finish->complete(-EROFS);
+    return;
+  }
+
+  auto req = new operation::SparsifyRequest<I>(
+    m_image_ctx, sparse_size, new C_NotifyUpdate<I>(m_image_ctx, on_finish),
+    prog_ctx);
   req->send();
 }
 

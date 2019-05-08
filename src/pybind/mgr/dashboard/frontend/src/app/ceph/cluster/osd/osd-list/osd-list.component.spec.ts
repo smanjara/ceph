@@ -4,6 +4,7 @@ import { ReactiveFormsModule } from '@angular/forms';
 import { By } from '@angular/platform-browser';
 import { RouterTestingModule } from '@angular/router/testing';
 
+import _ = require('lodash');
 import { BsModalService } from 'ngx-bootstrap/modal';
 import { TabsModule } from 'ngx-bootstrap/tabs';
 import { EMPTY, of } from 'rxjs';
@@ -32,6 +33,7 @@ describe('OsdListComponent', () => {
   let component: OsdListComponent;
   let fixture: ComponentFixture<OsdListComponent>;
   let modalServiceShowSpy: jasmine.Spy;
+  let osdService: OsdService;
 
   const fakeAuthStorageService = {
     getPermissions: () => {
@@ -92,12 +94,80 @@ describe('OsdListComponent', () => {
     fixture = TestBed.createComponent(OsdListComponent);
     fixture.detectChanges();
     component = fixture.componentInstance;
+    osdService = TestBed.get(OsdService);
     modalServiceShowSpy = spyOn(TestBed.get(BsModalService), 'show').and.stub();
   });
 
   it('should create', () => {
     fixture.detectChanges();
     expect(component).toBeTruthy();
+  });
+
+  it('should have columns that are sortable', () => {
+    expect(component.columns.every((column) => Boolean(column.prop))).toBeTruthy();
+  });
+
+  describe('getOsdList', () => {
+    let osds;
+
+    const createOsd = (n: number) => ({
+      in: 'in',
+      up: 'up',
+      stats_history: {
+        op_out_bytes: [[n, n], [n * 2, n * 2]],
+        op_in_bytes: [[n * 3, n * 3], [n * 4, n * 4]]
+      },
+      stats: {
+        stat_bytes_used: n * n,
+        stat_bytes: n * n * n
+      }
+    });
+
+    const expectAttributeOnEveryOsd = (attr: string) =>
+      expect(component.osds.every((osd) => Boolean(_.get(osd, attr)))).toBeTruthy();
+
+    beforeEach(() => {
+      spyOn(osdService, 'getList').and.callFake(() => of(osds));
+      osds = [createOsd(1), createOsd(2), createOsd(3)];
+      component.getOsdList();
+    });
+
+    it('should replace "this.osds" with new data', () => {
+      expect(component.osds.length).toBe(3);
+      expect(osdService.getList).toHaveBeenCalledTimes(1);
+
+      osds = [createOsd(4)];
+      component.getOsdList();
+      expect(component.osds.length).toBe(1);
+      expect(osdService.getList).toHaveBeenCalledTimes(2);
+    });
+
+    it('should have custom attribute "collectedStates"', () => {
+      expectAttributeOnEveryOsd('collectedStates');
+      expect(component.osds[0].collectedStates).toEqual(['in', 'up']);
+    });
+
+    it('should have custom attribute "stats_history.out_bytes"', () => {
+      expectAttributeOnEveryOsd('stats_history.out_bytes');
+      expect(component.osds[0].stats_history.out_bytes).toEqual([1, 2]);
+    });
+
+    it('should have custom attribute "stats_history.in_bytes"', () => {
+      expectAttributeOnEveryOsd('stats_history.in_bytes');
+      expect(component.osds[0].stats_history.in_bytes).toEqual([3, 4]);
+    });
+
+    it('should have custom attribute "stats.usage"', () => {
+      expectAttributeOnEveryOsd('stats.usage');
+      expect(component.osds[0].stats.usage).toBe(1);
+      expect(component.osds[1].stats.usage).toBe(0.5);
+      expect(component.osds[2].stats.usage).toBe(3 / 9);
+    });
+
+    it('should have custom attribute "cdIsBinary" to be true', () => {
+      expectAttributeOnEveryOsd('cdIsBinary');
+      expect(component.osds[0].cdIsBinary).toBe(true);
+    });
   });
 
   describe('show table actions as defined', () => {
@@ -160,7 +230,8 @@ describe('OsdListComponent', () => {
     const expectOpensModal = (actionName: string, modalClass): void => {
       openActionModal(actionName);
 
-      expect(modalServiceShowSpy.calls.any()).toBe(true, 'modalService.show called');
+      // @TODO: check why tsc is complaining when passing 'expectationFailOutput' param.
+      expect(modalServiceShowSpy.calls.any()).toBeTruthy();
       expect(modalServiceShowSpy.calls.first().args[0]).toBe(modalClass);
 
       modalServiceShowSpy.calls.reset();
@@ -181,7 +252,7 @@ describe('OsdListComponent', () => {
       const modalClass = CriticalConfirmationModalComponent;
       mockSafeToDestroy();
       expectOpensModal('Mark Lost', modalClass);
-      expectOpensModal('Remove', modalClass);
+      expectOpensModal('Purge', modalClass);
       expectOpensModal('Destroy', modalClass);
     });
   });
@@ -189,11 +260,9 @@ describe('OsdListComponent', () => {
   describe('tests if the correct methods are called on confirmation', () => {
     const expectOsdServiceMethodCalled = (
       actionName: string,
-      osdServiceMethodName: string
+      osdServiceMethodName: 'markOut' | 'markIn' | 'markDown' | 'markLost' | 'purge' | 'destroy'
     ): void => {
-      const osdServiceSpy = spyOn(TestBed.get(OsdService), osdServiceMethodName).and.callFake(
-        () => EMPTY
-      );
+      const osdServiceSpy = spyOn(osdService, osdServiceMethodName).and.callFake(() => EMPTY);
       openActionModal(actionName);
       const initialState = modalServiceShowSpy.calls.first().args[1].initialState;
       const submit = initialState.onSubmit || initialState.submitAction;
@@ -216,7 +285,7 @@ describe('OsdListComponent', () => {
     it('calls the corresponding service methods in critical confirmation modals', () => {
       mockSafeToDestroy();
       expectOsdServiceMethodCalled('Mark Lost', 'markLost');
-      expectOsdServiceMethodCalled('Remove', 'remove');
+      expectOsdServiceMethodCalled('Purge', 'purge');
       expectOsdServiceMethodCalled('Destroy', 'destroy');
     });
   });

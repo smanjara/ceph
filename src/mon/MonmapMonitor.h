@@ -29,10 +29,6 @@
 #include "MonMap.h"
 #include "MonitorDBStore.h"
 
-class MMonMap;
-class MMonCommand;
-class MMonJoin;
-
 class MonmapMonitor : public PaxosService {
  public:
   MonmapMonitor(Monitor *mn, Paxos *p, const string& service_name)
@@ -75,6 +71,8 @@ class MonmapMonitor : public PaxosService {
   bool should_propose(double& delay) override;
 
   void check_sub(Subscription *sub);
+
+  void tick() override;
 
 private:
   void check_subs();

@@ -11,13 +11,13 @@
 #include "librbd/ExclusiveLock.h"
 #include "librbd/ImageCtx.h"
 #include "librbd/ImageState.h"
-#include "librbd/Utils.h"
-#include "librbd/image/CloneRequest.h"
-#include "librbd/image/RemoveRequest.h"
 #include "librbd/internal.h"
 #include "librbd/Utils.h"
 #include "librbd/api/Config.h"
 #include "librbd/api/Trash.h"
+#include "librbd/image/CloneRequest.h"
+#include "librbd/image/RemoveRequest.h"
+#include "librbd/image/PreRemoveRequest.h"
 #include <boost/scope_exit.hpp>
 
 #define dout_subsys ceph_subsys_rbd
@@ -57,6 +57,22 @@ bool compare(const librbd::linked_image_spec_t& lhs,
   return false;
 }
 
+template <typename I>
+int pre_remove_image(librados::IoCtx& io_ctx, const std::string& image_id) {
+  I *image_ctx = I::create("", image_id, nullptr, io_ctx, false);
+  int r = image_ctx->state->open(OPEN_FLAG_SKIP_OPEN_PARENT);
+  if (r < 0) {
+    return r;
+  }
+
+  C_SaferCond ctx;
+  auto req = image::PreRemoveRequest<I>::create(image_ctx, false, &ctx);
+  req->send();
+
+  r = ctx.wait();
+  image_ctx->state->close();
+  return r;
+}
 
 } // anonymous namespace
 
@@ -70,7 +86,7 @@ int Image<I>::get_op_features(I *ictx, uint64_t *op_features) {
     return r;
   }
 
-  RWLock::RLocker snap_locker(ictx->snap_lock);
+  RWLock::RLocker image_locker(ictx->image_lock);
   *op_features = ictx->op_features;
   return 0;
 }
@@ -94,7 +110,7 @@ int Image<I>::list_images(librados::IoCtx& io_ctx,
       return r;
     }
 
-    // old format images are in a tmap
+    // V1 format images are in a tmap
     if (bl.length()) {
       auto p = bl.cbegin();
       bufferlist header;
@@ -107,6 +123,7 @@ int Image<I>::list_images(librados::IoCtx& io_ctx,
     }
   }
 
+  // V2 format images
   std::map<std::string, std::string> image_names_to_ids;
   r = list_images_v2(io_ctx, &image_names_to_ids);
   if (r < 0) {
@@ -117,6 +134,22 @@ int Image<I>::list_images(librados::IoCtx& io_ctx,
   for (const auto& img_pair : image_names_to_ids) {
     images->push_back({.id = img_pair.second,
                        .name = img_pair.first});
+  }
+
+  // include V2 images in a partially removed state
+  std::vector<librbd::trash_image_info_t> trash_images;
+  r = Trash<I>::list(io_ctx, trash_images, false);
+  if (r < 0 && r != -EOPNOTSUPP) {
+    lderr(cct) << "error listing trash images: " << cpp_strerror(r) << dendl;
+    return r;
+  }
+
+  for (const auto& trash_image : trash_images) {
+    if (trash_image.source == RBD_TRASH_IMAGE_SOURCE_REMOVING) {
+      images->push_back({.id = trash_image.id,
+                         .name = trash_image.name});
+
+    }
   }
 
   return 0;
@@ -167,14 +200,12 @@ int Image<I>::get_parent(I *ictx,
     return r;
   }
 
-  RWLock::RLocker snap_locker(ictx->snap_lock);
-  RWLock::RLocker parent_locker(ictx->parent_lock);
+  RWLock::RLocker image_locker(ictx->image_lock);
 
-  bool release_parent_locks = false;
-  BOOST_SCOPE_EXIT_ALL(ictx, &release_parent_locks) {
-    if (release_parent_locks) {
-      ictx->parent->parent_lock.put_read();
-      ictx->parent->snap_lock.put_read();
+  bool release_image_lock = false;
+  BOOST_SCOPE_EXIT_ALL(ictx, &release_image_lock) {
+    if (release_image_lock) {
+      ictx->parent->image_lock.put_read();
     }
   };
 
@@ -182,9 +213,8 @@ int Image<I>::get_parent(I *ictx,
   // of the migration source image
   auto parent = ictx->parent;
   if (!ictx->migration_info.empty() && ictx->parent != nullptr) {
-    release_parent_locks = true;
-    ictx->parent->snap_lock.get_read();
-    ictx->parent->parent_lock.get_read();
+    release_image_lock = true;
+    ictx->parent->image_lock.get_read();
 
     parent = ictx->parent->parent;
   }
@@ -197,7 +227,7 @@ int Image<I>::get_parent(I *ictx,
   parent_image->pool_name = parent->md_ctx.get_pool_name();
   parent_image->pool_namespace = parent->md_ctx.get_namespace();
 
-  RWLock::RLocker parent_snap_locker(parent->snap_lock);
+  RWLock::RLocker parent_image_locker(parent->image_lock);
   parent_snap->id = parent->snap_id;
   parent_snap->namespace_type = RBD_SNAP_NAMESPACE_TYPE_USER;
   if (parent->snap_id != CEPH_NOSNAP) {
@@ -233,26 +263,90 @@ int Image<I>::get_parent(I *ictx,
 template <typename I>
 int Image<I>::list_children(I *ictx,
                             std::vector<librbd::linked_image_spec_t> *images) {
-  RWLock::RLocker l(ictx->snap_lock);
-  cls::rbd::ParentImageSpec parent_spec{ictx->md_ctx.get_id(),
-                                        ictx->md_ctx.get_namespace(),
-                                        ictx->id, ictx->snap_id};
-  return list_children(ictx, parent_spec, images);
+  images->clear();
+  return list_descendants(ictx, 1, images);
 }
 
 template <typename I>
 int Image<I>::list_children(I *ictx,
                             const cls::rbd::ParentImageSpec &parent_spec,
                             std::vector<librbd::linked_image_spec_t> *images) {
+  images->clear();
+  return list_descendants(ictx, parent_spec, 1, images);
+}
+
+template <typename I>
+int Image<I>::list_descendants(
+    librados::IoCtx& io_ctx, const std::string &image_id,
+    const std::optional<size_t> &max_level,
+    std::vector<librbd::linked_image_spec_t> *images) {
+  ImageCtx *ictx = new librbd::ImageCtx("", image_id, nullptr,
+                                        io_ctx, true);
+  int r = ictx->state->open(OPEN_FLAG_SKIP_OPEN_PARENT);
+  if (r < 0) {
+    if (r == -ENOENT) {
+      return 0;
+    }
+    lderr(ictx->cct) << "failed to open descendant " << image_id
+                     << " from pool " << io_ctx.get_pool_name() << ":"
+                     << cpp_strerror(r) << dendl;
+    return r;
+  }
+
+  r = list_descendants(ictx, max_level, images);
+
+  int r1 = ictx->state->close();
+  if (r1 < 0) {
+    lderr(ictx->cct) << "error when closing descendant " << image_id
+                     << " from pool " << io_ctx.get_pool_name() << ":"
+                     << cpp_strerror(r) << dendl;
+  }
+
+  return r;
+}
+
+template <typename I>
+int Image<I>::list_descendants(
+    I *ictx, const std::optional<size_t> &max_level,
+    std::vector<librbd::linked_image_spec_t> *images) {
+  RWLock::RLocker l(ictx->image_lock);
+  std::vector<librados::snap_t> snap_ids;
+  if (ictx->snap_id != CEPH_NOSNAP) {
+    snap_ids.push_back(ictx->snap_id);
+  } else {
+    snap_ids = ictx->snaps;
+  }
+  for (auto snap_id : snap_ids) {
+    cls::rbd::ParentImageSpec parent_spec{ictx->md_ctx.get_id(),
+                                          ictx->md_ctx.get_namespace(),
+                                          ictx->id, snap_id};
+    int r = list_descendants(ictx, parent_spec, max_level, images);
+    if (r < 0) {
+      return r;
+    }
+  }
+  return 0;
+}
+
+template <typename I>
+int Image<I>::list_descendants(
+    I *ictx, const cls::rbd::ParentImageSpec &parent_spec,
+    const std::optional<size_t> &max_level,
+    std::vector<librbd::linked_image_spec_t> *images) {
+  auto child_max_level = max_level;
+  if (child_max_level) {
+    if (child_max_level == 0) {
+      return 0;
+    }
+    (*child_max_level)--;
+  }
   CephContext *cct = ictx->cct;
   ldout(cct, 20) << "ictx=" << ictx << dendl;
 
   // no children for non-layered or old format image
-  if (!ictx->test_features(RBD_FEATURE_LAYERING, ictx->snap_lock)) {
+  if (!ictx->test_features(RBD_FEATURE_LAYERING, ictx->image_lock)) {
     return 0;
   }
-
-  images->clear();
 
   librados::Rados rados(ictx->md_ctx);
 
@@ -300,6 +394,10 @@ int Image<I>::list_children(I *ictx,
     for (auto& image_id : image_ids) {
       images->push_back({
         it.first, "", ictx->md_ctx.get_namespace(), image_id, "", false});
+      r = list_descendants(ictx->md_ctx, image_id, child_max_level, images);
+      if (r < 0) {
+        return r;
+      }
     }
   }
 
@@ -324,6 +422,21 @@ int Image<I>::list_children(I *ictx,
     images->push_back({
       child_image.pool_id, "", child_image.pool_namespace,
       child_image.image_id, "", false});
+    if (!child_max_level || *child_max_level > 0) {
+      IoCtx ioctx;
+      r = util::create_ioctx(ictx->md_ctx, "child image", child_image.pool_id,
+                             child_image.pool_namespace, &ioctx);
+      if (r == -ENOENT) {
+        continue;
+      } else if (r < 0) {
+        return r;
+      }
+      r = list_descendants(ioctx, child_image.image_id, child_max_level,
+                           images);
+      if (r < 0) {
+        return r;
+      }
+    }
   }
 
   // batch lookups by pool + namespace
@@ -356,7 +469,7 @@ int Image<I>::list_children(I *ictx,
       }
 
       std::vector<librbd::trash_image_info_t> trash_images;
-      r = Trash<I>::list(child_io_ctx, trash_images);
+      r = Trash<I>::list(child_io_ctx, trash_images, false);
       if (r < 0 && r != -EOPNOTSUPP) {
         lderr(cct) << "error listing trash images: " << cpp_strerror(r)
                    << dendl;
@@ -364,7 +477,10 @@ int Image<I>::list_children(I *ictx,
       }
 
       for (auto& it : trash_images) {
-        child_image_id_to_info[it.id] = {it.name, true};
+        child_image_id_to_info.insert({
+          it.id,
+          {it.name,
+           it.source == RBD_TRASH_IMAGE_SOURCE_REMOVING ? false : true}});
       }
     }
 
@@ -400,7 +516,13 @@ int Image<I>::deep_copy(I *src, librados::IoCtx& dest_md_ctx,
   uint64_t features;
   uint64_t src_size;
   {
-    RWLock::RLocker snap_locker(src->snap_lock);
+    RWLock::RLocker image_locker(src->image_lock);
+
+    if (!src->migration_info.empty()) {
+      lderr(cct) << "cannot deep copy migrating image" << dendl;
+      return -EBUSY;
+    }
+
     features = (src->features & ~RBD_FEATURES_IMPLICIT_ENABLE);
     src_size = src->get_image_size(src->snap_id);
   }
@@ -441,8 +563,7 @@ int Image<I>::deep_copy(I *src, librados::IoCtx& dest_md_ctx,
   if (flatten > 0) {
     parent_spec.pool_id = -1;
   } else {
-    RWLock::RLocker snap_locker(src->snap_lock);
-    RWLock::RLocker parent_locker(src->parent_lock);
+    RWLock::RLocker image_locker(src->image_lock);
 
     // use oldest snapshot or HEAD for parent spec
     if (!src->snap_info.empty()) {
@@ -480,8 +601,7 @@ int Image<I>::deep_copy(I *src, librados::IoCtx& dest_md_ctx,
   }
   opts.set(RBD_IMAGE_OPTION_ORDER, static_cast<uint64_t>(order));
 
-  ImageCtx *dest = new librbd::ImageCtx(destname, "", nullptr,
-                                        dest_md_ctx, false);
+  auto dest = new I(destname, "", nullptr, dest_md_ctx, false);
   r = dest->state->open(0);
   if (r < 0) {
     lderr(cct) << "failed to read newly created header" << dendl;
@@ -524,7 +644,7 @@ int Image<I>::deep_copy(I *src, I *dest, bool flatten,
   librados::snap_t snap_id_start = 0;
   librados::snap_t snap_id_end;
   {
-    RWLock::RLocker snap_locker(src->snap_lock);
+    RWLock::RLocker image_locker(src->image_lock);
     snap_id_end = src->snap_id;
   }
 
@@ -534,9 +654,9 @@ int Image<I>::deep_copy(I *src, I *dest, bool flatten,
 
   C_SaferCond cond;
   SnapSeqs snap_seqs;
-  auto req = DeepCopyRequest<>::create(src, dest, snap_id_start, snap_id_end,
-                                       flatten, boost::none, op_work_queue,
-                                       &snap_seqs, &prog_ctx, &cond);
+  auto req = DeepCopyRequest<I>::create(src, dest, snap_id_start, snap_id_end,
+                                        flatten, boost::none, op_work_queue,
+                                        &snap_seqs, &prog_ctx, &cond);
   req->send();
   int r = cond.wait();
   if (r < 0) {
@@ -560,7 +680,7 @@ int Image<I>::snap_set(I *ictx,
   uint64_t snap_id = CEPH_NOSNAP;
   std::string name(snap_name == nullptr ? "" : snap_name);
   if (!name.empty()) {
-    RWLock::RLocker snap_locker(ictx->snap_lock);
+    RWLock::RLocker image_locker(ictx->image_lock);
     snap_id = ictx->get_snap_id(cls::rbd::UserSnapshotNamespace{},
                                 snap_name);
     if (snap_id == CEPH_NOSNAP) {
@@ -596,32 +716,97 @@ int Image<I>::snap_set(I *ictx, uint64_t snap_id) {
 
 template <typename I>
 int Image<I>::remove(IoCtx& io_ctx, const std::string &image_name,
-                     const std::string &image_id, ProgressContext& prog_ctx,
-                     bool force, bool from_trash_remove)
+                     ProgressContext& prog_ctx)
 {
   CephContext *cct((CephContext *)io_ctx.cct());
-  ldout(cct, 20) << (image_id.empty() ? image_name : image_id) << dendl;
+  ldout(cct, 20) << "name=" << image_name << dendl;
 
-  if (image_id.empty()) {
-    // id will only be supplied when used internally
+  // look up the V2 image id based on the image name
+  std::string image_id;
+  int r = cls_client::dir_get_id(&io_ctx, RBD_DIRECTORY, image_name,
+                                 &image_id);
+  if (r == -ENOENT) {
+    // check if it already exists in trash from an aborted trash remove attempt
+    std::vector<trash_image_info_t> trash_entries;
+    r = Trash<I>::list(io_ctx, trash_entries, false);
+    if (r < 0) {
+      return r;
+    } else if (r >= 0) {
+      for (auto& entry : trash_entries) {
+        if (entry.name == image_name &&
+            entry.source == RBD_TRASH_IMAGE_SOURCE_REMOVING) {
+          return Trash<I>::remove(io_ctx, entry.id, true, prog_ctx);
+        }
+      }
+    }
+
+    // fall-through if we failed to locate the image in the V2 directory and
+    // trash
+  } else if (r < 0) {
+    lderr(cct) << "failed to retrieve image id: " << cpp_strerror(r) << dendl;
+    return r;
+  } else {
+    // attempt to move the image to the trash (and optionally immediately
+    // delete the image)
     ConfigProxy config(cct->_conf);
     Config<I>::apply_pool_overrides(io_ctx, &config);
 
+    rbd_trash_image_source_t trash_image_source =
+      RBD_TRASH_IMAGE_SOURCE_REMOVING;
+    uint64_t expire_seconds = 0;
     if (config.get_val<bool>("rbd_move_to_trash_on_remove")) {
-      return Trash<I>::move(
-        io_ctx, RBD_TRASH_IMAGE_SOURCE_USER, image_name,
-        config.get_val<uint64_t>("rbd_move_to_trash_on_remove_expire_seconds"));
+      // keep the image in the trash upon remove requests
+      trash_image_source = RBD_TRASH_IMAGE_SOURCE_USER;
+      expire_seconds = config.get_val<uint64_t>(
+        "rbd_move_to_trash_on_remove_expire_seconds");
+    } else {
+      // attempt to pre-validate the removal before moving to trash and
+      // removing
+      r = pre_remove_image<I>(io_ctx, image_id);
+      if (r == -ECHILD) {
+        if (config.get_val<bool>("rbd_move_parent_to_trash_on_remove")) {
+          // keep the image in the trash until the last child is removed
+          trash_image_source = RBD_TRASH_IMAGE_SOURCE_USER_PARENT;
+        } else {
+          lderr(cct) << "image has snapshots - not removing" << dendl;
+          return -ENOTEMPTY;
+        }
+      } else if (r < 0 && r != -ENOENT) {
+        return r;
+      }
     }
+
+    r = Trash<I>::move(io_ctx, trash_image_source, image_name, image_id,
+                       expire_seconds);
+    if (r >= 0) {
+      if (trash_image_source == RBD_TRASH_IMAGE_SOURCE_REMOVING) {
+        // proceed with attempting to immediately remove the image
+        r = Trash<I>::remove(io_ctx, image_id, true, prog_ctx);
+
+        if (r == -ENOTEMPTY || r == -EBUSY || r == -EMLINK) {
+          // best-effort try to restore the image if the removal
+          // failed for possible expected reasons
+          Trash<I>::restore(io_ctx, trash_image_source, image_id, image_name);
+        }
+      }
+      return r;
+    } else if (r < 0 && r != -EOPNOTSUPP) {
+      return r;
+    }
+
+    // fall-through if trash isn't supported
   }
 
   ThreadPool *thread_pool;
   ContextWQ *op_work_queue;
   ImageCtx::get_thread_pool_instance(cct, &thread_pool, &op_work_queue);
 
+  // might be a V1 image format that cannot be moved to the trash
+  // and would not have been listed in the V2 directory -- or the OSDs
+  // are too old and don't support the trash feature
   C_SaferCond cond;
-  auto req = librbd::image::RemoveRequest<>::create(
-    io_ctx, image_name, image_id, force, from_trash_remove, prog_ctx,
-    op_work_queue, &cond);
+  auto req = librbd::image::RemoveRequest<I>::create(
+    io_ctx, image_name, "", false, false, prog_ctx, op_work_queue, &cond);
   req->send();
 
   return cond.wait();

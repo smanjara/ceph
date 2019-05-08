@@ -1,10 +1,8 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
 
 #include "auth/Auth.h"
-#include "global/global_init.h"
 #include "messages/MPing.h"
-#include "msg/Dispatcher.h"
-#include "msg/Messenger.h"
+#include "crimson/auth/DummyAuth.h"
 #include "crimson/net/Connection.h"
 #include "crimson/net/Dispatcher.h"
 #include "crimson/net/Messenger.h"
@@ -40,10 +38,11 @@ struct DummyAuthAuthorizer : public AuthAuthorizer {
 struct Server {
   ceph::thread::Throttle byte_throttler;
   ceph::net::Messenger& msgr;
+  ceph::auth::DummyAuthClientServer dummy_auth;
   struct ServerDispatcher : ceph::net::Dispatcher {
     unsigned count = 0;
     seastar::condition_variable on_reply;
-    seastar::future<> ms_dispatch(ceph::net::ConnectionRef c,
+    seastar::future<> ms_dispatch(ceph::net::Connection* c,
                                   MessageRef m) override {
       std::cout << "server got ping " << *m << std::endl;
       // reply with a pong
@@ -59,11 +58,6 @@ struct Server {
       return seastar::make_ready_future<ceph::net::msgr_tag_t, bufferlist>(
           0, bufferlist{});
     }
-    seastar::future<std::unique_ptr<AuthAuthorizer>>
-    ms_get_authorizer(peer_type_t) override {
-      return seastar::make_ready_future<std::unique_ptr<AuthAuthorizer>>(
-          new DummyAuthAuthorizer{});
-    }
   } dispatcher;
   Server(ceph::net::Messenger& msgr)
     : byte_throttler(ceph::net::conf.osd_client_message_size_cap),
@@ -77,10 +71,11 @@ struct Server {
 struct Client {
   ceph::thread::Throttle byte_throttler;
   ceph::net::Messenger& msgr;
+  ceph::auth::DummyAuthClientServer dummy_auth;
   struct ClientDispatcher : ceph::net::Dispatcher {
     unsigned count = 0;
     seastar::condition_variable on_reply;
-    seastar::future<> ms_dispatch(ceph::net::ConnectionRef c,
+    seastar::future<> ms_dispatch(ceph::net::Connection* c,
                                   MessageRef m) override {
       std::cout << "client got pong " << *m << std::endl;
       ++count;
@@ -97,125 +92,6 @@ struct Client {
   }
 };
 } // namespace seastar_pingpong
-
-namespace native_pingpong {
-
-constexpr int CEPH_OSD_PROTOCOL = 10;
-
-struct Server {
-  Server(CephContext* cct, const entity_inst_t& entity)
-    : dispatcher(cct)
-  {
-    msgr.reset(Messenger::create(cct, "async",
-                                 entity.name, "pong", entity.addr.get_nonce(), 0));
-    msgr->set_cluster_protocol(CEPH_OSD_PROTOCOL);
-    msgr->set_default_policy(Messenger::Policy::stateless_server(0));
-  }
-  unique_ptr<Messenger> msgr;
-  struct ServerDispatcher : Dispatcher {
-    std::mutex mutex;
-    std::condition_variable on_reply;
-    bool replied = false;
-    ServerDispatcher(CephContext* cct)
-      : Dispatcher(cct)
-    {}
-    bool ms_can_fast_dispatch_any() const override {
-      return true;
-    }
-    bool ms_can_fast_dispatch(const Message* m) const override {
-      return m->get_type() == CEPH_MSG_PING;
-    }
-    void ms_fast_dispatch(Message* m) override {
-      m->get_connection()->send_message(new MPing);
-      m->put();
-      {
-        std::lock_guard lock{mutex};
-        replied = true;
-      }
-      on_reply.notify_one();
-    }
-    bool ms_dispatch(Message*) override {
-      ceph_abort();
-    }
-    bool ms_handle_reset(Connection*) override {
-      return true;
-    }
-    void ms_handle_remote_reset(Connection*) override {
-    }
-    bool ms_handle_refused(Connection*) override {
-      return true;
-    }
-    void echo() {
-      replied = false;
-      std::unique_lock lock{mutex};
-      return on_reply.wait(lock, [this] { return replied; });
-    }
-  } dispatcher;
-  void echo() {
-    dispatcher.echo();
-  }
-};
-
-struct Client {
-  unique_ptr<Messenger> msgr;
-  Client(CephContext *cct)
-    : dispatcher(cct)
-  {
-    msgr.reset(Messenger::create(cct, "async",
-                                 entity_name_t::CLIENT(-1), "ping",
-                                 getpid(), 0));
-    msgr->set_cluster_protocol(CEPH_OSD_PROTOCOL);
-    msgr->set_default_policy(Messenger::Policy::lossy_client(0));
-  }
-  struct ClientDispatcher : Dispatcher {
-    std::mutex mutex;
-    std::condition_variable on_reply;
-    bool replied = false;
-
-    ClientDispatcher(CephContext* cct)
-      : Dispatcher(cct)
-    {}
-    bool ms_can_fast_dispatch_any() const override {
-      return true;
-    }
-    bool ms_can_fast_dispatch(const Message* m) const override {
-      return m->get_type() == CEPH_MSG_PING;
-    }
-    void ms_fast_dispatch(Message* m) override {
-      m->put();
-      {
-        std::lock_guard lock{mutex};
-        replied = true;
-      }
-      on_reply.notify_one();
-    }
-    bool ms_dispatch(Message*) override {
-      ceph_abort();
-    }
-    bool ms_handle_reset(Connection *) override {
-      return true;
-    }
-    void ms_handle_remote_reset(Connection*) override {
-    }
-    bool ms_handle_refused(Connection*) override {
-      return true;
-    }
-    bool ping(Messenger* msgr, const entity_inst_t& peer) {
-      auto conn = msgr->connect_to(peer.name.type(),
-                                   entity_addrvec_t{peer.addr});
-      replied = false;
-      conn->send_message(new MPing);
-      std::unique_lock lock{mutex};
-      return on_reply.wait_for(lock, 500ms, [&] {
-        return replied;
-      });
-    }
-  } dispatcher;
-  void ping(const entity_inst_t& peer) {
-    dispatcher.ping(msgr.get(), peer);
-  }
-};
-} // namespace native_pingpong
 
 class SeastarContext {
   seastar::file_desc begin_fd;
@@ -282,8 +158,12 @@ seastar_echo(const entity_addr_t addr, echo_role role, unsigned count)
           [addr, count](auto& server) mutable {
             std::cout << "server listening at " << addr << std::endl;
             // bind the server
+            server.msgr.set_default_policy(ceph::net::SocketPolicy::stateless_server(0));
             server.msgr.set_policy_throttler(entity_name_t::TYPE_OSD,
                                              &server.byte_throttler);
+            server.msgr.set_require_authorizer(false);
+            server.msgr.set_auth_client(&server.dummy_auth);
+            server.msgr.set_auth_server(&server.dummy_auth);
             return server.msgr.bind(entity_addrvec_t{addr})
               .then([&server] {
                 return server.msgr.start(&server.dispatcher);
@@ -304,8 +184,12 @@ seastar_echo(const entity_addr_t addr, echo_role role, unsigned count)
         return seastar::do_with(seastar_pingpong::Client{*msgr},
           [addr, count](auto& client) {
             std::cout << "client sending to " << addr << std::endl;
+            client.msgr.set_default_policy(ceph::net::SocketPolicy::lossy_client(0));
             client.msgr.set_policy_throttler(entity_name_t::TYPE_OSD,
                                              &client.byte_throttler);
+            client.msgr.set_require_authorizer(false);
+            client.msgr.set_auth_client(&client.dummy_auth);
+            client.msgr.set_auth_server(&client.dummy_auth);
             return client.msgr.start(&client.dispatcher)
               .then([addr, &client] {
                 return client.msgr.connect(addr, entity_name_t::TYPE_OSD);
@@ -324,38 +208,6 @@ seastar_echo(const entity_addr_t addr, echo_role role, unsigned count)
   }
 }
 
-static void ceph_echo(CephContext* cct,
-                      entity_addr_t addr, echo_role role, unsigned count)
-{
-  std::cout << "ceph/";
-  entity_inst_t entity{entity_name_t::OSD(0), addr};
-  if (role == echo_role::as_server) {
-    std::cout << "server listening at " << addr << std::endl;
-    native_pingpong::Server server{cct, entity};
-    server.msgr->bind(addr);
-    server.msgr->add_dispatcher_head(&server.dispatcher);
-    server.msgr->start();
-    for (unsigned i = 0; i < count; i++) {
-      server.echo();
-    }
-    server.msgr->shutdown();
-    server.msgr->wait();
-  } else {
-    std::cout << "client sending to " << addr << std::endl;
-    native_pingpong::Client client{cct};
-    client.msgr->add_dispatcher_head(&client.dispatcher);
-    client.msgr->start();
-    auto conn = client.msgr->connect_to(entity.name.type(),
-                                        entity_addrvec_t{entity.addr});
-    for (unsigned i = 0; i < count; i++) {
-      std::cout << "seq=" << i << std::endl;
-      client.ping(entity);
-    }
-    client.msgr->shutdown();
-    client.msgr->wait();
-  }
-}
-
 int main(int argc, char** argv)
 {
   namespace po = boost::program_options;
@@ -364,8 +216,6 @@ int main(int argc, char** argv)
     ("help,h", "show help message")
     ("role", po::value<std::string>()->default_value("pong"),
      "role to play (ping | pong)")
-    ("test", po::value<std::string>()->default_value("seastar"),
-     "messenger to use (seastar | ceph)")
     ("port", po::value<uint16_t>()->default_value(9010),
      "port #")
     ("nonce", po::value<uint32_t>()->default_value(42),
@@ -409,33 +259,23 @@ int main(int argc, char** argv)
   }
 
   auto count = vm["count"].as<unsigned>();
-  if (vm["test"].as<std::string>() == "seastar") {
-    seastar::app_template app;
-    SeastarContext sc;
-    auto job = sc.with_seastar([&] {
-      auto fut = seastar::alien::submit_to(0, [addr, role, count] {
-        return seastar_echo(addr, role, count);
-      });
-      fut.wait();
+  seastar::app_template app;
+  SeastarContext sc;
+  auto job = sc.with_seastar([&] {
+    auto fut = seastar::alien::submit_to(0, [addr, role, count] {
+      return seastar_echo(addr, role, count);
     });
-    std::vector<char*> av{argv[0]};
-    std::transform(begin(unrecognized_options),
-                   end(unrecognized_options),
-                   std::back_inserter(av),
-                   [](auto& s) {
-                     return const_cast<char*>(s.c_str());
-                   });
-    sc.run(app, av.size(), av.data());
-    job.join();
-  } else {
-    std::vector<const char*> args(argv, argv + argc);
-    auto cct = global_init(nullptr, args,
-                           CEPH_ENTITY_TYPE_CLIENT,
-                           CODE_ENVIRONMENT_UTILITY,
-                           CINIT_FLAG_NO_MON_CONFIG);
-    common_init_finish(cct.get());
-    ceph_echo(cct.get(), addr, role, count);
-  }
+    fut.wait();
+  });
+  std::vector<char*> av{argv[0]};
+  std::transform(begin(unrecognized_options),
+                 end(unrecognized_options),
+                 std::back_inserter(av),
+                 [](auto& s) {
+                   return const_cast<char*>(s.c_str());
+                 });
+  sc.run(app, av.size(), av.data());
+  job.join();
 }
 
 /*

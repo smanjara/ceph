@@ -10,6 +10,8 @@ endif()
 
 set(dencoder_srcs
   ceph_dencoder.cc
+  ../../include/uuid.cc
+  ../../include/utime.cc
   $<TARGET_OBJECTS:common_texttable_obj>)
 if(WITH_RADOSGW)
   list(APPEND dencoder_srcs
@@ -22,6 +24,10 @@ if(WITH_RADOSGW)
   list(APPEND DENCODER_EXTRALIBS
     rgw_a
     cls_rgw_client)
+  if(WITH_RADOSGW_AMQP_ENDPOINT)
+    list(APPEND DENCODER_EXTRALIBS
+      rabbitmq)
+  endif()
 endif()
 
 if(WITH_RBD)

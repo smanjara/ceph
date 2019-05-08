@@ -276,9 +276,6 @@ Client::Client(Messenger *m, MonClient *mc, Objecter *objecter_)
 {
   _reset_faked_inos();
 
-  _dir_vxattrs_name_size = _vxattrs_calcu_name_size(_dir_vxattrs);
-  _file_vxattrs_name_size = _vxattrs_calcu_name_size(_file_vxattrs);
-
   user_id = cct->_conf->client_mount_uid;
   group_id = cct->_conf->client_mount_gid;
 
@@ -860,6 +857,7 @@ Inode * Client::add_update_inode(InodeStat *st, utime_t from,
     in->uid = st->uid;
     in->gid = st->gid;
     in->btime = st->btime;
+    in->snap_btime = st->snap_btime;
   }
 
   if ((new_version || (new_issued & CEPH_CAP_LINK_SHARED)) &&
@@ -2055,7 +2053,7 @@ MetaSession *Client::_open_mds_session(mds_rank_t mds)
     }
   }
 
-  auto m = MClientSession::create(CEPH_SESSION_REQUEST_OPEN);
+  auto m = make_message<MClientSession>(CEPH_SESSION_REQUEST_OPEN);
   m->metadata = metadata;
   m->supported_features = feature_bitset_t(CEPHFS_FEATURES_CLIENT_SUPPORTED);
   session->con->send_message2(std::move(m));
@@ -2066,7 +2064,7 @@ void Client::_close_mds_session(MetaSession *s)
 {
   ldout(cct, 2) << __func__ << " mds." << s->mds_num << " seq " << s->seq << dendl;
   s->state = MetaSession::STATE_CLOSING;
-  s->con->send_message2(MClientSession::create(CEPH_SESSION_REQUEST_CLOSE, s->seq));
+  s->con->send_message2(make_message<MClientSession>(CEPH_SESSION_REQUEST_CLOSE, s->seq));
 }
 
 void Client::_closed_mds_session(MetaSession *s)
@@ -2148,7 +2146,7 @@ void Client::handle_client_session(const MConstRef<MClientSession>& m)
     if (auto& m = session->release; m) {
       session->con->send_message2(std::move(m));
     }
-    session->con->send_message2(MClientSession::create(CEPH_SESSION_FLUSHMSG_ACK, m->get_seq()));
+    session->con->send_message2(make_message<MClientSession>(CEPH_SESSION_FLUSHMSG_ACK, m->get_seq()));
     break;
 
   case CEPH_SESSION_FORCE_RO:
@@ -2249,9 +2247,9 @@ void Client::send_request(MetaRequest *request, MetaSession *session,
   session->con->send_message2(std::move(r));
 }
 
-MClientRequest::ref Client::build_client_request(MetaRequest *request)
+ref_t<MClientRequest> Client::build_client_request(MetaRequest *request)
 {
-  auto req = MClientRequest::create(request->get_op());
+  auto req = make_message<MClientRequest>(request->get_op());
   req->set_tid(request->tid);
   req->set_stamp(request->op_stamp);
   memcpy(&req->head, &request->head, sizeof(ceph_mds_request_head));
@@ -2573,53 +2571,53 @@ bool Client::ms_dispatch2(const MessageRef &m)
   switch (m->get_type()) {
     // mounting and mds sessions
   case CEPH_MSG_MDS_MAP:
-    handle_mds_map(MMDSMap::msgref_cast(m));
+    handle_mds_map(ref_cast<MMDSMap>(m));
     break;
   case CEPH_MSG_FS_MAP:
-    handle_fs_map(MFSMap::msgref_cast(m));
+    handle_fs_map(ref_cast<MFSMap>(m));
     break;
   case CEPH_MSG_FS_MAP_USER:
-    handle_fs_map_user(MFSMapUser::msgref_cast(m));
+    handle_fs_map_user(ref_cast<MFSMapUser>(m));
     break;
   case CEPH_MSG_CLIENT_SESSION:
-    handle_client_session(MClientSession::msgref_cast(m));
+    handle_client_session(ref_cast<MClientSession>(m));
     break;
 
   case CEPH_MSG_OSD_MAP:
-    handle_osd_map(MOSDMap::msgref_cast(m));
+    handle_osd_map(ref_cast<MOSDMap>(m));
     break;
 
     // requests
   case CEPH_MSG_CLIENT_REQUEST_FORWARD:
-    handle_client_request_forward(MClientRequestForward::msgref_cast(m));
+    handle_client_request_forward(ref_cast<MClientRequestForward>(m));
     break;
   case CEPH_MSG_CLIENT_REPLY:
-    handle_client_reply(MClientReply::msgref_cast(m));
+    handle_client_reply(ref_cast<MClientReply>(m));
     break;
 
   // reclaim reply
   case CEPH_MSG_CLIENT_RECLAIM_REPLY:
-    handle_client_reclaim_reply(MClientReclaimReply::msgref_cast(m));
+    handle_client_reclaim_reply(ref_cast<MClientReclaimReply>(m));
     break;
 
   case CEPH_MSG_CLIENT_SNAP:
-    handle_snap(MClientSnap::msgref_cast(m));
+    handle_snap(ref_cast<MClientSnap>(m));
     break;
   case CEPH_MSG_CLIENT_CAPS:
-    handle_caps(MClientCaps::msgref_cast(m));
+    handle_caps(ref_cast<MClientCaps>(m));
     break;
   case CEPH_MSG_CLIENT_LEASE:
-    handle_lease(MClientLease::msgref_cast(m));
+    handle_lease(ref_cast<MClientLease>(m));
     break;
   case MSG_COMMAND_REPLY:
     if (m->get_source().type() == CEPH_ENTITY_TYPE_MDS) {
-      handle_command_reply(MCommandReply::msgref_cast(m));
+      handle_command_reply(ref_cast<MCommandReply>(m));
     } else {
       return false;
     }
     break;
   case CEPH_MSG_CLIENT_QUOTA:
-    handle_quota(MClientQuota::msgref_cast(m));
+    handle_quota(ref_cast<MClientQuota>(m));
     break;
 
   default:
@@ -2783,7 +2781,7 @@ void Client::send_reconnect(MetaSession *session)
 
   early_kick_flushing_caps(session);
 
-  auto m = MClientReconnect::create();
+  auto m = make_message<MClientReconnect>();
   bool allow_multi = session->mds_features.test(CEPHFS_FEATURE_MULTI_RECONNECT);
 
   // i have an open session.
@@ -2799,7 +2797,7 @@ void Client::send_reconnect(MetaSession *session)
 	m->mark_more();
 	session->con->send_message2(std::move(m));
 
-	m = MClientReconnect::create();
+	m = make_message<MClientReconnect>();
       }
 
       Cap &cap = it->second;
@@ -2965,7 +2963,7 @@ void Client::got_mds_push(MetaSession *s)
   s->seq++;
   ldout(cct, 10) << " mds." << s->mds_num << " seq now " << s->seq << dendl;
   if (s->state == MetaSession::STATE_CLOSING) {
-    s->con->send_message2(MClientSession::create(CEPH_SESSION_REQUEST_CLOSE, s->seq));
+    s->con->send_message2(make_message<MClientSession>(CEPH_SESSION_REQUEST_CLOSE, s->seq));
   }
 }
 
@@ -3005,7 +3003,9 @@ void Client::handle_lease(const MConstRef<MClientLease>& m)
 
  revoke:
   {
-    auto reply = MClientLease::create(CEPH_MDS_LEASE_RELEASE, seq, m->get_mask(), m->get_ino(), m->get_first(), m->get_last(), m->dname);
+    auto reply = make_message<MClientLease>(CEPH_MDS_LEASE_RELEASE, seq,
+					    m->get_mask(), m->get_ino(),
+					    m->get_first(), m->get_last(), m->dname);
     m->get_connection()->send_message2(std::move(reply));
   }
 }
@@ -3359,7 +3359,7 @@ void Client::send_cap(Inode *in, MetaSession *session, Cap *cap,
   if (flush)
     follows = in->snaprealm->get_snap_context().seq;
   
-  auto m = MClientCaps::create(op,
+  auto m = make_message<MClientCaps>(op,
 				   in->ino,
 				   0,
 				   cap->cap_id, cap->seq,
@@ -3728,7 +3728,7 @@ void Client::flush_snaps(Inode *in, bool all_again)
       session->flushing_caps_tids.insert(capsnap.flush_tid);
     }
 
-    auto m = MClientCaps::create(CEPH_CAP_OP_FLUSHSNAP, in->ino, in->snaprealm->ino, 0, mseq,
+    auto m = make_message<MClientCaps>(CEPH_CAP_OP_FLUSHSNAP, in->ino, in->snaprealm->ino, 0, mseq,
 				     cap_epoch_barrier);
     m->caller_uid = capsnap.cap_dirtier_uid;
     m->caller_gid = capsnap.cap_dirtier_gid;
@@ -3958,7 +3958,7 @@ void Client::_flushed(Inode *in)
 
 
 // checks common to add_update_cap, handle_cap_grant
-void Client::check_cap_issue(Inode *in, Cap *cap, unsigned issued)
+void Client::check_cap_issue(Inode *in, unsigned issued)
 {
   unsigned had = in->caps_issued();
 
@@ -4022,7 +4022,7 @@ void Client::add_update_cap(Inode *in, MetaSession *mds_session, uint64_t cap_id
     }
   }
 
-  check_cap_issue(in, &cap, issued);
+  check_cap_issue(in, issued);
 
   if (flags & CEPH_CAP_FLAG_AUTH) {
     if (in->auth_cap != &cap &&
@@ -5162,7 +5162,7 @@ void Client::handle_cap_grant(MetaSession *session, Inode *in, Cap *cap, const M
   cap->seq = m->get_seq();
   cap->gen = session->cap_gen;
 
-  check_cap_issue(in, cap, new_caps);
+  check_cap_issue(in, new_caps);
 
   // update inode
   int issued;
@@ -5951,7 +5951,7 @@ void Client::flush_mdlog(MetaSession *session)
   // will crash if they see an unknown CEPH_SESSION_* value in this msg.
   const uint64_t features = session->con->get_features();
   if (HAVE_FEATURE(features, SERVER_LUMINOUS)) {
-    auto m = MClientSession::create(CEPH_SESSION_REQUEST_FLUSH_MDLOG);
+    auto m = make_message<MClientSession>(CEPH_SESSION_REQUEST_FLUSH_MDLOG);
     session->con->send_message2(std::move(m));
   }
 }
@@ -6219,7 +6219,7 @@ void Client::renew_caps(MetaSession *session)
   ldout(cct, 10) << "renew_caps mds." << session->mds_num << dendl;
   session->last_cap_renew_request = ceph_clock_now();
   uint64_t seq = ++session->cap_renew_seq;
-  session->con->send_message2(MClientSession::create(CEPH_SESSION_REQUEST_RENEWCAPS, seq));
+  session->con->send_message2(make_message<MClientSession>(CEPH_SESSION_REQUEST_RENEWCAPS, seq));
 }
 
 
@@ -6322,7 +6322,7 @@ int Client::_lookup(Inode *dir, const string& dname, int mask, InodeRef *target,
 	ldout(cct, 20) << " bad lease, cap_ttl " << s.cap_ttl << ", cap_gen " << s.cap_gen
 		       << " vs lease_gen " << dn->lease_gen << dendl;
       }
-      // dir lease?
+      // dir shared caps?
       if (dir->caps_issued_mask(CEPH_CAP_FILE_SHARED, true)) {
 	if (dn->cap_shared_gen == dir->shared_gen &&
 	    (!dn->inode || dn->inode->caps_issued_mask(mask, true)))
@@ -11342,44 +11342,52 @@ int Client::ll_getxattr(Inode *in, const char *name, void *value,
 int Client::_listxattr(Inode *in, char *name, size_t size,
 		       const UserPerm& perms)
 {
+  bool len_only = (size == 0);
   int r = _getattr(in, CEPH_STAT_CAP_XATTR, perms, in->xattr_version == 0);
-  if (r == 0) {
-    for (map<string,bufferptr>::iterator p = in->xattrs.begin();
-	 p != in->xattrs.end();
-	 ++p)
-      r += p->first.length() + 1;
-
-    const VXattr *vxattrs = _get_vxattrs(in);
-    r += _vxattrs_name_size(vxattrs);
-
-    if (size != 0) {
-      if (size >= (unsigned)r) {
-	for (map<string,bufferptr>::iterator p = in->xattrs.begin();
-	     p != in->xattrs.end();
-	     ++p) {
-	  memcpy(name, p->first.c_str(), p->first.length());
-	  name += p->first.length();
-	  *name = '\0';
-	  name++;
-	}
-	if (vxattrs) {
-	  for (int i = 0; !vxattrs[i].name.empty(); i++) {
-	    const VXattr& vxattr = vxattrs[i];
-	    if (vxattr.hidden)
-	      continue;
-	    // call pointer-to-member function
-	    if(vxattr.exists_cb && !(this->*(vxattr.exists_cb))(in))
-	      continue;
-	    memcpy(name, vxattr.name.c_str(), vxattr.name.length());
-	    name += vxattr.name.length();
-	    *name = '\0';
-	    name++;
-	  }
-	}
-      } else
-	r = -ERANGE;
-    }
+  if (r != 0) {
+    goto out;
   }
+
+  r = 0;
+  for (const auto& p : in->xattrs) {
+    size_t this_len = p.first.length() + 1;
+    r += this_len;
+    if (len_only)
+      continue;
+
+    if (this_len > size) {
+      r = -ERANGE;
+      goto out;
+    }
+
+    memcpy(name, p.first.c_str(), this_len);
+    name += this_len;
+    size -= this_len;
+  }
+
+  const VXattr *vxattr;
+  for (vxattr = _get_vxattrs(in); vxattr && !vxattr->name.empty(); vxattr++) {
+    if (vxattr->hidden)
+      continue;
+    // call pointer-to-member function
+    if (vxattr->exists_cb && !(this->*(vxattr->exists_cb))(in))
+      continue;
+
+    size_t this_len = vxattr->name.length() + 1;
+    r += this_len;
+    if (len_only)
+      continue;
+
+    if (this_len > size) {
+      r = -ERANGE;
+      goto out;
+    }
+
+    memcpy(name, vxattr->name.c_str(), this_len);
+    name += this_len;
+    size -= this_len;
+  }
+out:
   ldout(cct, 8) << __func__ << "(" << in->ino << ", " << size << ") = " << r << dendl;
   return r;
 }
@@ -11791,6 +11799,18 @@ size_t Client::_vxattrcb_dir_pin(Inode *in, char *val, size_t size)
   return snprintf(val, size, "%ld", (long)in->dir_pin);
 }
 
+bool Client::_vxattrcb_snap_btime_exists(Inode *in)
+{
+  return !in->snap_btime.is_zero();
+}
+
+size_t Client::_vxattrcb_snap_btime(Inode *in, char *val, size_t size)
+{
+  return snprintf(val, size, "%llu.09%lu",
+      (long long unsigned)in->snap_btime.sec(),
+      (long unsigned)in->snap_btime.nsec());
+}
+
 #define CEPH_XATTR_NAME(_type, _name) "ceph." #_type "." #_name
 #define CEPH_XATTR_NAME2(_type, _name, _name2) "ceph." #_type "." #_name "." #_name2
 
@@ -11871,6 +11891,14 @@ const Client::VXattr Client::_dir_vxattrs[] = {
     exists_cb: &Client::_vxattrcb_dir_pin_exists,
     flags: 0,
   },
+  {
+    name: "ceph.snap.btime",
+    getxattr_cb: &Client::_vxattrcb_snap_btime,
+    readonly: true,
+    hidden: false,
+    exists_cb: &Client::_vxattrcb_snap_btime_exists,
+    flags: 0,
+  },
   { name: "" }     /* Required table terminator */
 };
 
@@ -11888,6 +11916,14 @@ const Client::VXattr Client::_file_vxattrs[] = {
   XATTR_LAYOUT_FIELD(file, layout, object_size),
   XATTR_LAYOUT_FIELD(file, layout, pool),
   XATTR_LAYOUT_FIELD(file, layout, pool_namespace),
+  {
+    name: "ceph.snap.btime",
+    getxattr_cb: &Client::_vxattrcb_snap_btime,
+    readonly: true,
+    hidden: false,
+    exists_cb: &Client::_vxattrcb_snap_btime_exists,
+    flags: 0,
+  },
   { name: "" }     /* Required table terminator */
 };
 
@@ -11913,17 +11949,6 @@ const Client::VXattr *Client::_match_vxattr(Inode *in, const char *name)
     }
   }
   return NULL;
-}
-
-size_t Client::_vxattrs_calcu_name_size(const VXattr *vxattr)
-{
-  size_t len = 0;
-  while (!vxattr->name.empty()) {
-    if (!vxattr->hidden)
-      len += vxattr->name.length() + 1;
-    vxattr++;
-  }
-  return len;
 }
 
 int Client::ll_readlink(Inode *in, char *buf, size_t buflen, const UserPerm& perms)
@@ -13988,14 +14013,6 @@ bool Client::ms_handle_refused(Connection *con)
   return false;
 }
 
-bool Client::ms_get_authorizer(int dest_type, AuthAuthorizer **authorizer)
-{
-  if (dest_type == CEPH_ENTITY_TYPE_MON)
-    return true;
-  *authorizer = monclient->build_authorizer(dest_type);
-  return true;
-}
-
 Inode *Client::get_quota_root(Inode *in, const UserPerm& perms)
 {
   Inode *quota_in = root_ancestor;
@@ -14369,7 +14386,7 @@ int Client::start_reclaim(const std::string& uuid, unsigned flags,
     if (session->reclaim_state == MetaSession::RECLAIM_NULL ||
 	session->reclaim_state == MetaSession::RECLAIMING) {
       session->reclaim_state = MetaSession::RECLAIMING;
-      auto m = MClientReclaim::create(uuid, flags);
+      auto m = make_message<MClientReclaim>(uuid, flags);
       session->con->send_message2(std::move(m));
       wait_on_list(waiting_for_reclaim);
     } else if (session->reclaim_state == MetaSession::RECLAIM_FAIL) {
@@ -14421,7 +14438,7 @@ void Client::finish_reclaim()
 
   for (auto &p : mds_sessions) {
     p.second.reclaim_state = MetaSession::RECLAIM_NULL;
-    auto m = MClientReclaim::create("", MClientReclaim::FLAG_FINISH);
+    auto m = make_message<MClientReclaim>("", MClientReclaim::FLAG_FINISH);
     p.second.con->send_message2(std::move(m));
   }
 

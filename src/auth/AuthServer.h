@@ -33,6 +33,14 @@ public:
     auth_registry.get_supported_modes(peer_type, auth_method, modes);
   }
 
+  /// Get support connection modes for the given peer type and auth method
+  virtual uint32_t pick_con_mode(
+    int peer_type,
+    uint32_t auth_method,
+    const std::vector<uint32_t>& preferred_modes) {
+    return auth_registry.pick_mode(peer_type, auth_method, preferred_modes);
+  }
+
   /// return an AuthAuthorizeHandler for the given peer type and auth method
   AuthAuthorizeHandler *get_auth_authorize_handler(
     int peer_type,
@@ -46,6 +54,6 @@ public:
     AuthConnectionMeta *auth_meta,
     bool more,           ///< true if this is not the first part of the handshake
     uint32_t auth_method,
-    const bufferlist& bl,
-    bufferlist *reply) = 0;
+    const ceph::buffer::list& bl,
+    ceph::buffer::list *reply) = 0;
 };

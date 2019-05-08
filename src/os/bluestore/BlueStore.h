@@ -123,6 +123,10 @@ enum {
   l_bluestore_read_eio,
   l_bluestore_reads_with_retries,
   l_bluestore_fragmentation,
+  l_bluestore_omap_seek_to_first_lat,
+  l_bluestore_omap_upper_bound_lat,
+  l_bluestore_omap_lower_bound_lat,
+  l_bluestore_omap_next_lat,
   l_bluestore_last
 };
 
@@ -407,6 +411,7 @@ public:
     friend void intrusive_ptr_add_ref(SharedBlob *b) { b->get(); }
     friend void intrusive_ptr_release(SharedBlob *b) { b->put(); }
 
+    void dump(Formatter* f) const;
     friend ostream& operator<<(ostream& out, const SharedBlob& sb);
 
     void get() {
@@ -512,6 +517,7 @@ public:
     friend void intrusive_ptr_add_ref(Blob *b) { b->get(); }
     friend void intrusive_ptr_release(Blob *b) { b->put(); }
 
+    void dump(Formatter* f) const;
     friend ostream& operator<<(ostream& out, const Blob &b);
 
     const bluestore_blob_use_tracker_t& get_blob_use_tracker() const {
@@ -689,6 +695,8 @@ public:
       }
     }
 
+    void dump(Formatter* f) const;
+
     void assign_blob(const BlobRef& b) {
       ceph_assert(!blob);
       blob = b;
@@ -806,6 +814,8 @@ public:
       inline_bl.clear();
       clear_needs_reshard();
     }
+
+    void dump(Formatter* f) const;
 
     bool encode_some(uint32_t offset, uint32_t length, bufferlist& bl,
 		     unsigned *pn);
@@ -1060,6 +1070,8 @@ public:
 	exists(false),
 	extent_map(this) {
     }
+
+    void dump(Formatter* f) const;
 
     void flush();
     void get() {
@@ -1431,6 +1443,9 @@ public:
     OnodeRef o;
     KeyValueDB::Iterator it;
     string head, tail;
+
+    string _stringify() const;
+
   public:
     OmapIteratorImpl(CollectionRef c, OnodeRef o, KeyValueDB::Iterator it);
     int seek_to_first() override;
@@ -1589,7 +1604,7 @@ public:
     }
 #endif
 
-    void log_state_latency(PerfCounters *logger, int state) {
+    utime_t log_state_latency(PerfCounters *logger, int state) {
       utime_t lat, now = ceph_clock_now();
       lat = now - last_stamp;
       logger->tinc(state, lat);
@@ -1600,6 +1615,7 @@ public:
       }
 #endif
       last_stamp = now;
+      return lat;
     }
 
     CollectionRef ch;
@@ -2015,6 +2031,7 @@ private:
     bool stop = false;
     uint64_t autotune_cache_size = 0;
     std::shared_ptr<PriorityCache::PriCache> binned_kv_cache = nullptr;
+    std::shared_ptr<PriorityCache::Manager> pcm = nullptr;
 
     struct MempoolCache : public PriorityCache::PriCache {
       BlueStore *store;
@@ -2031,8 +2048,8 @@ private:
         int64_t assigned = get_cache_bytes(pri);
 
         switch (pri) {
-        // All cache items are currently shoved into the LAST priority 
-        case PriorityCache::Priority::LAST:
+        // All cache items are currently shoved into the PRI1 priority 
+        case PriorityCache::Priority::PRI1:
           {
             int64_t request = _get_used_bytes();
             return(request > assigned) ? request - assigned : 0;
@@ -2242,9 +2259,12 @@ private:
   void _assign_nid(TransContext *txc, OnodeRef o);
   uint64_t _assign_blobid(TransContext *txc);
 
-  template <int LogLevelV = 30> void _dump_onode(const OnodeRef& o);
-  template <int LogLevelV = 30> void _dump_extent_map(ExtentMap& em);
-  template <int LogLevelV = 30> void _dump_transaction(Transaction *t);
+  template <int LogLevelV>
+  friend void _dump_onode(CephContext *cct, const Onode& o);
+  template <int LogLevelV>
+  friend void _dump_extent_map(CephContext *cct, const ExtentMap& em);
+  template <int LogLevelV>
+  friend void _dump_transaction(CephContext *cct, Transaction *t);
 
   TransContext *_txc_create(Collection *c, OpSequencer *osr,
 			    list<Context*> *on_commits);
@@ -2514,6 +2534,8 @@ public:
   int fiemap(CollectionHandle &c, const ghobject_t& oid,
 	     uint64_t offset, size_t len, map<uint64_t, uint64_t>& destmap) override;
 
+  int dump_onode(CollectionHandle &c, const ghobject_t& oid,
+    const string& section_name, Formatter *f) override;
 
   int getattr(CollectionHandle &c, const ghobject_t& oid, const char *name,
 	      bufferptr& value) override;
@@ -2653,7 +2675,14 @@ public:
   Either automatically applies allocated extents to underlying 
   BlueFS (extents == nullptr) or just return them (non-null extents) provided
   */
-  int allocate_bluefs_freespace(uint64_t size, PExtentVector* extents);
+  int allocate_bluefs_freespace(
+    uint64_t min_size,
+    uint64_t size,
+    PExtentVector* extents);
+
+  void log_latency_fn(int idx,
+		      const ceph::timespan& lat,
+		      std::function<string (const ceph::timespan& lat)> fn);
 
 private:
   bool _debug_data_eio(const ghobject_t& o) {
@@ -2682,6 +2711,8 @@ private:
   string failed_cmode;
   set<string> failed_compressors;
   string spillover_alert;
+  string legacy_statfs_alert;
+  string disk_size_mismatch_alert;
 
   void _log_alerts(osd_alert_list_t& alerts);
   bool _set_compression_alert(bool cmode, const char* s) {
@@ -2699,13 +2730,19 @@ private:
     failed_cmode.clear();
   }
 
-  void _set_spillover_alert(const char* s) {
+  void _set_spillover_alert(const string& s) {
     std::lock_guard l(qlock);
     spillover_alert = s;
   }
   void _clear_spillover_alert() {
     std::lock_guard l(qlock);
     spillover_alert.clear();
+  }
+
+  void _check_legacy_statfs_alert();
+  void _set_disk_size_mismatch_alert(const string& s) {
+    std::lock_guard l(qlock);
+    disk_size_mismatch_alert = s;
   }
 
 private:
@@ -2979,9 +3016,14 @@ private:
     auto delta = _get_bluefs_size_delta(bluefs_free, bluefs_total);
     return delta > 0 ? delta : 0;
   }
-  int allocate_freespace(uint64_t size, PExtentVector& extents) override {
-    return allocate_bluefs_freespace(size, &extents);
+  int allocate_freespace(
+    uint64_t min_size,
+    uint64_t size,
+    PExtentVector& extents) override {
+    return allocate_bluefs_freespace(min_size, size, &extents);
   };
+
+  inline bool _use_rotational_settings();
 };
 
 inline ostream& operator<<(ostream& out, const BlueStore::volatile_statfs& s) {

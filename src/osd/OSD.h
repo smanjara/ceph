@@ -188,7 +188,7 @@ enum {
   l_osd_last,
 };
 
-// RecoveryState perf counters
+// PeeringState perf counters
 enum {
   rs_first = 20000,
   rs_initial_latency,
@@ -394,24 +394,15 @@ public:
     return next_osdmap;
   }
 
-private:
-  Mutex peer_map_epoch_lock;
-  map<int, epoch_t> peer_map_epoch;
-public:
-  epoch_t get_peer_epoch(int p);
-  epoch_t note_peer_epoch(int p, epoch_t e);
-  void forget_peer_epoch(int p, epoch_t e);
+  void maybe_share_map(Connection *con,
+		       const OSDMapRef& osdmap,
+		       epoch_t peer_epoch_lb=0);
 
   void send_map(class MOSDMap *m, Connection *con);
-  void send_incremental_map(epoch_t since, Connection *con, OSDMapRef& osdmap);
+  void send_incremental_map(epoch_t since, Connection *con,
+			    const OSDMapRef& osdmap);
   MOSDMap *build_incremental_map_msg(epoch_t from, epoch_t to,
                                        OSDSuperblock& superblock);
-  bool should_share_map(entity_name_t name, Connection *con, epoch_t epoch,
-                        const OSDMapRef& osdmap, const epoch_t *sent_epoch_p);
-  void share_map(entity_name_t name, Connection *con, epoch_t epoch,
-                 OSDMapRef& osdmap, epoch_t *sent_epoch_p);
-  void share_map_peer(int peer, Connection *con,
-                      OSDMapRef map = OSDMapRef());
 
   ConnectionRef get_con_osd_cluster(int peer, epoch_t from_epoch);
   pair<ConnectionRef,ConnectionRef> get_con_osd_hb(int peer, epoch_t from_epoch);  // (back, front)
@@ -711,14 +702,16 @@ public:
 
   // -- pg merge --
   Mutex merge_lock = {"OSD::merge_lock"};
-  set<pg_t> ready_to_merge_source;
-  map<pg_t,pair<epoch_t,epoch_t>> ready_to_merge_target;  // pg -> (les,lec)
+  map<pg_t,eversion_t> ready_to_merge_source;   // pg -> version
+  map<pg_t,std::tuple<eversion_t,epoch_t,epoch_t>> ready_to_merge_target;  // pg -> (version,les,lec)
   set<pg_t> not_ready_to_merge_source;
   map<pg_t,pg_t> not_ready_to_merge_target;
   set<pg_t> sent_ready_to_merge_source;
 
-  void set_ready_to_merge_source(PG *pg);
+  void set_ready_to_merge_source(PG *pg,
+				 eversion_t version);
   void set_ready_to_merge_target(PG *pg,
+				 eversion_t version,
 				 epoch_t last_epoch_started,
 				 epoch_t last_epoch_clean);
   void set_not_ready_to_merge_source(pg_t source);
@@ -905,6 +898,7 @@ public:
   void set_statfs(const struct store_statfs_t &stbuf,
     osd_alert_list_t& alerts);
   osd_stat_t set_osd_stat(vector<int>& hb_peers, int num_pgs);
+  void inc_osd_stat_repaired(void);
   float compute_adjusted_ratio(osd_stat_t new_stat, float *pratio, uint64_t adjust_used = 0);
   osd_stat_t get_osd_stat() {
     std::lock_guard l(stat_lock);
@@ -968,7 +962,6 @@ public:
   bool is_nearfull() const;
   bool need_fullness_update();  ///< osdmap state needs update
   void set_injectfull(s_names type, int64_t count);
-  bool check_osdmap_full(const set<pg_shard_t> &missing_on);
 
 
   // -- epochs --
@@ -1008,8 +1001,8 @@ public:
   void request_osdmap_update(epoch_t e);
 
   // -- stopping --
-  Mutex is_stopping_lock;
-  Cond is_stopping_cond;
+  ceph::mutex is_stopping_lock = ceph::make_mutex("OSDService::is_stopping_lock");
+  ceph::condition_variable is_stopping_cond;
   enum {
     NOT_STOPPING,
     PREPARING_TO_STOP,
@@ -1479,7 +1472,6 @@ private:
   // -- sessions --
 private:
   void dispatch_session_waiting(SessionRef session, OSDMapRef osdmap);
-  void maybe_share_map(Session *session, OpRequestRef op, OSDMapRef osdmap);
 
   Mutex session_waiting_lock;
   set<SessionRef> session_waiting_for_map;
@@ -1665,18 +1657,6 @@ public:
     int ms_handle_authentication(Connection *con) override {
       return true;
     }
-    bool ms_get_authorizer(int dest_type, AuthAuthorizer **authorizer) override {
-      // some pre-nautilus OSDs get confused if you include an
-      // authorizer but they are not expecting it.  do not try to authorize
-      // heartbeat connections until all OSDs are nautilus.
-      if (osd->get_osdmap()->require_osd_release >= CEPH_RELEASE_NAUTILUS) {
-	return osd->ms_get_authorizer(dest_type, authorizer);
-      }
-      return false;
-    }
-    KeyStore *ms_get_auth1_authorizer_keystore() override {
-      return osd->ms_get_auth1_authorizer_keystore();
-    }
   } heartbeat_dispatcher;
 
 private:
@@ -1853,7 +1833,6 @@ protected:
 
   pool_pg_num_history_t pg_num_history;
 
-  utime_t         had_map_since;
   RWLock          map_lock;
   list<OpRequestRef>  waiting_for_osdmap;
   deque<utime_t> osd_markdown_log;
@@ -1872,7 +1851,7 @@ protected:
     epoch_t advance_to,
     PG *pg,
     ThreadPool::TPHandle &handle,
-    PG::RecoveryCtx *rctx);
+    PG::PeeringCtx *rctx);
   void consume_map();
   void activate_map();
 
@@ -1965,7 +1944,7 @@ protected:
     const set<spg_t> &childpgids, set<PGRef> *out_pgs,
     OSDMapRef curmap,
     OSDMapRef nextmap,
-    PG::RecoveryCtx *rctx);
+    PG::PeeringCtx *rctx);
   void _finish_splits(set<PGRef>& pgs);
 
   // == monitor interaction ==
@@ -2027,12 +2006,12 @@ protected:
   }
 
   // -- generic pg peering --
-  PG::RecoveryCtx create_context();
-  void dispatch_context(PG::RecoveryCtx &ctx, PG *pg, OSDMapRef curmap,
+  PG::PeeringCtx create_context();
+  void dispatch_context(PG::PeeringCtx &ctx, PG *pg, OSDMapRef curmap,
                         ThreadPool::TPHandle *handle = NULL);
-  void dispatch_context_transaction(PG::RecoveryCtx &ctx, PG *pg,
+  void dispatch_context_transaction(PG::PeeringCtx &ctx, PG *pg,
                                     ThreadPool::TPHandle *handle = NULL);
-  void discard_context(PG::RecoveryCtx &ctx);
+  void discard_context(PG::PeeringCtx &ctx);
   void do_notifies(map<int,
 		       vector<pair<pg_notify_t, PastIntervals> > >&
 		       notify_list,
@@ -2199,12 +2178,10 @@ private:
   }
   void ms_fast_dispatch(Message *m) override;
   bool ms_dispatch(Message *m) override;
-  bool ms_get_authorizer(int dest_type, AuthAuthorizer **authorizer) override;
   void ms_handle_connect(Connection *con) override;
   void ms_handle_fast_connect(Connection *con) override;
   void ms_handle_fast_accept(Connection *con) override;
   int ms_handle_authentication(Connection *con) override;
-  KeyStore *ms_get_auth1_authorizer_keystore() override;
   bool ms_handle_reset(Connection *con) override;
   void ms_handle_remote_reset(Connection *con) override {}
   bool ms_handle_refused(Connection *con) override;

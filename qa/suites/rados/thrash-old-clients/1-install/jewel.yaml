@@ -1,3 +1,10 @@
+overrides:
+  ceph:
+    mon_bind_addrvec: false
+    mon_bind_msgr2: false
+    conf:
+      global:
+        mon warn on msgr2 not enabled: false
 tasks:
 - install:
     branch: jewel
@@ -7,6 +14,7 @@ tasks:
       - ceph-mgr-diskprediction-local
       - ceph-mgr-diskprediction-cloud
       - ceph-mgr-rook
+      - ceph-mgr-ssh
       - ceph-mgr
       - libcephfs2
       - libcephfs-devel

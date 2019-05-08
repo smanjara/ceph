@@ -17,6 +17,16 @@ const char *ceph_entity_type_name(int type)
 	}
 }
 
+const char *ceph_con_mode_name(int con_mode)
+{
+	switch (con_mode) {
+	case CEPH_CON_MODE_UNKNOWN: return "unknown";
+	case CEPH_CON_MODE_CRC: return "crc";
+	case CEPH_CON_MODE_SECURE: return "secure";
+	default: return "???";
+	}
+}
+
 const char *ceph_osd_op_name(int op)
 {
 	switch (op) {
@@ -55,6 +65,8 @@ const char *ceph_osd_state_name(int s)
                 return "noin";
         case CEPH_OSD_NOOUT:
                 return "noout";
+        case CEPH_OSD_STOP:
+                return "stop";
 	default:
 		return "???";
 	}
@@ -91,6 +103,8 @@ const char *ceph_release_name(int r)
 		return "mimic";
 	case CEPH_RELEASE_NAUTILUS:
 		return "nautilus";
+	case CEPH_RELEASE_OCTOPUS:
+		return "octopus";
 	default:
 		if (r < 0)
 			return "unspecified";
@@ -102,6 +116,9 @@ int ceph_release_from_name(const char *s)
 {
 	if (!s) {
 		return -1;
+	}
+	if (strcmp(s, "octopus") == 0) {
+		return CEPH_RELEASE_OCTOPUS;
 	}
 	if (strcmp(s, "nautilus") == 0) {
 		return CEPH_RELEASE_NAUTILUS;

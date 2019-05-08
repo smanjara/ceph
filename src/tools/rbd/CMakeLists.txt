@@ -1,3 +1,6 @@
+set(CURSES_NEED_NCURSES TRUE)
+find_package(Curses REQUIRED)
+
 set(rbd_srcs
   rbd.cc
   ArgumentTypes.cc
@@ -40,6 +43,7 @@ set(rbd_srcs
   action/Rename.cc
   action/Resize.cc
   action/Snap.cc
+  action/Sparsify.cc
   action/Status.cc
   action/Trash.cc
   action/Watch.cc)
@@ -47,11 +51,11 @@ set(rbd_srcs
 add_executable(rbd ${rbd_srcs}
   $<TARGET_OBJECTS:common_texttable_obj>)
 set_target_properties(rbd PROPERTIES OUTPUT_NAME rbd)
-target_link_libraries(rbd librbd librados-cxx
+target_link_libraries(rbd librbd librados
   cls_journal_client cls_rbd_client
   rbd_types
   journal
-  ceph-common global ncurses
+  ceph-common global ${CURSES_LIBRARIES}
   ${BLKID_LIBRARIES} ${CMAKE_DL_LIBS})
 if(WITH_KRBD)
   target_link_libraries(rbd 

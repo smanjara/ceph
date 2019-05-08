@@ -44,7 +44,9 @@ extern "C" {
 #include "rgw_usage.h"
 #include "rgw_orphan.h"
 #include "rgw_sync.h"
-#include "rgw_sync_log_trim.h"
+#include "rgw_trim_bilog.h"
+#include "rgw_trim_datalog.h"
+#include "rgw_trim_mdlog.h"
 #include "rgw_data_sync.h"
 #include "rgw_rest_conn.h"
 #include "rgw_realm_watcher.h"
@@ -193,6 +195,7 @@ void usage()
   cout << "  lc list                    list all bucket lifecycle progress\n";
   cout << "  lc get                     get a lifecycle bucket configuration\n";
   cout << "  lc process                 manually process lifecycle\n";
+  cout << "  lc reshard fix             fix LC for a resharded bucket\n";
   cout << "  metadata get               get metadata info\n";
   cout << "  metadata put               put metadata info\n";
   cout << "  metadata rm                remove metadata info\n";
@@ -331,6 +334,7 @@ void usage()
   cout << "   --infile=<file>           specify a file to read in when setting data\n";
   cout << "   --categories=<list>       comma separated list of categories, used in usage show\n";
   cout << "   --caps=<caps>             list of caps (e.g., \"usage=read, write; user=read\")\n";
+  cout << "   --op-mask=<op-mask>       permission of user's operations (e.g., \"read, write, delete, *\")\n";
   cout << "   --yes-i-really-mean-it    required for certain operations\n";
   cout << "   --warnings-only           when specified with bucket limit check, list\n";
   cout << "                             only buckets nearing or over the current max\n";
@@ -355,6 +359,7 @@ void usage()
   cout << "   --orphan-stale-secs       num of seconds to wait before declaring an object to be an orphan (default: 86400)\n";
   cout << "   --job-id                  set the job id (for orphans find)\n";
   cout << "   --max-concurrent-ios      maximum concurrent ios for orphans find (default: 32)\n";
+  cout << "   --detail                  detailed mode, log and stat head objects as well\n";
   cout << "\nOrphans list-jobs options:\n";
   cout << "   --extra-info              provide extra info in job list\n";
   cout << "\nRole options:\n";
@@ -435,6 +440,7 @@ enum {
   OPT_LC_LIST,
   OPT_LC_GET,
   OPT_LC_PROCESS,
+  OPT_LC_RESHARD_FIX,
   OPT_ORPHANS_FIND,
   OPT_ORPHANS_FINISH,
   OPT_ORPHANS_LIST_JOBS,
@@ -490,6 +496,7 @@ enum {
   OPT_DATA_SYNC_RUN,
   OPT_DATALOG_LIST,
   OPT_DATALOG_STATUS,
+  OPT_DATALOG_AUTOTRIM,
   OPT_DATALOG_TRIM,
   OPT_REALM_CREATE,
   OPT_REALM_DELETE,
@@ -887,6 +894,10 @@ static int get_cmd(const char *cmd, const char *prev_cmd, const char *prev_prev_
       return OPT_LC_GET;
     if (strcmp(cmd, "process") == 0)
       return OPT_LC_PROCESS;
+  } else if ((prev_prev_cmd && strcmp(prev_prev_cmd, "lc") == 0) &&
+	     strcmp(prev_cmd, "reshard") == 0) {
+    if (strcmp(cmd, "fix") == 0)
+      return OPT_LC_RESHARD_FIX;
   } else if (strcmp(prev_cmd, "orphans") == 0) {
     if (strcmp(cmd, "find") == 0)
       return OPT_ORPHANS_FIND;
@@ -949,6 +960,8 @@ static int get_cmd(const char *cmd, const char *prev_cmd, const char *prev_prev_
   } else if (strcmp(prev_cmd, "datalog") == 0) {
     if (strcmp(cmd, "list") == 0)
       return OPT_DATALOG_LIST;
+    if (strcmp(cmd, "autotrim") == 0)
+      return OPT_DATALOG_AUTOTRIM;
     if (strcmp(cmd, "trim") == 0)
       return OPT_DATALOG_TRIM;
     if (strcmp(cmd, "status") == 0)
@@ -1139,7 +1152,7 @@ static void show_reshard_status(
     formatter->dump_string("reshard_status", to_string(entry.reshard_status));
     formatter->dump_string("new_bucket_instance_id",
 			   entry.new_bucket_instance_id);
-    formatter->dump_unsigned("num_shards", entry.num_shards);
+    formatter->dump_int("num_shards", entry.num_shards);
     formatter->close_section();
   }
   formatter->close_section();
@@ -2153,7 +2166,7 @@ static void get_data_sync_status(const string& source_zone, list<string>& status
     flush_ss(ss, status);
     return;
   }
-  RGWDataSyncStatusManager sync(store, store->get_async_rados(), source_zone);
+  RGWDataSyncStatusManager sync(store, store->get_async_rados(), source_zone, nullptr);
 
   int ret = sync.init();
   if (ret < 0) {
@@ -2830,6 +2843,7 @@ int main(int argc, const char **argv)
   bool num_shards_specified = false;
   int max_concurrent_ios = 32;
   uint64_t orphan_stale_secs = (24 * 3600);
+  int detail = false;
 
   std::string val;
   std::ostringstream errs;
@@ -3204,6 +3218,8 @@ int main(int argc, const char **argv)
       event_id = val;
     } else if (ceph_argparse_witharg(args, i, &val, "--event-type", "--event-types", (char*)NULL)) {
       get_str_set(val, ",", event_types);
+    } else if (ceph_argparse_binary_flag(args, i, &detail, NULL, "--detail", (char*)NULL)) {
+      // do nothing
     } else if (strncmp(*i, "-", 1) == 0) {
       cerr << "ERROR: invalid flag " << *i << std::endl;
       return EINVAL;
@@ -6002,7 +6018,7 @@ next:
     }
 
     map<string, bufferlist> attrs;
-    ret = obj->put(bl, attrs);
+    ret = obj->put(bl, attrs, dpp());
     if (ret < 0) {
       cerr << "ERROR: put object returned error: " << cpp_strerror(-ret) << std::endl;
     }
@@ -6051,7 +6067,7 @@ next:
       }
     }
     if (need_rewrite) {
-      ret = store->rewrite_obj(bucket_info, obj);
+      ret = store->rewrite_obj(bucket_info, obj, dpp());
       if (ret < 0) {
         cerr << "ERROR: object rewrite returned: " << cpp_strerror(-ret) << std::endl;
         return -ret;
@@ -6152,7 +6168,7 @@ next:
           if (!need_rewrite) {
             formatter->dump_string("status", "Skipped");
           } else {
-            r = store->rewrite_obj(bucket_info, obj);
+            r = store->rewrite_obj(bucket_info, obj, dpp());
             if (r == 0) {
               formatter->dump_string("status", "Success");
             } else {
@@ -6346,7 +6362,7 @@ next:
     RGWReshard reshard(store);
 
     cls_rgw_reshard_entry entry;
-    //entry.tenant = tenant;
+    entry.tenant = tenant;
     entry.bucket_name = bucket_name;
     //entry.bucket_id = bucket_id;
 
@@ -6419,6 +6435,8 @@ next:
         handled = dump_string("etag", bl, formatter);
       } else if (iter->first == RGW_ATTR_COMPRESSION) {
         handled = decode_dump<RGWCompressionInfo>("compression", bl, formatter);
+      } else if (iter->first == RGW_ATTR_DELETE_AT) {
+        handled = decode_dump<utime_t>("delete_at", bl, formatter);
       }
 
       if (!handled)
@@ -6575,6 +6593,15 @@ next:
     }
   }
 
+
+  if (opt_cmd == OPT_LC_RESHARD_FIX) {
+    ret = RGWBucketAdminOp::fix_lc_shards(store, bucket_op,f);
+    if (ret < 0) {
+      cerr << "ERROR: listing stale instances" << cpp_strerror(-ret) << std::endl;
+    }
+
+  }
+
   if (opt_cmd == OPT_ORPHANS_FIND) {
     if (!yes_i_really_mean_it) {
       cerr << "accidental removal of active objects can not be reversed; "
@@ -6600,7 +6627,7 @@ next:
     info.job_name = job_id;
     info.num_shards = num_shards;
 
-    int ret = search.init(job_id, &info);
+    int ret = search.init(job_id, &info, detail);
     if (ret < 0) {
       cerr << "could not init search, ret=" << ret << std::endl;
       return -ret;
@@ -7012,7 +7039,7 @@ next:
       cerr << "ERROR: source zone not specified" << std::endl;
       return EINVAL;
     }
-    RGWDataSyncStatusManager sync(store, store->get_async_rados(), source_zone);
+    RGWDataSyncStatusManager sync(store, store->get_async_rados(), source_zone, nullptr);
 
     int ret = sync.init();
     if (ret < 0) {
@@ -7076,7 +7103,7 @@ next:
       return EINVAL;
     }
 
-    RGWDataSyncStatusManager sync(store, store->get_async_rados(), source_zone);
+    RGWDataSyncStatusManager sync(store, store->get_async_rados(), source_zone, nullptr);
 
     int ret = sync.init();
     if (ret < 0) {
@@ -7105,7 +7132,7 @@ next:
       return ret;
     }
 
-    RGWDataSyncStatusManager sync(store, store->get_async_rados(), source_zone, sync_module);
+    RGWDataSyncStatusManager sync(store, store->get_async_rados(), source_zone, nullptr, sync_module);
 
     ret = sync.init();
     if (ret < 0) {
@@ -7534,6 +7561,24 @@ next:
     formatter->flush(cout);
   }
 
+  if (opt_cmd == OPT_DATALOG_AUTOTRIM) {
+    RGWCoroutinesManager crs(store->ctx(), store->get_cr_registry());
+    RGWHTTPManager http(store->ctx(), crs.get_completion_mgr());
+    int ret = http.start();
+    if (ret < 0) {
+      cerr << "failed to initialize http client with " << cpp_strerror(ret) << std::endl;
+      return -ret;
+    }
+
+    auto num_shards = g_conf()->rgw_data_log_num_shards;
+    std::vector<std::string> markers(num_shards);
+    ret = crs.run(create_admin_data_log_trim_cr(store, &http, num_shards, markers));
+    if (ret < 0) {
+      cerr << "automated datalog trim failed with " << cpp_strerror(ret) << std::endl;
+      return -ret;
+    }
+  }
+
   if (opt_cmd == OPT_DATALOG_TRIM) {
     utime_t start_time, end_time;
 
@@ -7815,6 +7860,13 @@ next:
  }
 
  if (opt_cmd == OPT_RESHARD_STALE_INSTANCES_LIST) {
+   if (!store->svc.zone->can_reshard() && !yes_i_really_mean_it) {
+     cerr << "Resharding disabled in a multisite env, stale instances unlikely from resharding" << std::endl;
+     cerr << "These instances may not be safe to delete." << std::endl;
+     cerr << "Use --yes-i-really-mean-it to force displaying these instances." << std::endl;
+     return EINVAL;
+   }
+
    ret = RGWBucketAdminOp::list_stale_instances(store, bucket_op,f);
    if (ret < 0) {
      cerr << "ERROR: listing stale instances" << cpp_strerror(-ret) << std::endl;
@@ -7822,6 +7874,11 @@ next:
  }
 
  if (opt_cmd == OPT_RESHARD_STALE_INSTANCES_DELETE) {
+   if (!store->svc.zone->can_reshard()) {
+     cerr << "Resharding disabled in a multisite env. Stale instances are not safe to be deleted." << std::endl;
+     return EINVAL;
+   }
+
    ret = RGWBucketAdminOp::clear_stale_instances(store, bucket_op,f);
    if (ret < 0) {
      cerr << "ERROR: deleting stale instances" << cpp_strerror(-ret) << std::endl;
@@ -8134,18 +8191,16 @@ next:
     RGWUserInfo& user_info = user_op.get_user_info();
     RGWUserPubSub ups(store, user_info.user_id);
 
-    RGWUserPubSub::Sub::list_events_result result;
-
     if (!max_entries_specified) {
-      max_entries = 100;
+      max_entries = RGWUserPubSub::Sub::DEFAULT_MAX_EVENTS;
     }
     auto sub = ups.get_sub(sub_name);
-    ret = sub->list_events(marker, max_entries, &result);
+    ret = sub->list_events(marker, max_entries);
     if (ret < 0) {
       cerr << "ERROR: could not list events: " << cpp_strerror(-ret) << std::endl;
       return -ret;
     }
-    encode_json("result", result, formatter);
+    encode_json("result", *sub, formatter);
     formatter->flush(cout);
  }
 

@@ -83,8 +83,8 @@ describe('RbdSnapshotListComponent', () => {
       fixture.detectChanges();
       const i18n = TestBed.get(I18n);
       called = false;
-      rbdService = new RbdService(null);
-      notificationService = new NotificationService(null, null);
+      rbdService = new RbdService(null, null);
+      notificationService = new NotificationService(null, null, null);
       authStorageService = new AuthStorageService();
       authStorageService.set('user', '', { 'rbd-image': ['create', 'read', 'update', 'delete'] });
       component = new RbdSnapshotListComponent(
@@ -206,7 +206,7 @@ describe('RbdSnapshotListComponent', () => {
     it('should display suggested snapshot name', () => {
       component.openCreateSnapshotModal();
       expect(component.modalRef.content.snapName).toMatch(
-        RegExp(`^${component.rbdName}-\\d+T\\d+Z\$`)
+        RegExp(`^${component.rbdName}_[\\d-]+T[\\d.:]+\\+[\\d:]+\$`)
       );
     });
   });

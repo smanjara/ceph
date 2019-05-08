@@ -234,9 +234,9 @@ class GaneshaConfParser(object):
             except ValueError:
                 if raw_value == "true":
                     return True
-                elif raw_value == "false":
+                if raw_value == "false":
                     return False
-                elif raw_value.find('"') == 0:
+                if raw_value.find('"') == 0:
                     return raw_value[1:-1]
                 return raw_value
         else:
@@ -247,7 +247,7 @@ class GaneshaConfParser(object):
         equal_idx = self.stream().find('=')
         semicolon_idx = self.stream().find(';')
         if equal_idx == -1:
-            raise Exception("Maformed stanza: no equal symbol found.")
+            raise Exception("Malformed stanza: no equal symbol found.")
         parameter_name = self.stream()[:equal_idx].lower()
         parameter_value = self.stream()[equal_idx+1:semicolon_idx]
         block_dict[parameter_name] = self.parse_parameter_value(
@@ -302,10 +302,10 @@ class GaneshaConfParser(object):
         def format_val(key, val):
             if isinstance(val, list):
                 return ', '.join([format_val(key, v) for v in val])
-            elif isinstance(val, bool):
+            if isinstance(val, bool):
                 return str(val).lower()
-            elif isinstance(val, int) or (block['block_name'] == 'CLIENT'
-                                          and key == 'clients'):
+            if isinstance(val, int) or (block['block_name'] == 'CLIENT'
+                                        and key == 'clients'):
                 return '{}'.format(val)
             return '"{}"'.format(val)
 
@@ -366,7 +366,7 @@ class FSal(object):
     def from_fsal_block(fsal_block):
         if fsal_block['name'] == "CEPH":
             return CephFSFSal.from_fsal_block(fsal_block)
-        elif fsal_block['name'] == 'RGW':
+        if fsal_block['name'] == 'RGW':
             return RGWFSal.from_fsal_block(fsal_block)
         return None
 
@@ -377,7 +377,7 @@ class FSal(object):
     def from_dict(fsal_dict):
         if fsal_dict['name'] == "CEPH":
             return CephFSFSal.from_dict(fsal_dict)
-        elif fsal_dict['name'] == 'RGW':
+        if fsal_dict['name'] == 'RGW':
             return RGWFSal.from_dict(fsal_dict)
         return None
 
@@ -579,7 +579,7 @@ class Export(object):
         else:
             self.attr_expiration_time = attr_expiration_time
         self.security_label = security_label
-        self.protocols = set([GaneshaConf.format_protocol(p) for p in protocols])
+        self.protocols = {GaneshaConf.format_protocol(p) for p in protocols}
         self.transports = set(transports)
         self.clients = clients
 
@@ -835,12 +835,12 @@ class GaneshaConf(object):
             return None
         if squash.lower() in ["no_root_squash", "noidsquash", "none"]:
             return "no_root_squash"
-        elif squash.lower() in ["rootid", "root_id_squash", "rootidsquash"]:
+        if squash.lower() in ["rootid", "root_id_squash", "rootidsquash"]:
             return "root_id_squash"
-        elif squash.lower() in ["root", "root_squash", "rootsquash"]:
+        if squash.lower() in ["root", "root_squash", "rootsquash"]:
             return "root_squash"
-        elif squash.lower() in ["all", "all_squash", "allsquash",
-                                "all_anonymous", "allanonymous"]:
+        if squash.lower() in ["all", "all_squash", "allsquash",
+                              "all_anonymous", "allanonymous"]:
             return "all_squash"
         logger.error("[NFS] could not parse squash value: %s", squash)
         raise NFSException("'{}' is an invalid squash option".format(squash))
@@ -849,7 +849,7 @@ class GaneshaConf(object):
     def format_protocol(cls, protocol):
         if str(protocol) in ["NFSV3", "3", "V3", "NFS3"]:
             return 3
-        elif str(protocol) in ["NFSV4", "4", "V4", "NFS4"]:
+        if str(protocol) in ["NFSV4", "4", "V4", "NFS4"]:
             return 4
         logger.error("[NFS] could not parse protocol value: %s", protocol)
         raise NFSException("'{}' is an invalid NFS protocol version identifier"
@@ -857,9 +857,10 @@ class GaneshaConf(object):
 
     @classmethod
     def format_path(cls, path):
-        path = path.strip()
-        if len(path) > 1 and path[-1] == '/':
-            path = path[:-1]
+        if path is not None:
+            path = path.strip()
+            if len(path) > 1 and path[-1] == '/':
+                path = path[:-1]
         return path
 
     def validate(self, export):

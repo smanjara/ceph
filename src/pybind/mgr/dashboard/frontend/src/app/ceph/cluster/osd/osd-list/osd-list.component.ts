@@ -118,17 +118,17 @@ export class OsdListComponent implements OnInit {
         icon: 'fa-unlink'
       },
       {
-        name: this.i18n('Remove'),
+        name: this.i18n('Purge'),
         permission: 'delete',
         click: () =>
           this.showCriticalConfirmationModal(
-            this.i18n('Remove'),
+            this.i18n('Purge'),
             this.i18n('OSD'),
-            this.i18n('removed'),
-            this.osdService.remove
+            this.i18n('purged'),
+            this.osdService.purge
           ),
         disable: () => this.isNotSelectedOrInState('up'),
-        icon: 'fa-remove'
+        icon: 'fa-eraser'
       },
       {
         name: this.i18n('Destroy'),
@@ -141,7 +141,7 @@ export class OsdListComponent implements OnInit {
             this.osdService.destroy
           ),
         disable: () => this.isNotSelectedOrInState('up'),
-        icon: 'fa-eraser'
+        icon: 'fa-remove'
       }
     ];
   }
@@ -153,7 +153,7 @@ export class OsdListComponent implements OnInit {
       { prop: 'collectedStates', name: this.i18n('Status'), cellTemplate: this.statusColor },
       { prop: 'stats.numpg', name: this.i18n('PGs') },
       { prop: 'stats.stat_bytes', name: this.i18n('Size'), pipe: this.dimlessBinaryPipe },
-      { name: this.i18n('Usage'), cellTemplate: this.osdUsageTpl },
+      { prop: 'stats.usage', name: this.i18n('Usage'), cellTemplate: this.osdUsageTpl },
       {
         prop: 'stats_history.out_bytes',
         name: this.i18n('Read bytes'),
@@ -221,11 +221,11 @@ export class OsdListComponent implements OnInit {
 
   getOsdList() {
     this.osdService.getList().subscribe((data: any[]) => {
-      this.osds = data;
-      data.map((osd) => {
+      this.osds = data.map((osd) => {
         osd.collectedStates = OsdListComponent.collectStates(osd);
         osd.stats_history.out_bytes = osd.stats_history.op_out_bytes.map((i) => i[1]);
         osd.stats_history.in_bytes = osd.stats_history.op_in_bytes.map((i) => i[1]);
+        osd.stats.usage = osd.stats.stat_bytes_used / osd.stats.stat_bytes;
         osd.cdIsBinary = true;
         return osd;
       });

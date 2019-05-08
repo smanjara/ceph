@@ -24,6 +24,18 @@
 
 #define dout_subsys ceph_subsys_auth
 
+namespace {
+#ifdef WITH_SEASTAR
+  ceph::common::ConfigProxy& conf(CephContext*) {
+    return ceph::common::local_conf();
+  }
+#else
+  ConfigProxy& conf(CephContext* cct) {
+    return cct->_conf;
+  }
+#endif
+}
+
 int CephxSessionHandler::_calc_signature(Message *m, uint64_t *psig)
 {
   const ceph_msg_header& header = m->get_header();
@@ -124,7 +136,7 @@ int CephxSessionHandler::_calc_signature(Message *m, uint64_t *psig)
 int CephxSessionHandler::sign_message(Message *m)
 {
   // If runtime signing option is off, just return success without signing.
-  if (!cct->_conf->cephx_sign_messages) {
+  if (!conf(cct)->cephx_sign_messages) {
     return 0;
   }
 
@@ -144,7 +156,7 @@ int CephxSessionHandler::sign_message(Message *m)
 int CephxSessionHandler::check_message_signature(Message *m)
 {
   // If runtime signing option is off, just return success without checking signature.
-  if (!cct->_conf->cephx_sign_messages) {
+  if (!conf(cct)->cephx_sign_messages) {
     return 0;
   }
   if ((features & CEPH_FEATURE_MSG_AUTH) == 0) {
@@ -178,52 +190,5 @@ int CephxSessionHandler::check_message_signature(Message *m)
     return (SESSION_SIGNATURE_FAILURE);
   }
 
-  return 0;
-}
-
-int CephxSessionHandler::sign_bufferlist(bufferlist &in, bufferlist &out)
-{
-  char exp_buf[CryptoKey::get_max_outbuf_size(in.length())];
-
-  try {
-    const CryptoKey::in_slice_t sin{in.length(),
-        reinterpret_cast<const unsigned char *>(in.c_str())};
-    const CryptoKey::out_slice_t sout{
-        sizeof(exp_buf),
-        reinterpret_cast<unsigned char *>(&exp_buf)};
-    key.encrypt(cct, sin, sout);
-  }
-  catch (std::exception &e) {
-    lderr(cct) << __func__ << " failed to encrypt signature block" << dendl;
-    return -1;
-  }
-
-
-  out.append(exp_buf, sizeof(exp_buf));
-
-  return 0;
-}
-
-int CephxSessionHandler::encrypt_bufferlist(bufferlist &in, bufferlist &out) {
-  std::string error;
-  try {
-#warning fixme key
-    key.encrypt(cct, in, out, &error);
-  } catch (std::exception &e) {
-    lderr(cct) << __func__ << " failed to encrypt buffer: " << error << dendl;
-    return -1;
-  }
-  return 0;
-}
-
-int CephxSessionHandler::decrypt_bufferlist(bufferlist &in, bufferlist &out) {
-  std::string error;
-  try {
-#warning fixme key
-    key.decrypt(cct, in, out, &error);
-  } catch (std::exception &e) {
-    lderr(cct) << __func__ << " failed to decrypt buffer: " << error << dendl;
-    return -1;
-  }
   return 0;
 }

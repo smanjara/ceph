@@ -117,7 +117,7 @@ public:
   void stop(Context *on_finish = nullptr, bool manual = false,
 	    int r = 0, const std::string& desc = "");
   void restart(Context *on_finish = nullptr);
-  void flush(Context *on_finish = nullptr);
+  void flush();
 
   void resync_image(Context *on_finish=nullptr);
 
@@ -199,13 +199,9 @@ protected:
 
   virtual void on_start_fail(int r, const std::string &desc);
   virtual bool on_start_interrupted();
+  virtual bool on_start_interrupted(Mutex& lock);
 
   virtual void on_stop_journal_replay(int r = 0, const std::string &desc = "");
-
-  virtual void on_flush_local_replay_flush_start(Context *on_flush);
-  virtual void on_flush_local_replay_flush_finish(Context *on_flush, int r);
-  virtual void on_flush_flush_commit_position_start(Context *on_flush);
-  virtual void on_flush_flush_commit_position_finish(Context *on_flush, int r);
 
   bool on_replay_interrupted();
 
@@ -377,6 +373,12 @@ private:
     return (m_state == STATE_REPLAYING ||
             m_state == STATE_REPLAY_FLUSHING);
   }
+
+  void flush_local_replay(Context* on_flush);
+  void handle_flush_local_replay(Context* on_flush, int r);
+
+  void flush_commit_position(Context* on_flush);
+  void handle_flush_commit_position(Context* on_flush, int r);
 
   bool update_mirror_image_status(bool force, const OptionalState &state);
   bool start_mirror_image_status_update(bool force, bool restarting);

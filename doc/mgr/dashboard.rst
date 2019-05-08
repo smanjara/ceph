@@ -1,37 +1,43 @@
 .. _mgr-dashboard:
 
-Ceph Manager Dashboard
-======================
+Ceph Dashboard
+==============
 
 Overview
 --------
 
-The original Ceph Manager Dashboard that was shipped with Ceph Luminous started
+The Ceph Dashboard is a built-in web-based Ceph management and monitoring
+application to administer various aspects and objects of the cluster. It is
+implemented as a :ref:`ceph-manager-daemon` module.
+
+The original Ceph Dashboard that was shipped with Ceph Luminous started
 out as a simple read-only view into various run-time information and performance
 data of a Ceph cluster. It used a very simple architecture to achieve the
 original goal. However, there was a growing demand for adding more web-based
 management capabilities, to make it easier to administer Ceph for users that
 prefer a WebUI over using the command line.
 
-The new :term:`Ceph Manager Dashboard` plugin is a replacement of the previous
-one and adds a built-in web based monitoring and administration application to
-the Ceph Manager. The architecture and functionality of this new plugin is
-derived from and inspired by the `openATTIC Ceph management and monitoring tool
+The new :term:`Ceph Dashboard` module is a replacement of the previous one and
+adds a built-in web based monitoring and administration application to the Ceph
+Manager. The architecture and functionality of this new plugin is derived from
+and inspired by the `openATTIC Ceph management and monitoring tool
 <https://openattic.org/>`_. The development is actively driven by the team
 behind openATTIC at `SUSE <https://www.suse.com/>`_, with a lot of support from
-the Ceph community and other companies like Red Hat.
+companies like `Red Hat <https://redhat.com/>`_ and other members of the Ceph
+community.
 
-
-The dashboard plugin's backend code uses the CherryPy framework and a custom
+The dashboard module's backend code uses the CherryPy framework and a custom
 REST API implementation. The WebUI implementation is based on
 Angular/TypeScript, merging both functionality from the original dashboard as
 well as adding new functionality originally developed for the standalone version
-of openATTIC. The Ceph Manager Dashboard plugin is implemented as a web
+of openATTIC. The Ceph Dashboard module is implemented as a web
 application that visualizes information and statistics about the Ceph cluster
 using a web server hosted by ``ceph-mgr``.
 
-The dashboard currently provides the following features to monitor and manage
-various aspects of your Ceph cluster:
+Feature Overview
+^^^^^^^^^^^^^^^^
+
+The dashboard provides the following features:
 
 * **Multi-User and Role Management**: The dashboard supports multiple user
   accounts with different permissions (roles). The user accounts and roles
@@ -48,8 +54,17 @@ various aspects of your Ceph cluster:
   and DELETE API requests in the Ceph audit log. See :ref:`dashboard-auditing`
   for instructions on how to enable this feature.
 * **Internationalization (I18N)**: use the dashboard in different languages.
+
+Currently, Ceph Dashboard is capable of monitoring and managing the following
+aspects of your Ceph cluster:
+
 * **Overall cluster health**: Displays overall cluster status, performance
   and capacity metrics.
+* **Embedded Grafana Dashboards**: Ceph Dashboard is capable of embedding
+  `Grafana <https://grafana.com>`_ dashboards in many locations, to display
+  additional information and performance metrics gathered by the
+  :ref:`mgr-prometheus`. See :ref:`dashboard-grafana` for details on how to
+  configure this functionality.
 * **Cluster logs**: Display the latest updates to the cluster's event and audit
   log files.
 * **Hosts**: Provides a list of all hosts associated to the cluster, which
@@ -68,6 +83,9 @@ various aspects of your Ceph cluster:
   the level of backfilling activity.
 * **iSCSI**: Lists all hosts that run the TCMU runner service, displaying all
   images and their performance characteristics (read/write ops, traffic).
+  Create, modify and delete iSCSI targets (via ``ceph-iscsi``). See
+  :ref:`dashboard-iscsi-management` for instructions on how to configure this
+  feature.
 * **RBD**: Lists all RBD images and their properties (size, objects, features).
   Create, copy, modify and delete RBD images. Create, delete and rollback
   snapshots of selected images, protect/unprotect these snapshots against
@@ -80,13 +98,44 @@ various aspects of your Ceph cluster:
 * **Object Gateway**: Lists all active object gateways and their performance
   counters. Display and manage (add/edit/delete) object gateway users and their
   details (e.g. quotas) as well as the users' buckets and their details (e.g.
-  owner, quotas).
-* **NFS**: Manage NFS exports of CephFS filesystems and RGW S3 buckets via NFS Ganesha.```
+  owner, quotas). See :ref:`dashboard-enabling-object-gateway` for configuration
+  instructions.
+* **NFS**: Manage NFS exports of CephFS filesystems and RGW S3 buckets via NFS
+  Ganesha. See :ref:`dashboard-nfs-ganesha-management` for details on how to
+  enable this functionality.
+* **Ceph Manager Modules**: Enable and disable all Ceph Manager modules, change
+  the module-specific configuration settings.
+
+
+Supported Browsers
+^^^^^^^^^^^^^^^^^^
+
+Ceph Dashboard is primarily tested and developed using the following web
+browsers:
+
++----------------------------------------------+----------+
+|                    Browser                   | Versions |
++==============================================+==========+
+| `Chrome <https://www.google.com/chrome/>`_   | 68+      |
++----------------------------------------------+----------+
+| `Firefox <http://www.mozilla.org/firefox/>`_ | 61+      |
++----------------------------------------------+----------+
+
+While Ceph Dashboard might work in older browsers, we cannot guarantee it and
+recommend you to update your browser to the latest version.
 
 Enabling
 --------
 
-Within a running Ceph cluster, the Ceph Manager Dashboard is enabled with::
+If you have installed ``ceph-mgr-dashboard`` from distribution packages, the
+package management system should have taken care of installing all the required
+dependencies.
+
+If you're installing Ceph from source and want to start the dashboard from your
+development environment, please see the files ``README.rst`` and ``HACKING.rst``
+in directory ``src/pybind/mgr/dashboard`` of the source code.
+
+Within a running Ceph cluster, the Ceph Dashboard is enabled with::
 
   $ ceph mgr module enable dashboard
 
@@ -155,7 +204,7 @@ wanted or required.
     $ ceph mgr module disable dashboard
     $ ceph mgr module enable dashboard
 
-Host name and port
+Host Name and Port
 ^^^^^^^^^^^^^^^^^^
 
 Like most web applications, dashboard binds to a TCP/IP address and TCP port.
@@ -171,6 +220,7 @@ cluster-wide level (so they apply to all manager instances) as follows::
 
   $ ceph config set mgr mgr/dashboard/server_addr $IP
   $ ceph config set mgr mgr/dashboard/server_port $PORT
+  $ ceph config set mgr mgr/dashboard/ssl_server_port $PORT
 
 Since each ``ceph-mgr`` hosts its own instance of dashboard, it may also be
 necessary to configure them separately. The IP address and port for a specific
@@ -178,6 +228,7 @@ manager instance can be changed with the following commands::
 
   $ ceph config set mgr mgr/dashboard/$name/server_addr $IP
   $ ceph config set mgr mgr/dashboard/$name/server_port $PORT
+  $ ceph config set mgr mgr/dashboard/$name/ssl_server_port $PORT
 
 Replace ``$name`` with the ID of the ceph-mgr instance hosting the dashboard web
 app.
@@ -188,7 +239,7 @@ app.
   currently configured. Look for the ``dashboard`` key to obtain the URL for
   accessing the dashboard.
 
-Username and password
+Username and Password
 ^^^^^^^^^^^^^^^^^^^^^
 
 In order to be able to log in, you need to create a user account and associate
@@ -201,8 +252,9 @@ commands::
 
   $ ceph dashboard ac-user-create <username> <password> administrator
 
+.. _dashboard-enabling-object-gateway:
 
-Enabling the Object Gateway management frontend
+Enabling the Object Gateway Management Frontend
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 To use the Object Gateway management functionality of the dashboard, you will
@@ -228,8 +280,10 @@ Finally, provide the credentials to the dashboard::
   $ ceph dashboard set-rgw-api-access-key <access_key>
   $ ceph dashboard set-rgw-api-secret-key <secret_key>
 
-This is all you have to do to get the Object Gateway management functionality
-working. The host and port of the Object Gateway are determined automatically.
+In a typical default configuration with a single RGW endpoint, this is all you
+have to do to get the Object Gateway management functionality working. The
+dashboard will try to automatically determine the host and port of the Object
+Gateway by obtaining this information from the Ceph Manager's service map.
 
 If multiple zones are used, it will automatically determine the host within the
 master zone group and master zone. This should be sufficient for most setups,
@@ -259,18 +313,37 @@ into timeouts, then you can set the timeout value to your needs::
 
 The default value is 45 seconds.
 
+.. _dashboard-iscsi-management:
+
 Enabling iSCSI Management
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The Ceph Manager Dashboard can manage iSCSI targets using the REST API provided
-by the `rbd-target-api` service of the `ceph-iscsi <https://github.com/ceph/ceph-iscsi>`_
-project. Please make sure that it's installed and enabled on the iSCSI gateways.
+The Ceph Dashboard can manage iSCSI targets using the REST API provided by the
+`rbd-target-api` service of the :ref:`ceph-iscsi`. Please make sure that it's
+installed and enabled on the iSCSI gateways.
+
+.. note::
+  The iSCSI management functionality of Ceph Dashboard depends on the latest
+  version 3 of the `ceph-iscsi <https://github.com/ceph/ceph-iscsi>`_ project.
+  Make sure that your operating system provides the correct version, otherwise
+  the dashboard won't enable the management features.
+
+If ceph-iscsi REST API is configured in HTTPS mode and its using a self-signed
+certificate, then you need to configure the dashboard to avoid SSL certificate
+verification when accessing ceph-iscsi API.
+
+To disable API SSL verification run the following command::
+
+    $ ceph dashboard set-iscsi-api-ssl-verification false
 
 The available iSCSI gateways must be defined using the following commands::
 
     $ ceph dashboard iscsi-gateway-list
-    $ ceph dashboard iscsi-gateway-add <gateway_name> <scheme>://<username>:<password>@<host>[:port]
+    $ ceph dashboard iscsi-gateway-add <scheme>://<username>:<password>@<host>[:port]
     $ ceph dashboard iscsi-gateway-rm <gateway_name>
+
+
+.. _dashboard-grafana:
 
 Enabling the Embedding of Grafana Dashboards
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -333,13 +406,23 @@ mgr/prometheus/>`_ of the prometheus module.
         org_role = Viewer
 
 After you have set up Grafana and Prometheus, you will need to configure the
-connection information that the Ceph Manager Dashboard will use to access Grafana.
+connection information that the Ceph Dashboard will use to access Grafana.
 
 You need to tell the dashboard on which url Grafana instance is running/deployed::
 
   $ ceph dashboard set-grafana-api-url <grafana-server-url>  # default: ''
 
 The format of url is : `<protocol>:<IP-address>:<port>`
+
+.. note::
+  Ceph Dashboard embeds the Grafana dashboards via ``iframe`` HTML elements.
+  If Grafana is configured without SSL/TLS support, most browsers will block the
+  embedding of insecure content into a secured web page, if the SSL support in
+  the dashboard has been enabled (which is the default configuration). If you
+  can't see the embedded Grafana dashboards after enabling them as outlined
+  above, check your browser's documentation on how to unblock mixed content.
+  Alternatively, consider enabling SSL/TLS support in Grafana.
+  
 You can directly access Grafana Instance as well to monitor your cluster.
 
 .. _dashboard-sso-support:
@@ -347,7 +430,7 @@ You can directly access Grafana Instance as well to monitor your cluster.
 Enabling Single Sign-On (SSO)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The Ceph Manager Dashboard supports external authentication of users via the
+The Ceph Dashboard supports external authentication of users via the
 `SAML 2.0 <https://en.wikipedia.org/wiki/SAML_2.0>`_ protocol. You need to create
 the user accounts and associate them with the desired roles first, as authorization
 is still performed by the Dashboard. However, the authentication process can be
@@ -393,7 +476,7 @@ To enable SSO::
 
   $ ceph dashboard sso enable saml2
 
-Enabling Prometheus alerting
+Enabling Prometheus Alerting
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Using Prometheus for monitoring, you have to define `alerting rules
@@ -468,7 +551,7 @@ twice if you use both sources.
    should not disturb each other through annoying duplicated notifications
    popping up.
 
-Accessing the dashboard
+Accessing the Dashboard
 ^^^^^^^^^^^^^^^^^^^^^^^
 
 You can now access the dashboard using your (JavaScript-enabled) web browser, by
@@ -629,7 +712,7 @@ To associate roles to users, the following CLI commands are available:
   $ ceph dashboard ac-user-del-roles <username> <rolename> [<rolename>...]
 
 
-Example of user and custom role creation
+Example of User and Custom Role Creation
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 In this section we show a full example of the commands that need to be used
@@ -651,11 +734,33 @@ view and create Ceph pools, and have read-only access to any other scopes.
    $ ceph dashboard ac-user-set-roles bob rbd/pool-manager read-only
 
 
-Reverse proxies
----------------
+Proxy Configuration
+-------------------
+
+In a Ceph cluster with multiple ceph-mgr instances, only the dashboard running
+on the currently active ceph-mgr daemon will serve incoming requests. Accessing
+the dashboard's TCP port on any of the other ceph-mgr instances that are
+currently on standby will perform a HTTP redirect (303) to the currently active
+manager's dashboard URL. This way, you can point your browser to any of the
+ceph-mgr instances in order to access the dashboard.
+
+If you want to establish a fixed URL to reach the dashboard or if you don't want
+to allow direct connections to the manager nodes, you could set up a proxy that
+automatically forwards incoming requests to the currently active ceph-mgr
+instance.
+
+.. note::
+  Note that putting the dashboard behind a load-balancing proxy like `HAProxy
+  <https://www.haproxy.org/>`_ currently has some limitations, particularly if
+  you require the traffic between the proxy and the dashboard to be encrypted
+  via SSL/TLS. See `BUG#24662 <https://tracker.ceph.com/issues/24662>`_ for
+  details.
+
+Configuring a URL Prefix
+^^^^^^^^^^^^^^^^^^^^^^^^
 
 If you are accessing the dashboard via a reverse proxy configuration,
-you may wish to service it under a URL prefix.  To get the dashboard
+you may wish to service it under a URL prefix. To get the dashboard
 to use hyperlinks that include your prefix, you can set the
 ``url_prefix`` setting:
 
@@ -665,10 +770,11 @@ to use hyperlinks that include your prefix, you can set the
 
 so you can access the dashboard at ``http://$IP:$PORT/$PREFIX/``.
 
+
 .. _dashboard-auditing:
 
-Auditing
---------
+Auditing API Requests
+---------------------
 
 The REST API is capable of logging PUT, POST and DELETE requests to the Ceph
 audit log. This feature is disabled by default, but can be enabled with the
@@ -692,6 +798,7 @@ A log entry may look like this::
 
   2018-10-22 15:27:01.302514 mgr.x [INF] [DASHBOARD] from='https://[::ffff:127.0.0.1]:37022' path='/api/rgw/user/klaus' method='PUT' user='admin' params='{"max_buckets": "1000", "display_name": "Klaus Mustermann", "uid": "klaus", "suspended": "0", "email": "klaus.mustermann@ceph.com"}'
 
+.. _dashboard-nfs-ganesha-management:
 
 NFS-Ganesha Management
 ----------------------
@@ -722,7 +829,7 @@ Both the ``conf-<daemon_id>`` and ``export-<id>`` objects must be stored in the
 same RADOS pool/namespace.
 
 
-Configuring NFS-Ganesha in the dashboard
+Configuring NFS-Ganesha in the Dashboard
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 To enable the management of NFS-Ganesha exports in Ceph Dashboard, we only
@@ -739,7 +846,7 @@ After running the above command, Ceph Dashboard is able to find the NFS-Ganesha
 configuration objects and we can start manage the exports through the Web UI.
 
 
-Support for multiple NFS-Ganesha clusters
+Support for Multiple NFS-Ganesha Clusters
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Ceph Dashboard also supports the management of NFS-Ganesha exports belonging

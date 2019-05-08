@@ -84,9 +84,9 @@ export class RbdSnapshotListComponent implements OnInit, OnChanges {
     actions.unprotect.click = () => this.toggleProtection();
     const getImageUri = () =>
       this.selection.first() &&
-      `${encodeURI(this.poolName)}/${encodeURI(this.rbdName)}/${encodeURI(
-        this.selection.first().name
-      )}`;
+      `${encodeURIComponent(this.poolName)}/${encodeURIComponent(
+        this.rbdName
+      )}/${encodeURIComponent(this.selection.first().name)}`;
     actions.clone.routerLink = () => `/block/rbd/clone/${getImageUri()}`;
     actions.copy.routerLink = () => `/block/rbd/copy/${getImageUri()}`;
     actions.rollback.click = () => this.rollbackModal();
@@ -167,9 +167,7 @@ export class RbdSnapshotListComponent implements OnInit, OnChanges {
     } else {
       // Auto-create a name for the snapshot: <image_name>_<timestamp_ISO_8601>
       // https://en.wikipedia.org/wiki/ISO_8601
-      snapName = `${this.rbdName}-${moment()
-        .utc()
-        .format('YYYYMMDD[T]HHmmss[Z]')}`;
+      snapName = `${this.rbdName}_${moment().toISOString(true)}`;
     }
     this.modalRef.content.setSnapName(snapName);
     this.modalRef.content.onSubmit.subscribe((snapshotName: string) => {
@@ -206,7 +204,7 @@ export class RbdSnapshotListComponent implements OnInit, OnChanges {
     this.rbdService
       .protectSnapshot(this.poolName, this.rbdName, snapshotName, !isProtected)
       .toPromise()
-      .then((resp) => {
+      .then(() => {
         const executingTask = new ExecutingTask();
         executingTask.name = finishedTask.name;
         executingTask.metadata = finishedTask.metadata;
@@ -247,7 +245,7 @@ export class RbdSnapshotListComponent implements OnInit, OnChanges {
           }
         );
       })
-      .catch((resp) => {
+      .catch(() => {
         this.modalRef.content.stopLoadingSpinner();
       });
   }

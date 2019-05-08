@@ -166,7 +166,7 @@ Update the number of monitor nodes::
 
     ceph orchestrator mon update <num> [host, host:network...]
 
-Each host can optionally specificy a network for the monitor to listen on.
+Each host can optionally specify a network for the monitor to listen on.
 
 Update the number of manager nodes::
 
@@ -213,6 +213,7 @@ The orchestrator is not responsible for configuring the services. Please look in
 documentation for details.
 
 The ``name`` parameter is an identifier of the group of instances:
+
 * a CephFS filesystem for a group of MDS daemons,
 * a zone name for a group of RGWs
 
@@ -247,13 +248,13 @@ This is an overview of the current implementation status of the orchestrators.
  host add                            ⚪         ⚪       ⚪         ✔️
  host ls                             ⚪         ⚪       ⚪         ✔️
  host rm                             ⚪         ⚪       ⚪         ✔️
- mgr update                          ⚪         ⚪       ⚪         ⚪
- mon update                          ⚪         ⚪       ⚪         ⚪
- osd create                          ✔️         ✔️       ⚪         ⚪
+ mgr update                          ⚪         ⚪       ⚪         ✔️
+ mon update                          ⚪         ✔️       ⚪         ✔️
+ osd create                          ✔️         ✔️       ⚪         ✔️
  osd device {ident,fault}-{on,off}   ⚪         ⚪       ⚪         ⚪
  osd rm                              ✔️         ⚪       ⚪         ⚪
  device {ident,fault}-(on,off}       ⚪         ⚪       ⚪         ⚪
- device ls                           ✔️         ✔️       ✔️         ⚪
+ device ls                           ✔️         ✔️       ✔️         ✔️
  service ls                          ⚪         ✔️       ✔️         ⚪
  service status                      ⚪         ✔️       ✔️         ⚪
  service-instance status             ⚪         ⚪       ⚪         ⚪

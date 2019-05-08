@@ -37,7 +37,13 @@
 # redmine_user_id=[your_redmine_user_id]
 # github_token=[your_github_personal_access_token]
 # github_user=[your_github_username]
-# 
+#
+# you can also optionally add the remote repo's name in this file, like
+#
+# github_repo=[your_github_repo_name]
+#
+# If you don't add it, it will default to "origin".
+#
 # Obviously, since this file contains secrets, you should protect it from
 # exposure using all available means (restricted file privileges, encrypted
 # filesystem, etc.). Without correct values for these four variables, this
@@ -56,6 +62,7 @@ test "$redmine_key"     || failed_required_variable_check redmine_key
 test "$redmine_user_id" || failed_required_variable_check redmine_user_id
 test "$github_token"    || failed_required_variable_check github_token
 test "$github_user"     || failed_required_variable_check github_user
+: "${github_repo:=origin}"
 
 function usage () {
     echo "Usage:"
@@ -71,7 +78,7 @@ function usage () {
     exit 1
 }
 
-[[ $1 != ?(-)+([0-9]) ]] && usage
+[[ $1 =~ ^[0-9]+$ ]] || usage
 issue=$1
 echo "Backport issue: $issue"
 
@@ -83,30 +90,16 @@ fi
 test "$milestone" || usage
 echo "Milestone: $milestone"
 
-# ------------------------------------
-# How to find out the milestone number
-# ------------------------------------
-# can't seem to extract the milestone number with the API
-# milestone numbers can be obtained with:
+# milestone numbers can be obtained manually with:
 #   curl --verbose -X GET https://api.github.com/repos/ceph/ceph/milestones
 
-if [[ "x$milestone" = "xhammer" ]] ; then
-    milestone_number=5
-    target_branch=hammer
-elif [[ "x$milestone" = "xjewel" ]] ; then
-    milestone_number=8
-    target_branch=jewel
-elif [[ "x$milestone" = "xkraken" ]] ; then
-    milestone_number=9
-    target_branch=kraken
-elif [[ "x$milestone" = "xluminous" ]] ; then
-    milestone_number=10
-    target_branch=luminous
-elif [[ "x$milestone" = "xmimic" ]] ; then
-    milestone_number=11
-    target_branch=mimic
+milestone_number=$(curl -s -X GET https://api.github.com/repos/ceph/ceph/milestones | jq --arg milestone $milestone '.[] | select(.title==$milestone) | .number')
+
+if test -n "$milestone_number" ; then
+    target_branch="$milestone"
 else
-    echo "Please enter hammer, jewel, kraken, luminous, or mimic"
+    echo -n "Unknown Milestone. Please use one of the following ones: "
+    echo $(curl -s -X GET https://api.github.com/repos/ceph/ceph/milestones | jq '.[].title')
     exit 1
 fi
 echo "Milestone is $milestone and milestone number is $milestone_number"
@@ -120,7 +113,8 @@ fi
 title=$(curl --silent 'http://tracker.ceph.com/issues/'$issue.json?key=$redmine_key | jq .issue.subject | tr -d '\\"')
 echo "Issue title: $title" 
 
-git push -u origin wip-$issue-$milestone
+git push -u $github_repo wip-$issue-$milestone
+
 number=$(curl --silent --data-binary '{"title":"'"$title"'","head":"'$github_user':wip-'$issue-$milestone'","base":"'$target_branch'","body":"http://tracker.ceph.com/issues/'$issue'"}' 'https://api.github.com/repos/ceph/ceph/pulls?access_token='$github_token | jq .number)
 echo "Opened pull request $number"
 

@@ -62,16 +62,8 @@
 
 #include "inline_memory.h"
 
-#if __GNUC__ >= 4
-  #define CEPH_BUFFER_API  __attribute__ ((visibility ("default")))
-#else
-  #define CEPH_BUFFER_API
-#endif
+#define CEPH_BUFFER_API
 
-#if defined(HAVE_XIO)
-struct xio_reg_mem;
-class XioDispatchHook;
-#endif
 #ifdef HAVE_SEASTAR
 namespace seastar {
 template <typename T> class temporary_buffer;
@@ -84,6 +76,8 @@ class deleter;
 template<uint8_t S>
 struct sha_digest_t;
 using sha1_digest_t = sha_digest_t<20>;
+
+template<typename T> class DencDumper;
 
 namespace ceph {
 
@@ -159,9 +153,6 @@ namespace buffer CEPH_BUFFER_API {
   class raw_claim_buffer;
 
 
-  class xio_mempool;
-  class xio_msg_buffer;
-
   /*
    * named constructors
    */
@@ -189,9 +180,8 @@ namespace buffer CEPH_BUFFER_API {
   /// destructed on this cpu
   raw* create(seastar::temporary_buffer<char>&& buf);
 #endif
-#if defined(HAVE_XIO)
-  raw* create_msg(unsigned len, char *buf, XioDispatchHook *m_hook);
-#endif
+
+inline namespace v14_2_0 {
 
   /*
    * a buffer pointer.  references (a subsequence of) a raw buffer.
@@ -820,6 +810,7 @@ namespace buffer CEPH_BUFFER_API {
       }
 
       friend class list;
+      template<typename Type> friend class ::DencDumper;
 
     public:
       ~contiguous_appender() {
@@ -838,7 +829,7 @@ namespace buffer CEPH_BUFFER_API {
 	pos += len;
 	return r;
       }
-      char *get_pos() {
+      char *get_pos() const {
 	return pos;
       }
 
@@ -869,7 +860,7 @@ namespace buffer CEPH_BUFFER_API {
 	}
       }
 
-      size_t get_logical_offset() {
+      size_t get_logical_offset() const {
 	return out_of_band_offset + (pos - space.bp_data);
       }
     };
@@ -885,9 +876,12 @@ namespace buffer CEPH_BUFFER_API {
       contiguous_filler(char* const pos) : pos(pos) {}
 
     public:
+      void advance(const unsigned len) {
+	pos += len;
+      }
       void copy_in(const unsigned len, const char* const src) {
 	memcpy(pos, src, len);
-	pos += len;
+	advance(len);
       }
       char* c_str() {
         return pos;
@@ -1215,6 +1209,7 @@ namespace buffer CEPH_BUFFER_API {
 
     void write_stream(std::ostream &out) const;
     void hexdump(std::ostream &out, bool trailing_newline = true) const;
+    ssize_t pread_file(const char *fn, uint64_t off, uint64_t len, std::string *error);
     int read_file(const char *fn, std::string *error);
     ssize_t read_fd(int fd, size_t len);
     int write_file(const char *fn, int mode=0644);
@@ -1246,6 +1241,8 @@ namespace buffer CEPH_BUFFER_API {
     static list static_from_cstring(char* c);
     static list static_from_string(std::string& s);
   };
+
+} // inline namespace v14_2_0
 
   /*
    * efficient hash of one or more bufferlists
@@ -1317,10 +1314,6 @@ inline bufferhash& operator<<(bufferhash& l, const bufferlist &r) {
 }
 
 } // namespace buffer
-
-#if defined(HAVE_XIO)
-xio_reg_mem* get_xio_mp(const buffer::ptr& bp);
-#endif
 
 } // namespace ceph
 
