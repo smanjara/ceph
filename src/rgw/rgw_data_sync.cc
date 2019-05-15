@@ -707,19 +707,17 @@ static string full_data_sync_index_shard_oid(const string& source_zone, int shar
 }
 
 struct read_metadata_list {
-  string list_marker;
+  string marker;
   bool truncated;
-  int count;
   list<string> keys;
   int max_entries;
 
-  read_metadata_list() : truncated(false), count(0), max_entries(0) {}
+  read_metadata_list() : truncated(false), max_entries(0) {}
 
   void decode_json(JSONObj *obj) {
-    JSONDecoder::decode_json("marker", list_marker, obj);
+    JSONDecoder::decode_json("marker", marker, obj);
     JSONDecoder::decode_json("truncated", truncated, obj);
     JSONDecoder::decode_json("keys", keys, obj);
-    JSONDecoder::decode_json("count", count, obj);
     JSONDecoder::decode_json("max-entries", max_entries, obj);
   }
 };
@@ -751,12 +749,7 @@ class RGWListBucketIndexesCR : public RGWCoroutine {
 
   int req_ret;
   int ret;
-  string list_marker;
-  int max_entries;
-  int count;
-  bool truncated;
   list<string> keys;
-  read_metadata_list result;
 
   list<string>::iterator iter;
 
@@ -771,12 +764,16 @@ class RGWListBucketIndexesCR : public RGWCoroutine {
   int i;
 
   bool failed;
+  string list_marker;
+  int max_entries;
+  bool truncated;
+  read_metadata_list result;
 
 public:
   RGWListBucketIndexesCR(RGWDataSyncEnv *_sync_env,
-                         rgw_data_sync_status *_sync_status, const string& _list_marker, read_metadata_list _result) : RGWCoroutine(_sync_env->cct), sync_env(_sync_env),
+                         rgw_data_sync_status *_sync_status, const string& _list_marker, bool _truncated, read_metadata_list _result) : RGWCoroutine(_sync_env->cct), sync_env(_sync_env),
                                                       store(sync_env->store), sync_status(_sync_status),
-						      req_ret(0), ret(0), entries_index(NULL), i(0), failed(false), list_marker(_list_marker), max_entries(GET_MAX_ENTRIES), result(_result) {
+						      req_ret(0), ret(0), entries_index(NULL), i(0), failed(false), list_marker(_list_marker), max_entries(GET_MAX_ENTRIES), truncated(_truncated), result(_result) {
     oid_prefix = datalog_sync_full_sync_index_prefix + "." + sync_env->source_zone; 
     path = "/admin/metadata/bucket.instance";
     num_shards = sync_status->sync_info.num_shards;
@@ -787,23 +784,24 @@ public:
 
   int operate() override {
     reenter(this) {
-      count = 0;
+      entries_index = new RGWShardedOmapCRManager(sync_env->async_rados, store, this, num_shards,
+						  store->svc.zone->get_zone_params().log_pool,
+                                                  oid_prefix);
+      yield; // yield so OmapAppendCRs can start
+
       do {
       yield {
 
         char max_entries_buf[32];
         snprintf(max_entries_buf, sizeof(max_entries_buf), "%d", (int)max_entries);
-
-        const char *marker_key = (list_marker.empty() ? "" : "marker");
         
         string entrypoint = string("/admin/metadata/bucket.instance");
 
         rgw_http_param_pair pairs[] = { { "type", "data" },
         { "max-entries", max_entries_buf },
-        { marker_key, list_marker.c_str() },
+        { "marker", list_marker.c_str() },
         { NULL, NULL } };
 
-        /* FIXME: need a better scaling solution here, requires streaming output */
         call(new RGWReadRESTResourceCR<read_metadata_list>(store->ctx(), sync_env->conn, sync_env->http_manager,
                                                       entrypoint, pairs, &result));
       }
@@ -811,10 +809,7 @@ public:
         ldout(sync_env->cct, 0) << "ERROR: failed to fetch metadata for section bucket.instance" << dendl;
         return set_cr_error(retcode);
       }
-      entries_index = new RGWShardedOmapCRManager(sync_env->async_rados, store, this, num_shards,
-						  store->svc.zone->get_zone_params().log_pool,
-                                                  oid_prefix);
-      yield; // yield so OmapAppendCRs can start
+ 
       for (iter = result.keys.begin(); iter != result.keys.end(); ++iter) {
         ldout(sync_env->cct, 20) << "list metadata: section=bucket.instance key=" << *iter << dendl;
 
@@ -825,7 +820,7 @@ public:
                                           { NULL, NULL } };
 
           call(new RGWReadRESTResourceCR<bucket_instance_meta_info>(store->ctx(), sync_env->conn, sync_env->http_manager, path, pairs, &meta_info));
-        }
+        } 
 
         num_shards = meta_info.data.get_bucket_info().num_shards;
         if (num_shards > 0) {
@@ -839,8 +834,6 @@ public:
           yield entries_index->append(key, store->data_log->get_log_shard_id(meta_info.data.get_bucket_info().bucket, -1));
         }
       }
-      count += result.keys.size();
-
       yield {
         if (!entries_index->finish()) {
           failed = true;
@@ -867,13 +860,15 @@ public:
 	}
         yield;
       }
+      list_marker = result.marker;
+      truncated = result.truncated;
+      } while(truncated);
+
       drain_all();
       if (req_ret < 0) {
         yield return set_cr_error(req_ret);
       }
        yield return set_cr_done();
-    }
-    while(truncated && count < max_entries);
     }
     return 0;
   }
@@ -1577,6 +1572,7 @@ class RGWDataSyncCR : public RGWCoroutine {
   read_metadata_list result;
 
   string marker;
+  bool truncated;
 
   RGWDataSyncShardMarkerTrack *marker_tracker;
 
@@ -1645,7 +1641,7 @@ public:
           return set_cr_error(retcode);
         }
         /* state: building full sync maps */
-        yield call(new RGWListBucketIndexesCR(sync_env, &sync_status, marker, result));
+        yield call(new RGWListBucketIndexesCR(sync_env, &sync_status, marker, truncated, result));
         if (retcode < 0) {
           tn->log(0, SSTR("ERROR: failed to build full sync maps, retcode=" << retcode));
           return set_cr_error(retcode);
