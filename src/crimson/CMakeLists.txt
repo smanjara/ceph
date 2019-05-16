@@ -1,6 +1,6 @@
 add_library(crimson::cflags INTERFACE IMPORTED)
 set_target_properties(crimson::cflags PROPERTIES
-  INTERFACE_COMPILE_DEFINITIONS "WITH_SEASTAR=1"
+  INTERFACE_COMPILE_DEFINITIONS "WITH_SEASTAR=1;BOOST_SP_DISABLE_THREADS"
   INTERFACE_LINK_LIBRARIES Seastar::seastar)
 
 set(crimson_common_srcs
@@ -23,6 +23,7 @@ add_library(crimson-common STATIC
   ${PROJECT_SOURCE_DIR}/src/common/ceph_hash.cc
   ${PROJECT_SOURCE_DIR}/src/common/ceph_time.cc
   ${PROJECT_SOURCE_DIR}/src/common/ceph_strings.cc
+  ${PROJECT_SOURCE_DIR}/src/common/ceph_releases.cc
   ${PROJECT_SOURCE_DIR}/src/common/cmdparse.cc
   ${PROJECT_SOURCE_DIR}/src/common/common_init.cc
   ${PROJECT_SOURCE_DIR}/src/common/compat.cc

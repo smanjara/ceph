@@ -152,12 +152,12 @@ PGBackend::_load_ss(const hobject_t& oid)
 }
 
 seastar::future<>
-PGBackend::store_object_state(
-  //const hobject_t& oid,
-  const cached_os_t os,
-  const MOSDOp& m,
-  ceph::os::Transaction& txn)
+PGBackend::mutate_object(
+  cached_os_t&& os,
+  ceph::os::Transaction&& txn,
+  const MOSDOp& m)
 {
+  logger().trace("mutate_object: num_ops={}", txn.get_num_ops());
   if (os->exists) {
 #if 0
     os.oi.version = ctx->at_version;
@@ -173,13 +173,13 @@ PGBackend::store_object_state(
       ceph::bufferlist osv;
       encode(os->oi, osv, 0);
       // TODO: get_osdmap()->get_features(CEPH_ENTITY_TYPE_OSD, nullptr));
-      txn.setattr(coll->cid, ghobject_t{os->oi.soid}, OI_ATTR, std::move(osv));
+      txn.setattr(coll->cid, ghobject_t{os->oi.soid}, OI_ATTR, osv);
     }
   } else {
     // reset cached ObjectState without enforcing eviction
     os->oi = object_info_t(os->oi.soid);
   }
-  return seastar::now();
+  return store->do_transaction(coll, std::move(txn));
 }
 
 seastar::future<>
@@ -270,10 +270,4 @@ seastar::future<> PGBackend::writefull(
     os.oi.size = op.extent.length;
   }
   return seastar::now();
-}
-
-seastar::future<> PGBackend::submit_transaction(ceph::os::Transaction&& txn)
-{
-  logger().trace("submit_transaction: num_ops={}", txn.get_num_ops());
-  return store->do_transaction(coll, std::move(txn));
 }
