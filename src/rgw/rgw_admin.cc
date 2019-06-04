@@ -5514,7 +5514,7 @@ int main(int argc, const char **argv)
     }
   }
 
-
+/*
   if (opt_cmd == OPT_BUCKET_CHOWN) {
 
     if (bucket_name.empty()) {
@@ -5542,7 +5542,20 @@ int main(int argc, const char **argv)
       return ret;
     }
   }
+*/
 
+  if (opt_cmd == OPT_BUCKET_CHOWN) {
+
+    bucket_op.set_bucket_name(bucket_name);
+    bucket_op.set_new_bucket_name(new_bucket_name);
+    string err;
+
+    int r = RGWBucketAdminOp::chown(store, bucket_op, &err);
+    if (r < 0) {
+      cerr << "failure: " << cpp_strerror(-r) << ": " << err << std::endl;
+      return -r;
+    }
+  }
 
   if (opt_cmd == OPT_LOG_LIST) {
     // filter by date?
