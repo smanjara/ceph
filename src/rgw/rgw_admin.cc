@@ -102,7 +102,7 @@ void usage()
   cout << "  bucket stats               returns bucket statistics\n";
   cout << "  bucket rm                  remove bucket\n";
   cout << "  bucket check               check bucket index\n";
-  cout << "  bucket chown               change the owner to --uid for all object ACLs\n";
+  cout << "  bucket chown               link bucket to specified user and update its object ACLs\n";
   cout << "  bucket reshard             reshard bucket\n";
   cout << "  bucket rewrite             rewrite all objects in the specified bucket\n";
   cout << "  bucket sync disable        disable bucket sync\n";
@@ -5514,43 +5514,13 @@ int main(int argc, const char **argv)
     }
   }
 
-/*
-  if (opt_cmd == OPT_BUCKET_CHOWN) {
-
-    if (bucket_name.empty()) {
-      cerr << "ERROR: bucket name was not provided (via --bucket)" << std::endl;
-      return EINVAL;
-    }
-
-    if (user_id.empty()) {
-      cerr << "ERROR: user id was not provided (via --uid)" << std::endl;
-      return EINVAL;
-    }
-
-    if (! max_entries_specified) {
-      max_entries = 1000;
-    }
-
-    bucket_op.set_bucket_name(bucket_name);
-    bucket_op.set_new_bucket_name(new_bucket_name);
-    string err;
-
-    RGWBucket bucket;
-    ret = bucket.chown(store, bucket_op, marker, max_entries, &err);
-    if (ret < 0) {
-      cerr << "Failed to modify bucket and object acl owner with error " << cpp_strerror(-ret) << err << std::endl;
-      return ret;
-    }
-  }
-*/
-
   if (opt_cmd == OPT_BUCKET_CHOWN) {
 
     bucket_op.set_bucket_name(bucket_name);
     bucket_op.set_new_bucket_name(new_bucket_name);
     string err;
 
-    int r = RGWBucketAdminOp::chown(store, bucket_op, &err);
+    int r = RGWBucketAdminOp::chown(store, bucket_op, marker, &err);
     if (r < 0) {
       cerr << "failure: " << cpp_strerror(-r) << ": " << err << std::endl;
       return -r;
