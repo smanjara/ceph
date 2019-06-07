@@ -1007,54 +1007,54 @@ int RGWBucket::chown(RGWBucketAdminOpState& op_state,
 
   RGWBucketInfo bucket_info;
   RGWSysObjectCtx sys_ctx = store->svc.sysobj->init_obj_ctx();
-  //map<string, bufferlist> attrs;
-  int ret;
 
-  ret = store->get_bucket_info(sys_ctx, tenant, bucket_name, bucket_info, NULL, &attrs);
+  int ret = store->get_bucket_info(sys_ctx, tenant, bucket_name, bucket_info, NULL, &attrs);
   if (ret < 0) {
-    cerr << " Bucket info failed: tenant: "<< tenant << "bucket_name: " << bucket_name << " " << ret << std::endl;
+    set_err_msg(err_msg, "bucket info failed: tenant: " + tenant + "bucket_name: " + bucket_name + " " + cpp_strerror(-ret));
     return ret;
   }
 
   RGWUserInfo user_info;
   ret = rgw_get_user_info_by_uid(store, bucket_info.owner, user_info);
   if (ret < 0) {
-    cerr << " User info failed: "<< ret << std::endl;
+    set_err_msg(err_msg, "user info failed: " + cpp_strerror(-ret));
     return ret;
   }
 
   RGWRados::Bucket target(store, bucket_info);
   RGWRados::Bucket::List list_op(&target);
-  int max = 1000;
 
   list_op.params.list_versions = true;
   list_op.params.allow_unordered = true;
-  list_op.params.marker = marker;
+  list_op.params.marker = rgw_obj_key(marker);
 
   bool is_truncated = false;
+  int count = 0;
+  int max_entries = 1000;
 
   //Loop through objects and update object acls to point to bucket owner
 
   do {
       objs.clear();
-      ret = list_op.list_objects(max, &objs, &common_prefixes, &is_truncated);
+      ret = list_op.list_objects(max_entries, &objs, &common_prefixes, &is_truncated);
       if (ret < 0) {
-        cerr << " List objects failed: "<< ret << std::endl;
+        set_err_msg(err_msg, "list objects failed: " + cpp_strerror(-ret));
         return ret;
       }
 
-      //Loop through the results
+      count += objs.size();
+
       for (const auto& obj : objs) {
 
         const rgw_obj r_obj(bucket_info.bucket, obj.key);
         ret = get_obj_attrs(store, obj_ctx, bucket_info, r_obj, attrs);
         if (ret < 0){
-          cerr << "Failed to read object with " << ret << std::endl;
+          set_err_msg(err_msg, "failed to read object " + obj.key.name +  "with " + cpp_strerror(-ret));
           continue;
         }
         const auto& aiter = attrs.find(RGW_ATTR_ACL);
-        if (aiter == attrs.end()){
-          cerr << "No acls found for object. Continuing with the next object." << std::endl;
+        if (aiter == attrs.end()) {
+          set_err_msg(err_msg, "no acls found for object " + obj.key.name + " .Continuing with next object." + cpp_strerror(-ret));
           continue;
         } else {
           bufferlist& bl = aiter->second;
@@ -1064,7 +1064,7 @@ int RGWBucket::chown(RGWBucketAdminOpState& op_state,
             decode(policy, bl);
             owner = policy.get_owner();
           } catch (buffer::error& err) {
-            cerr << " Decode policy failed: " << std::endl;
+            set_err_msg(err_msg, "decode policy failed: ");
             return -EIO;
           }
 
@@ -1079,9 +1079,6 @@ int RGWBucket::chown(RGWBucketAdminOpState& op_state,
           grant.set_canon(bucket_info.owner, user_info.display_name, RGW_PERM_FULL_CONTROL);
           acl.add_grant(&grant);
 
-          //Add the ACL back to policy
-          //policy.set_acl(acl);
-
           //Update the ACL owner to the new user
           owner.set_id(bucket_info.owner);
           owner.set_name(user_info.display_name);
@@ -1092,12 +1089,11 @@ int RGWBucket::chown(RGWBucketAdminOpState& op_state,
 
           ret = modify_obj_attr(store, obj_ctx, bucket_info, r_obj, RGW_ATTR_ACL, bl);
           if (ret < 0) {
-            cerr << " Modify attr failed: "<< ret << std::endl;
+            set_err_msg(err_msg, "modify attr failed: " + cpp_strerror(-ret));
             return ret;
           }
         }
-      }// for loop
-      cerr << objs.size() << " number of objects are processed." << std::endl;
+      } cerr << count << " objects processed, next marker " << list_op.params.marker.name << std::endl;
     } while(is_truncated);
     return 0;
 }
