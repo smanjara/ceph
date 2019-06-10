@@ -1026,7 +1026,7 @@ int RGWBucket::chown(RGWBucketAdminOpState& op_state,
 
   list_op.params.list_versions = true;
   list_op.params.allow_unordered = true;
-  list_op.params.marker = rgw_obj_key(marker);
+  list_op.params.marker = marker;
 
   bool is_truncated = false;
   int count = 0;
@@ -1093,7 +1093,7 @@ int RGWBucket::chown(RGWBucketAdminOpState& op_state,
             return ret;
           }
         }
-      } cerr << count << " objects processed, next marker " << list_op.params.marker.name << std::endl;
+      } cerr << count << " objects processed, next marker " << next_marker.name << std::endl;
     } while(is_truncated);
     return 0;
 }
