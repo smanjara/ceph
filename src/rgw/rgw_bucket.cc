@@ -1042,6 +1042,7 @@ int RGWBucket::chown(RGWBucketAdminOpState& op_state,
         return ret;
       }
 
+      list_op.params.marker = list_op.get_next_marker();
       count += objs.size();
 
       for (const auto& obj : objs) {
@@ -1093,7 +1094,7 @@ int RGWBucket::chown(RGWBucketAdminOpState& op_state,
             return ret;
           }
         }
-      } cerr << count << " objects processed, next marker " << next_marker.name << std::endl;
+      } cerr << count << " objects processed, next marker " << list_op.params.marker.name << std::endl;
     } while(is_truncated);
     return 0;
 }
