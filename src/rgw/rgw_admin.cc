@@ -84,6 +84,7 @@ void usage()
   cout << "  user create                create a new user\n" ;
   cout << "  user modify                modify user\n";
   cout << "  user info                  get user info\n";
+  cout << "  user rename                rename user\n";
   cout << "  user rm                    remove user\n";
   cout << "  user suspend               suspend a user\n";
   cout << "  user enable                re-enable user after suspension\n";
@@ -243,6 +244,7 @@ void usage()
   cout << "options:\n";
   cout << "   --tenant=<tenant>         tenant name\n";
   cout << "   --uid=<id>                user id\n";
+  cout << "   --new-uid=<id>            new user id\n"
   cout << "   --subuser=<name>          subuser name\n";
   cout << "   --access-key=<key>        S3 access key\n";
   cout << "   --email=<email>           user's email address\n";
@@ -390,6 +392,7 @@ enum {
   OPT_USER_CREATE,
   OPT_USER_INFO,
   OPT_USER_MODIFY,
+  OPT_USER_RENAME,
   OPT_USER_RM,
   OPT_USER_SUSPEND,
   OPT_USER_ENABLE,
@@ -644,6 +647,8 @@ static int get_cmd(const char *cmd, const char *prev_cmd, const char *prev_prev_
       return OPT_USER_INFO;
     if (strcmp(cmd, "modify") == 0)
       return OPT_USER_MODIFY;
+    if (strcmp(cmd, "rename") == 0)
+      return OPT_USER_RENAME;
     if (strcmp(cmd, "rm") == 0)
       return OPT_USER_RM;
     if (strcmp(cmd, "suspend") == 0)
@@ -2748,6 +2753,7 @@ int main(int argc, const char **argv)
 
   rgw_user user_id;
   string tenant;
+  rgw_user new_user_id;
   std::string access_key, secret_key, user_email, display_name;
   std::string bucket_name, pool_name, object;
   rgw_pool pool;
@@ -2907,6 +2913,8 @@ int main(int argc, const char **argv)
       break;
     } else if (ceph_argparse_witharg(args, i, &val, "-i", "--uid", (char*)NULL)) {
       user_id.from_str(val);
+    } else if (ceph_argparse_witharg(args, i, &val, "-i", "--new-uid", (char*)NULL)) {
+      new_user_id.from_str(val);
     } else if (ceph_argparse_witharg(args, i, &val, "--tenant", (char*)NULL)) {
       tenant = val;
     } else if (ceph_argparse_witharg(args, i, &val, "--access-key", (char*)NULL)) {
@@ -5032,6 +5040,14 @@ int main(int argc, const char **argv)
     }
 
     output_user_info = false;
+    break;
+  case OPT_USER_RENAME:
+    ret = user.rename(user_op, &err_msg);
+    if (ret < 0) {
+      cerr << "could not rename user: " << err_msg << std::endl;
+      return -ret;
+    }
+
     break;
   case OPT_USER_ENABLE:
   case OPT_USER_SUSPEND:

@@ -159,6 +159,7 @@ struct RGWUserAdminOpState {
   rgw_user user_id;
   std::string user_email;
   std::string display_name;
+  rgw_user new_user_id;
   int32_t max_buckets;
   __u8 suspended;
   __u8 admin;
@@ -401,6 +402,10 @@ struct RGWUserAdminOpState {
     mfa_ids_specified = true;
   }
 
+  void set_new_uid(rgw_user& new_uid) {
+    new_user_id = new_uid;
+  }
+
   bool is_populated() { return populated; }
   bool is_initialized() { return initialized; }
   bool has_existing_user() { return existing_user; }
@@ -446,6 +451,7 @@ struct RGWUserAdminOpState {
   std::string get_caps() { return caps; }
   std::string get_user_email() { return user_email; }
   std::string get_display_name() { return display_name; }
+  rgw_user& get_new_uid() { return new_user_id; }
   map<int, std::string>& get_temp_url_keys() { return temp_url_keys; }
 
   RGWUserInfo&  get_user_info() { return info; }
@@ -669,7 +675,7 @@ private:
   void init_default();
 
   /* API Contract Fulfillment */
-  int execute_add(RGWUserAdminOpState& op_state, std::string *err_msg);
+  int execute_add(RGWUserAdminOpState& op_state, RGWUserInfo& old_info, RGW std::string *err_msg);
   int execute_remove(RGWUserAdminOpState& op_state, std::string *err_msg);
   int execute_modify(RGWUserAdminOpState& op_state, std::string *err_msg);
 

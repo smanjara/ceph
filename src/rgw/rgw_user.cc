@@ -1934,6 +1934,213 @@ int RGWUser::check_op(RGWUserAdminOpState& op_state, std::string *err_msg)
   return 0;
 }
 
+int RGWUser::execute_rename(RGWUserAdminOpState& op_state, std::string *err_msg)
+{
+ //unlink buckets from existing user
+  rgw_user& old_uid = op_state.get_user_id();
+  RGWUserInfo old_user_info = op_state.get_user_info(); // Save user info for later use
+
+  if (!op_state.has_existing_user()) {
+    set_err_msg(err_msg, "user does not exist");
+    return -ENOENT;
+  }
+  bool is_truncated = false;
+  string marker;
+  CephContext *cct = store->ctx();
+  size_t max_buckets = cct->_conf->rgw_list_buckets_max_chunk;
+  RGWUserBuckets buckets;
+  map<std::string, RGWBucketEnt>& m;
+  do {
+    int ret = rgw_read_user_buckets(store, old_uid, buckets, marker, string(),
+				max_buckets, false, &is_truncated);
+    if (ret < 0) {
+      set_err_msg(err_msg, "unable to read user bucket info");
+      return ret;
+    }
+
+    m = buckets.get_buckets();
+
+    std::map<std::string, RGWBucketEnt>::iterator it;
+    for (it = m.begin(); it != m.end(); ++it) {
+      ret = rgw_unlink_bucket(store, old_uid, ((*it).second).bucket.tenant, ((*it).second).bucket.name);
+      if (ret < 0) {
+        set_err_msg(err_msg, "error unlinking bucket " + cpp_strerror(-r));
+        return ret;
+      }
+
+      marker = it->first;
+    }
+
+  } while (is_truncated);
+
+  // delete old user
+  std::string subprocess_msg;
+  ret = execute_remove(op_state, &subprocess_msg);
+  if (ret < 0) {
+    set_err_msg(err_msg, "unable to remove existing user, " + subprocess_msg);
+    return ret;
+  }
+
+  // Create new user with old user's attributes
+  rgw_user& new_uid = op_state.get_new_uid();
+  rgw_user& uid = op_state.set_user_id(new_uid);
+  user_info = old_user_info;
+  ret = execute_add(op_state, user_info, &subprocess_msg);
+  if (ret < 0) {
+    set_err_msg(err_msg, "unable to create new user, " + subprocess_msg);
+    return ret;
+  }
+
+  // Change bucket and objects ownership 
+  do {
+    RGWBucket bucket;
+    m = buckets.get_buckets();
+    std::map<std::string, RGWBucketEnt>::iterator it;
+    for (it = m.begin(); it != m.end(); ++it) {
+      ret = bucket.chown(store, op_state, NULL, &subprocess_msg);
+      if (ret < 0) {
+        set_err_msg(err_msg, "error in changing ownership " + subprocess_msg);
+        return ret;
+      }
+
+      marker = it->first;
+    }
+
+  } while (is_truncated);
+  }
+
+}
+
+int RGWUser::execute_add(RGWUserAdminOpState& op_state, RGWUserInfo& user_info, std::string *err_msg)
+{
+  std::string subprocess_msg;
+  int ret = 0;
+  bool defer_user_update = true;
+
+  if (!user_info) {
+    RGWUserInfo user_info;
+  }
+
+  rgw_user& uid = op_state.get_user_id();
+  std::string user_email = op_state.get_user_email();
+  std::string display_name = op_state.get_display_name();
+
+  // fail if the user exists already
+  if (op_state.has_existing_user()) {
+    if (!op_state.exclusive &&
+        (user_email.empty() ||
+	 boost::iequals(user_email, old_info.user_email)) &&
+        old_info.display_name == display_name) {
+      return execute_modify(op_state, err_msg);
+    }
+
+    if (op_state.found_by_email) {
+      set_err_msg(err_msg, "email: " + user_email +
+		  " is the email address an existing user");
+      ret = -ERR_EMAIL_EXIST;
+    } else if (op_state.found_by_key) {
+      set_err_msg(err_msg, "duplicate key provided");
+      ret = -ERR_KEY_EXIST;
+    } else {
+      set_err_msg(err_msg, "user: " + op_state.user_id.to_str() + " exists");
+      ret = -EEXIST;
+    }
+    return ret;
+  }
+
+  // fail if the user_info has already been populated
+  if (op_state.is_populated()) {
+    set_err_msg(err_msg, "cannot overwrite already populated user");
+    return -EEXIST;
+  }
+
+  // fail if the display name was not included
+  if (display_name.empty()) {
+    set_err_msg(err_msg, "no display name specified");
+    return -EINVAL;
+  }
+
+		
+  // set the user info
+  user_id = uid;
+  user_info.user_id = user_id;
+  user_info.display_name = display_name;
+  user_info.type = TYPE_RGW;
+
+  if (!user_email.empty())
+    user_info.user_email = user_email;
+
+  CephContext *cct = store->ctx();
+  if (op_state.max_buckets_specified) {
+    user_info.max_buckets = op_state.get_max_buckets();
+  } else {
+    user_info.max_buckets = cct->_conf->rgw_user_max_buckets;
+  }
+
+  user_info.suspended = op_state.get_suspension_status();
+  user_info.admin = op_state.admin;
+  user_info.system = op_state.system;
+
+  if (op_state.op_mask_specified)
+    user_info.op_mask = op_state.get_op_mask();
+
+  if (op_state.has_bucket_quota()) {
+    user_info.bucket_quota = op_state.get_bucket_quota();
+  } else {
+    rgw_apply_default_bucket_quota(user_info.bucket_quota, cct->_conf);
+  }
+
+  if (op_state.temp_url_key_specified) {
+    map<int, string>::iterator iter;
+    for (iter = op_state.temp_url_keys.begin();
+         iter != op_state.temp_url_keys.end(); ++iter) {
+      user_info.temp_url_keys[iter->first] = iter->second;
+    }
+  }
+
+  if (op_state.has_user_quota()) {
+    user_info.user_quota = op_state.get_user_quota();
+  } else {
+    rgw_apply_default_user_quota(user_info.user_quota, cct->_conf);
+  }
+
+  // update the request
+  op_state.set_user_info(user_info);
+  op_state.set_populated();
+
+  // update the helper objects
+  ret = init_members(op_state);
+  if (ret < 0) {
+    set_err_msg(err_msg, "unable to initialize user");
+    return ret;
+  }
+
+  // see if we need to add an access key
+  if (op_state.has_key_op()) {
+    ret = keys.add(op_state, &subprocess_msg, defer_user_update);
+    if (ret < 0) {
+      set_err_msg(err_msg, "unable to create access key, " + subprocess_msg);
+      return ret;
+    }
+  }
+
+  // see if we need to add some caps
+  if (op_state.has_caps_op()) {
+    ret = caps.add(op_state, &subprocess_msg, defer_user_update);
+    if (ret < 0) {
+      set_err_msg(err_msg, "unable to add user capabilities, " + subprocess_msg);
+      return ret;
+    }
+  }
+
+  ret = update(op_state, err_msg);
+  if (ret < 0)
+    return ret;
+
+  return 0;
+}
+
+/*
 int RGWUser::execute_add(RGWUserAdminOpState& op_state, std::string *err_msg)
 {
   std::string subprocess_msg;
@@ -2060,6 +2267,7 @@ int RGWUser::execute_add(RGWUserAdminOpState& op_state, std::string *err_msg)
 
   return 0;
 }
+*/
 
 int RGWUser::add(RGWUserAdminOpState& op_state, std::string *err_msg)
 {
@@ -2072,9 +2280,29 @@ int RGWUser::add(RGWUserAdminOpState& op_state, std::string *err_msg)
     return ret;
   }
 
-  ret = execute_add(op_state, &subprocess_msg);
+  ret = execute_add(op_state, NULL, &subprocess_msg);
   if (ret < 0) {
     set_err_msg(err_msg, "unable to create user, " + subprocess_msg);
+    return ret;
+  }
+
+  return 0;
+}
+
+int RGWUser::rename(RGWUserAdminOpState& op_state, std::string *err_msg)
+{
+  std::string subprocess_msg;
+  int ret;
+
+  ret = check_op(op_state, &subprocess_msg);
+  if (ret < 0) {
+    set_err_msg(err_msg, "unable to parse parameters, " + subprocess_msg);
+    return ret;
+  }
+
+  ret = execute_rename(op_state, &subprocess_msg);
+  if (ret < 0) {
+    set_err_msg(err_msg, "unable to rename user, " + subprocess_msg);
     return ret;
   }
 
@@ -2197,7 +2425,7 @@ int RGWUser::execute_modify(RGWUserAdminOpState& op_state, std::string *err_msg)
     // make sure we are not adding a duplicate email
     if (old_email.compare(op_email) != 0) {
       ret = rgw_get_user_info_by_email(store, op_email, duplicate_check);
-      if (ret >= 0 && duplicate_check.user_id.compare(user_id) != 0) {
+      if (ret >= 0 && duplicate_check.user_id.compare(user_id) == 0) {
         set_err_msg(err_msg, "cannot add duplicate email");
         return -ERR_EMAIL_EXIST;
       }
