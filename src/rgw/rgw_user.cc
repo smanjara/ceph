@@ -1938,6 +1938,7 @@ int RGWUser::execute_rename(RGWUserAdminOpState& op_state, std::string *err_msg)
 {
  //unlink buckets from existing user
   rgw_user& old_uid = op_state.get_user_id();
+  tenant = old_uid.tenant;
   RGWUserInfo old_user_info = op_state.get_user_info(); // Save user info for later use
 
   if (!op_state.has_existing_user()) {
@@ -1948,9 +1949,9 @@ int RGWUser::execute_rename(RGWUserAdminOpState& op_state, std::string *err_msg)
   string marker;
   CephContext *cct = store->ctx();
   size_t max_buckets = cct->_conf->rgw_list_buckets_max_chunk;
-  RGWUserBuckets buckets;
-  map<std::string, RGWBucketEnt>& m;
+  vector<RGWBucketEnt> read_buckets;
   do {
+    RGWUserBuckets buckets;
     int ret = rgw_read_user_buckets(store, old_uid, buckets, marker, string(),
 				max_buckets, false, &is_truncated);
     if (ret < 0) {
@@ -1958,10 +1959,11 @@ int RGWUser::execute_rename(RGWUserAdminOpState& op_state, std::string *err_msg)
       return ret;
     }
 
-    m = buckets.get_buckets();
+    map<std::string, RGWBucketEnt>& m = buckets.get_buckets();
 
     std::map<std::string, RGWBucketEnt>::iterator it;
     for (it = m.begin(); it != m.end(); ++it) {
+      read_buckets.push_back(((*it).second));  //Save the list of all buckets of the user to be able to use after bucket unlink
       ret = rgw_unlink_bucket(store, old_uid, ((*it).second).bucket.tenant, ((*it).second).bucket.name);
       if (ret < 0) {
         set_err_msg(err_msg, "error unlinking bucket " + cpp_strerror(-r));
@@ -1991,24 +1993,34 @@ int RGWUser::execute_rename(RGWUserAdminOpState& op_state, std::string *err_msg)
     return ret;
   }
 
-  // Change bucket and objects ownership 
-  do {
-    RGWBucket bucket;
-    m = buckets.get_buckets();
-    std::map<std::string, RGWBucketEnt>::iterator it;
-    for (it = m.begin(); it != m.end(); ++it) {
-      ret = bucket.chown(store, op_state, NULL, &subprocess_msg);
-      if (ret < 0) {
-        set_err_msg(err_msg, "error in changing ownership " + subprocess_msg);
-        return ret;
-      }
+  // Change bucket and objects ownership
+  map<string, bufferlist>& attrs;
+  for (auto i = read_buckets.begin();
+         i != read_buckets.end();
+         ++i) {
+     // marker = i->first;
+    RGWBucketEnt& bucket_ent = i->second;
+    RGWBucketInfo bucket_info;
 
-      marker = it->first;
+    ret = store->get_bucket_info(obj_ctx, tenant, bucket_ent.bucket.name,
+                                  bucket_info, nullptr, null_yield, nullptr); 
+
+    RGWBucketInfo bucket_info;
+    RGWSysObjectCtx sys_ctx = store->svc.sysobj->init_obj_ctx();
+
+    ret = store->get_bucket_info(sys_ctx, tenant, bucket_ent.bucket.name, bucket_info, NULL, &attrs);
+    if (ret < 0) {
+      set_err_msg(err_msg, "bucket info failed: tenant: " + tenant + "bucket_name: " + bucket_name + " " + cpp_strerror(-ret));
+      return ret;
     }
 
-  } while (is_truncated);
+    ret = rgw_bucket_chown(store, bucket_info, marker, attrs);
+    if (Ret < 0) {
+      set_err_msg(err_msg, "failed to run bucket chown" + cpp_strerror(-ret));
+      return ret;
+    }
+      
   }
-
 }
 
 int RGWUser::execute_add(RGWUserAdminOpState& op_state, RGWUserInfo& user_info, std::string *err_msg)
