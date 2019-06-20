@@ -1986,8 +1986,7 @@ int RGWUser::execute_rename(RGWUserAdminOpState& op_state, std::string *err_msg)
   // Create new user with old user's attributes
   rgw_user& new_uid = op_state.get_new_uid();
   rgw_user& uid = op_state.set_user_id(new_uid);
-  user_info = old_user_info;
-  ret = execute_add(op_state, user_info, &subprocess_msg);
+  ret = execute_add(op_state, old_user_info, &subprocess_msg);
   if (ret < 0) {
     set_err_msg(err_msg, "unable to create new user, " + subprocess_msg);
     return ret;
@@ -1995,16 +1994,9 @@ int RGWUser::execute_rename(RGWUserAdminOpState& op_state, std::string *err_msg)
 
   // Change bucket and objects ownership
   map<string, bufferlist>& attrs;
-  for (auto i = read_buckets.begin();
-         i != read_buckets.end();
-         ++i) {
-     // marker = i->first;
-    RGWBucketEnt& bucket_ent = i->second;
-    RGWBucketInfo bucket_info;
+  for (auto i = read_buckets.begin(); i != read_buckets.end(); ++i) {
 
-    ret = store->get_bucket_info(obj_ctx, tenant, bucket_ent.bucket.name,
-                                  bucket_info, nullptr, null_yield, nullptr); 
-
+    RGWBucketEnt& bucket_ent = i;
     RGWBucketInfo bucket_info;
     RGWSysObjectCtx sys_ctx = store->svc.sysobj->init_obj_ctx();
 
