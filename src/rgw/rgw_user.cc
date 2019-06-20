@@ -1938,7 +1938,7 @@ int RGWUser::execute_rename(RGWUserAdminOpState& op_state, std::string *err_msg)
 {
  //unlink buckets from existing user
   rgw_user& old_uid = op_state.get_user_id();
-  tenant = old_uid.tenant;
+  //tenant = old_uid.tenant;
   RGWUserInfo old_user_info = op_state.get_user_info(); // Save user info for later use
 
   if (!op_state.has_existing_user()) {
@@ -1966,7 +1966,7 @@ int RGWUser::execute_rename(RGWUserAdminOpState& op_state, std::string *err_msg)
       read_buckets.push_back(((*it).second));  //Save the list of all buckets of the user to be able to use after bucket unlink
       ret = rgw_unlink_bucket(store, old_uid, ((*it).second).bucket.tenant, ((*it).second).bucket.name);
       if (ret < 0) {
-        set_err_msg(err_msg, "error unlinking bucket " + cpp_strerror(-r));
+        set_err_msg(err_msg, "error unlinking bucket " + cpp_strerror(-ret));
         return ret;
       }
 
@@ -1977,7 +1977,7 @@ int RGWUser::execute_rename(RGWUserAdminOpState& op_state, std::string *err_msg)
 
   // delete old user
   std::string subprocess_msg;
-  ret = execute_remove(op_state, &subprocess_msg);
+  int ret = execute_remove(op_state, &subprocess_msg);
   if (ret < 0) {
     set_err_msg(err_msg, "unable to remove existing user, " + subprocess_msg);
     return ret;
@@ -1986,13 +1986,13 @@ int RGWUser::execute_rename(RGWUserAdminOpState& op_state, std::string *err_msg)
   // Create new user with old user's attributes
   rgw_user& user_id = op_state.get_new_uid();
   op_state.set_user_id(user_id);
-  ret = RGWUser::execute_add(op_state, old_user_info, &subprocess_msg);
+  ret = execute_add(op_state, old_user_info, &subprocess_msg);
   if (ret < 0) {
     set_err_msg(err_msg, "unable to create new user, " + subprocess_msg);
     return ret;
   }
 
-  RGWUserInfo& user_info;
+  RGWUserInfo user_info;
   ret = rgw_get_user_info_by_uid(store, user_id, user_info);
   if (ret < 0) {
     set_err_msg(err_msg, "failed to fetch user info");
@@ -2001,11 +2001,13 @@ int RGWUser::execute_rename(RGWUserAdminOpState& op_state, std::string *err_msg)
 
 
   // Link bucket and objects to new user
+  ACLOwner owner;
   RGWAccessControlPolicy policy_instance;
   policy_instance.create_default(user_info.user_id, op_state.display_name);
   owner = policy_instance.get_owner();
   bufferlist aclbl;
   policy_instance.encode(aclbl);
+
   map<string, bufferlist> attrs;
   for (auto i = read_buckets.begin(); i != read_buckets.end(); ++i) {
 
@@ -2021,9 +2023,12 @@ int RGWUser::execute_rename(RGWUserAdminOpState& op_state, std::string *err_msg)
       return ret;
     }
 
+    RGWObjVersionTracker objv_tracker;
+    RGWObjVersionTracker old_version = bucket_info.objv_tracker;
+
     ret = store->set_bucket_owner(bucket, owner);
     if (ret < 0) {
-      set_err_msg(err_msg, "failed to set bucket owner: " + cpp_strerror(-r));
+      set_err_msg(err_msg, "failed to set bucket owner: " + cpp_strerror(-ret));
       return ret;
     }
 
@@ -2060,7 +2065,7 @@ int RGWUser::execute_rename(RGWUserAdminOpState& op_state, std::string *err_msg)
       return ret;
     }
 
-    ret = rgw_bucket_chown(store, bucket_info, marker, attrs);
+    ret = rgw_bucket_chown(store, user_info, bucket_info, marker, attrs);
     if (ret < 0) {
       set_err_msg(err_msg, "failed to run bucket chown" + cpp_strerror(-ret));
       return ret;
@@ -2074,7 +2079,7 @@ int RGWUser::execute_add(RGWUserAdminOpState& op_state, RGWUserInfo& old_user_in
   int ret = 0;
   bool defer_user_update = true;
 
-  RGWUserInfo& user_info;
+  RGWUserInfo user_info;
 
   rgw_user& user_id = op_state.get_user_id();
   std::string user_email = op_state.get_user_email();
@@ -2204,6 +2209,7 @@ int RGWUser::execute_add(RGWUserAdminOpState& op_state, RGWUserInfo& old_user_in
     return ret;
 
   return 0;
+  }
 }
 
 /*
@@ -2346,7 +2352,7 @@ int RGWUser::add(RGWUserAdminOpState& op_state, std::string *err_msg)
     return ret;
   }
 
-  ret = RGWUser::execute_add(op_state, &subprocess_msg);
+  ret = execute_add(op_state, NULL, &subprocess_msg);
   if (ret < 0) {
     set_err_msg(err_msg, "unable to create user, " + subprocess_msg);
     return ret;

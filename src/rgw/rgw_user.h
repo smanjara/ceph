@@ -675,9 +675,10 @@ private:
   void init_default();
 
   /* API Contract Fulfillment */
-  int execute_add(RGWUserAdminOpState& op_state, RGWUserInfo& old_user_info = NULL, std::string *err_msg);
+  int execute_add(RGWUserAdminOpState& op_state, RGWUserInfo& old_user_info, std::string *err_msg);
   int execute_remove(RGWUserAdminOpState& op_state, std::string *err_msg);
   int execute_modify(RGWUserAdminOpState& op_state, std::string *err_msg);
+  int execute_rename(RGWUserAdminOpState& op_state, std::string *err_msg);
 
 public:
   RGWUser();

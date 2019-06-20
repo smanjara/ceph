@@ -909,7 +909,7 @@ int RGWBucket::init(RGWRados *storage, RGWBucketAdminOpState& op_state,
   if (!bucket_name.empty()) {
     ceph::real_time mtime;
     int r = store->get_bucket_info(obj_ctx, bucket_tenant, bucket_name,
-	bucket_info, &mtime, pattrs);
+	bucket_info, &mtime, null_yield, pattrs);
     if (r < 0) {
       set_err_msg(err_msg, "failed to fetch bucket info for bucket=" + bucket_name);
       ldout(store->ctx(), 0) << "could not get bucket info for bucket=" << bucket_name << dendl;
@@ -1093,7 +1093,7 @@ int RGWBucket::chown(RGWBucketAdminOpState& op_state,
   RGWBucketInfo bucket_info;
   RGWSysObjectCtx sys_ctx = store->svc.sysobj->init_obj_ctx();
 
-  int ret = store->get_bucket_info(sys_ctx, tenant, bucket_name, bucket_info, NULL, &attrs);
+  int ret = store->get_bucket_info(sys_ctx, tenant, bucket_name, bucket_info, NULL, null_yield, &attrs);
   if (ret < 0) {
     set_err_msg(err_msg, "bucket info failed: tenant: " + tenant + "bucket_name: " + bucket_name + " " + cpp_strerror(-ret));
     return ret;
