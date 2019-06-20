@@ -1984,48 +1984,99 @@ int RGWUser::execute_rename(RGWUserAdminOpState& op_state, std::string *err_msg)
   }
 
   // Create new user with old user's attributes
-  rgw_user& new_uid = op_state.get_new_uid();
-  rgw_user& uid = op_state.set_user_id(new_uid);
-  ret = execute_add(op_state, old_user_info, &subprocess_msg);
+  rgw_user& user_id = op_state.get_new_uid();
+  op_state.set_user_id(user_id);
+  ret = RGWUser::execute_add(op_state, old_user_info, &subprocess_msg);
   if (ret < 0) {
     set_err_msg(err_msg, "unable to create new user, " + subprocess_msg);
     return ret;
   }
 
-  // Change bucket and objects ownership
-  map<string, bufferlist>& attrs;
+  RGWUserInfo& user_info;
+  ret = rgw_get_user_info_by_uid(store, user_id, user_info);
+  if (ret < 0) {
+    set_err_msg(err_msg, "failed to fetch user info");
+    return ret;
+    }
+
+
+  // Link bucket and objects to new user
+  RGWAccessControlPolicy policy_instance;
+  policy_instance.create_default(user_info.user_id, op_state.display_name);
+  owner = policy_instance.get_owner();
+  bufferlist aclbl;
+  policy_instance.encode(aclbl);
+  map<string, bufferlist> attrs;
   for (auto i = read_buckets.begin(); i != read_buckets.end(); ++i) {
 
     RGWBucketEnt& bucket_ent = i;
     RGWBucketInfo bucket_info;
+    rgw_bucket& bucket = bucket_ent.bucket;
     RGWSysObjectCtx sys_ctx = store->svc.sysobj->init_obj_ctx();
 
-    ret = store->get_bucket_info(sys_ctx, tenant, bucket_ent.bucket.name, bucket_info, NULL, &attrs);
+    ret = store->get_bucket_info(sys_ctx, bucket.tenant, bucket.name,
+  	bucket_info, NULL, null_yield, &attrs);
     if (ret < 0) {
-      set_err_msg(err_msg, "bucket info failed: tenant: " + tenant + "bucket_name: " + bucket_name + " " + cpp_strerror(-ret));
+      set_err_msg(err_msg, "failed to fetch bucket info for bucket= " + bucket.name);
+      return ret;
+    }
+
+    ret = store->set_bucket_owner(bucket, owner);
+    if (ret < 0) {
+      set_err_msg(err_msg, "failed to set bucket owner: " + cpp_strerror(-r));
+      return ret;
+    }
+
+    const rgw_pool& root_pool = store->svc.zone->get_zone_params().domain_root;
+    std::string bucket_entry;
+    rgw_make_bucket_entry_name(bucket.tenant, bucket.name, bucket_entry);
+    rgw_raw_obj obj(root_pool, bucket_entry);
+    auto obj_ctx = store->svc.sysobj->init_obj_ctx();
+    auto sysobj = obj_ctx.get_obj(obj);
+    rgw_raw_obj obj_bucket_instance;
+
+    store->get_bucket_instance_obj(bucket, obj_bucket_instance);
+    auto inst_sysobj = obj_ctx.get_obj(obj_bucket_instance);
+    ret = sysobj.wop()
+              .set_objv_tracker(&objv_tracker)
+              .write_attr(RGW_ATTR_ACL, aclbl, null_yield);
+    if (ret < 0) {
+      set_err_msg(err_msg, "failed to set new acl");
+      return ret;
+    }
+
+    RGWBucketEntryPoint ep;
+    ep.bucket = bucket_info.bucket;
+    ep.owner = user_info.user_id;
+    ep.creation_time = bucket_info.creation_time;
+    ep.linked = true;
+    map<string, bufferlist> ep_attrs;
+    rgw_ep_info ep_data{ep, ep_attrs};
+
+    ret = rgw_link_bucket(store, user_info.user_id, bucket_info.bucket,
+            ceph::real_time(), true, &ep_data);
+    if (ret < 0) {
+      set_err_msg(err_msg, "failed to relink bucket");
       return ret;
     }
 
     ret = rgw_bucket_chown(store, bucket_info, marker, attrs);
-    if (Ret < 0) {
+    if (ret < 0) {
       set_err_msg(err_msg, "failed to run bucket chown" + cpp_strerror(-ret));
       return ret;
     }
-      
   }
 }
 
-int RGWUser::execute_add(RGWUserAdminOpState& op_state, RGWUserInfo& user_info, std::string *err_msg)
+int RGWUser::execute_add(RGWUserAdminOpState& op_state, RGWUserInfo& old_user_info, std::string *err_msg)
 {
   std::string subprocess_msg;
   int ret = 0;
   bool defer_user_update = true;
 
-  if (!user_info) {
-    RGWUserInfo user_info;
-  }
+  RGWUserInfo& user_info;
 
-  rgw_user& uid = op_state.get_user_id();
+  rgw_user& user_id = op_state.get_user_id();
   std::string user_email = op_state.get_user_email();
   std::string display_name = op_state.get_display_name();
 
@@ -2038,6 +2089,14 @@ int RGWUser::execute_add(RGWUserAdminOpState& op_state, RGWUserInfo& user_info, 
       return execute_modify(op_state, err_msg);
     }
 
+  
+  // fail if the display name was not included
+  if (display_name.empty()) {
+    set_err_msg(err_msg, "no display name specified");
+    return -EINVAL;
+  }
+
+  if (!old_user_info) {
     if (op_state.found_by_email) {
       set_err_msg(err_msg, "email: " + user_email +
 		  " is the email address an existing user");
@@ -2050,62 +2109,65 @@ int RGWUser::execute_add(RGWUserAdminOpState& op_state, RGWUserInfo& user_info, 
       ret = -EEXIST;
     }
     return ret;
-  }
-
-  // fail if the user_info has already been populated
-  if (op_state.is_populated()) {
+    // fail if the user_info has already been populated
+    if (op_state.is_populated()) {
     set_err_msg(err_msg, "cannot overwrite already populated user");
     return -EEXIST;
-  }
+    }		
+    // set the user info
+    user_info.user_id = user_id;
+    user_info.display_name = display_name;
+    user_info.type = TYPE_RGW;
 
-  // fail if the display name was not included
-  if (display_name.empty()) {
-    set_err_msg(err_msg, "no display name specified");
-    return -EINVAL;
-  }
+    if (!user_email.empty())
+      user_info.user_email = user_email;
 
-		
-  // set the user info
-  user_id = uid;
-  user_info.user_id = user_id;
-  user_info.display_name = display_name;
-  user_info.type = TYPE_RGW;
-
-  if (!user_email.empty())
-    user_info.user_email = user_email;
-
-  CephContext *cct = store->ctx();
-  if (op_state.max_buckets_specified) {
-    user_info.max_buckets = op_state.get_max_buckets();
-  } else {
-    user_info.max_buckets = cct->_conf->rgw_user_max_buckets;
-  }
-
-  user_info.suspended = op_state.get_suspension_status();
-  user_info.admin = op_state.admin;
-  user_info.system = op_state.system;
-
-  if (op_state.op_mask_specified)
-    user_info.op_mask = op_state.get_op_mask();
-
-  if (op_state.has_bucket_quota()) {
-    user_info.bucket_quota = op_state.get_bucket_quota();
-  } else {
-    rgw_apply_default_bucket_quota(user_info.bucket_quota, cct->_conf);
-  }
-
-  if (op_state.temp_url_key_specified) {
-    map<int, string>::iterator iter;
-    for (iter = op_state.temp_url_keys.begin();
-         iter != op_state.temp_url_keys.end(); ++iter) {
-      user_info.temp_url_keys[iter->first] = iter->second;
+    CephContext *cct = store->ctx();
+    if (op_state.max_buckets_specified) {
+      user_info.max_buckets = op_state.get_max_buckets();
+    } else {
+      user_info.max_buckets = cct->_conf->rgw_user_max_buckets;
     }
-  }
 
-  if (op_state.has_user_quota()) {
-    user_info.user_quota = op_state.get_user_quota();
-  } else {
-    rgw_apply_default_user_quota(user_info.user_quota, cct->_conf);
+    user_info.suspended = op_state.get_suspension_status();
+    user_info.admin = op_state.admin;
+    user_info.system = op_state.system;
+
+    if (op_state.op_mask_specified)
+      user_info.op_mask = op_state.get_op_mask();
+
+    if (op_state.has_bucket_quota()) {
+      user_info.bucket_quota = op_state.get_bucket_quota();
+    } else {
+      rgw_apply_default_bucket_quota(user_info.bucket_quota, cct->_conf);
+    }
+
+    if (op_state.temp_url_key_specified) {
+      map<int, string>::iterator iter;
+      for (iter = op_state.temp_url_keys.begin();
+          iter != op_state.temp_url_keys.end(); ++iter) {
+        user_info.temp_url_keys[iter->first] = iter->second;
+      }
+    }
+
+    if (op_state.has_user_quota()) {
+      user_info.user_quota = op_state.get_user_quota();
+    } else {
+      rgw_apply_default_user_quota(user_info.user_quota, cct->_conf);
+    }
+  } else {              // if renaming user (i.e. if old user_info is passed then simply copy them)
+    user_info.user_id = user_id;
+    user_info.display_name = old_user_info.display_name;
+    user_info.type = TYPE_RGW;
+    user_info.user_email = old_user_info.user_email;
+    user_info.max_buckets = old_user_info.max_buckets;
+    user_info.suspended = old_user_info.suspended;
+    user_info.admin = old_user_info.admin;
+    user_info.system = old_user_info.system;
+    user_info.op_mask = old_user_info.op_mask;
+    user_info.bucket_quota = old_user_info.bucket_quota;
+    user_info.temp_url_keys = old_user_info.temp_url_keys;
+    user_info.user_quota = old_user_info.user_quota;
   }
 
   // update the request
@@ -2284,7 +2346,7 @@ int RGWUser::add(RGWUserAdminOpState& op_state, std::string *err_msg)
     return ret;
   }
 
-  ret = execute_add(op_state, NULL, &subprocess_msg);
+  ret = RGWUser::execute_add(op_state, &subprocess_msg);
   if (ret < 0) {
     set_err_msg(err_msg, "unable to create user, " + subprocess_msg);
     return ret;

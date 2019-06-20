@@ -190,7 +190,7 @@ int rgw_bucket_sync_user_stats(RGWRados *store, const string& tenant_name, const
   return 0;
 }
 
-int rgw_bucket_chown(RGWRados* const store, RGWBucketInfo& bucket_info, const string& marker, map<string, bufferlist>& attrs)
+int rgw_bucket_chown(RGWRados* const store, RGWUserInfo& user_info, RGWBucketInfo& bucket_info, const string& marker, map<string, bufferlist>& attrs)
 {
   RGWObjectCtx obj_ctx(store);
   std::vector<rgw_bucket_dir_entry> objs;
@@ -211,9 +211,9 @@ int rgw_bucket_chown(RGWRados* const store, RGWBucketInfo& bucket_info, const st
 
   do {
       objs.clear();
-      ret = list_op.list_objects(max_entries, &objs, &common_prefixes, &is_truncated);
+      int ret = list_op.list_objects(max_entries, &objs, &common_prefixes, &is_truncated);
       if (ret < 0) {
-        set_err_msg(err_msg, "list objects failed: " + cpp_strerror(-ret));
+        ldout(store->ctx(), 0) << "ERROR: list objects failed: " << cpp_strerror(-ret) << dendl;
         return ret;
       }
 
@@ -225,12 +225,12 @@ int rgw_bucket_chown(RGWRados* const store, RGWBucketInfo& bucket_info, const st
         const rgw_obj r_obj(bucket_info.bucket, obj.key);
         ret = get_obj_attrs(store, obj_ctx, bucket_info, r_obj, attrs);
         if (ret < 0){
-          set_err_msg(err_msg, "failed to read object " + obj.key.name +  "with " + cpp_strerror(-ret));
+          ldout(store->ctx(), 0) << "ERROR: failed to read object " << obj.key.name << cpp_strerror(-ret) << dendl;
           continue;
         }
         const auto& aiter = attrs.find(RGW_ATTR_ACL);
         if (aiter == attrs.end()) {
-          set_err_msg(err_msg, "no acls found for object " + obj.key.name + " .Continuing with next object." + cpp_strerror(-ret));
+          ldout(store->ctx(), 0) << "ERROR: no acls found for object " << obj.key.name << " .Continuing with next object." << dendl;
           continue;
         } else {
           bufferlist& bl = aiter->second;
@@ -240,7 +240,7 @@ int rgw_bucket_chown(RGWRados* const store, RGWBucketInfo& bucket_info, const st
             decode(policy, bl);
             owner = policy.get_owner();
           } catch (buffer::error& err) {
-            set_err_msg(err_msg, "decode policy failed: ");
+            ldout(store->ctx(), 0) << "ERROR: decode policy failed" << err << dendl;
             return -EIO;
           }
 
@@ -265,7 +265,7 @@ int rgw_bucket_chown(RGWRados* const store, RGWBucketInfo& bucket_info, const st
 
           ret = modify_obj_attr(store, obj_ctx, bucket_info, r_obj, RGW_ATTR_ACL, bl);
           if (ret < 0) {
-            set_err_msg(err_msg, "modify attr failed: " + cpp_strerror(-ret));
+            ldout(store->ctx(), 0) << "ERROR: modify attr failed " << cpp_strerror(-ret) << dendl;
             return ret;
           }
         }
@@ -1106,7 +1106,7 @@ int RGWBucket::chown(RGWBucketAdminOpState& op_state,
     return ret;
   }
 
-  ret = rgw_bucket_chown(store, bucket_info, marker, attrs);
+  ret = rgw_bucket_chown(store, user_info, bucket_info, marker, attrs);
   if (ret < 0) {
     set_err_msg(err_msg, "Failed to change object ownership" + cpp_strerror(-ret));
   }
