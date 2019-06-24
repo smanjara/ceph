@@ -244,7 +244,7 @@ void usage()
   cout << "options:\n";
   cout << "   --tenant=<tenant>         tenant name\n";
   cout << "   --uid=<id>                user id\n";
-  cout << "   --new-uid=<id>            new user id\n"
+  cout << "   --new-uid=<id>            new user id\n";
   cout << "   --subuser=<name>          subuser name\n";
   cout << "   --access-key=<key>        S3 access key\n";
   cout << "   --email=<email>           user's email address\n";
@@ -4918,6 +4918,10 @@ int main(int argc, const char **argv)
 
   if (!user_email.empty())
     user_op.set_user_email(user_email);
+
+  if (!user_id.empty()) {
+    user_op.set_new_user_id(new_user_id);
+  }
 
   if (!access_key.empty())
     user_op.set_access_key(access_key);

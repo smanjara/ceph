@@ -258,6 +258,13 @@ struct RGWUserAdminOpState {
     user_id = id;
   }
 
+  void set_new_user_id(rgw_user& id) {
+    if (id.empty())
+      return;
+
+    new_user_id = id;
+  }
+
   void set_user_email(std::string& email) {
    /* always lowercase email address */
     boost::algorithm::to_lower(email);
@@ -400,10 +407,6 @@ struct RGWUserAdminOpState {
   void set_mfa_ids(const std::set<string>& ids) {
     mfa_ids = ids;
     mfa_ids_specified = true;
-  }
-
-  void set_new_uid(rgw_user& new_uid) {
-    new_user_id = new_uid;
   }
 
   bool is_populated() { return populated; }
@@ -675,10 +678,12 @@ private:
   void init_default();
 
   /* API Contract Fulfillment */
-  int execute_add(RGWUserAdminOpState& op_state, RGWUserInfo& old_user_info, std::string *err_msg);
+  int execute_add(RGWUserAdminOpState& op_state, std::string *err_msg);
   int execute_remove(RGWUserAdminOpState& op_state, std::string *err_msg);
   int execute_modify(RGWUserAdminOpState& op_state, std::string *err_msg);
-  int execute_rename(RGWUserAdminOpState& op_state, std::string *err_msg);
+  int execute_user_rename(RGWUserAdminOpState& op_state, std::string *err_msg);
+  int execute_rename(RGWUserAdminOpState& op_state, std::string *err_msg,
+                  const boost::optional<RGWUserInfo>& old_user_info);
 
 public:
   RGWUser();
@@ -700,6 +705,7 @@ public:
   /* API Contracted Methods */
   int add(RGWUserAdminOpState& op_state, std::string *err_msg = NULL);
   int remove(RGWUserAdminOpState& op_state, std::string *err_msg = NULL);
+  int rename(RGWUserAdminOpState& op_state, std::string *err_msg = NULL);
 
   /* remove an already populated RGWUser */
   int remove(std::string *err_msg = NULL);
