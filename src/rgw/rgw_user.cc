@@ -1988,9 +1988,10 @@ int RGWUser::execute_user_rename(RGWUserAdminOpState& op_state, std::string *err
 
   // Create new user with old user's attributes
   rgw_user& uid = op_state.get_new_uid();
+  string display_name = old_user_info.display_name;
   RGWUserAdminOpState new_op_state;
   new_op_state.set_user_id(uid);
-  ret = execute_rename(new_op_state, &subprocess_msg, old_user_info);
+  ret = execute_rename(new_op_state, old_user_info, &subprocess_msg);
   if (ret < 0) {
     set_err_msg(err_msg, "unable to create new user, " + subprocess_msg);
     return ret;
@@ -2007,7 +2008,7 @@ int RGWUser::execute_user_rename(RGWUserAdminOpState& op_state, std::string *err
   // Link bucket and objects to new user
   ACLOwner owner;
   RGWAccessControlPolicy policy_instance;
-  policy_instance.create_default(user_info.user_id, new_op_state.display_name);
+  policy_instance.create_default(user_info.user_id, display_name);
   owner = policy_instance.get_owner();
   bufferlist aclbl;
   policy_instance.encode(aclbl);
@@ -2078,7 +2079,7 @@ int RGWUser::execute_user_rename(RGWUserAdminOpState& op_state, std::string *err
   return 0;
 }
 
-int RGWUser:: execute_rename(RGWUserAdminOpState& op_state, std::string *err_msg, const boost::optional<RGWUserInfo>& old_user_info)
+int RGWUser:: execute_rename(RGWUserAdminOpState& op_state, RGWUserInfo& old_user_info, std::string *err_msg)
 {
   std::string subprocess_msg;
   int ret = 0;
@@ -2087,120 +2088,9 @@ int RGWUser:: execute_rename(RGWUserAdminOpState& op_state, std::string *err_msg
   RGWUserInfo user_info;
 
   rgw_user& user_id = op_state.get_user_id();
-  std::string user_email = op_state.get_user_email();
-  std::string display_name = op_state.get_display_name();
 
-  /*
-  if (op_state.has_existing_user()) {
-    if (!op_state.exclusive &&
-        (user_email.empty() ||
-	 boost::iequals(user_email, old_info.user_email)) &&
-        old_info.display_name == display_name) {
-      return execute_modify(op_state, err_msg);
-    }
-  }
-
-  
-  // fail if the display name was not included
-  if (display_name.empty()) {
-    set_err_msg(err_msg, "no display name specified");
-    return -EINVAL;
-  }
-  */
-
-  if (!old_user_info) {
-    if (op_state.has_existing_user()) {
-    if (!op_state.exclusive &&
-        (user_email.empty() ||
-	 boost::iequals(user_email, old_info.user_email)) &&
-        old_info.display_name == display_name) {
-      return execute_modify(op_state, err_msg);
-    }
-  }
-
-  // fail if the display name was not included
-    if (display_name.empty()) {
-      set_err_msg(err_msg, "no display name specified");
-      return -EINVAL;
-  }
-
-    if (op_state.found_by_email) {
-      set_err_msg(err_msg, "email: " + user_email +
-		  " is the email address an existing user");
-      ret = -ERR_EMAIL_EXIST;
-    } else if (op_state.found_by_key) {
-      set_err_msg(err_msg, "duplicate key provided");
-      ret = -ERR_KEY_EXIST;
-    } else {
-      set_err_msg(err_msg, "user: " + op_state.user_id.to_str() + " exists");
-      ret = -EEXIST;
-    }
-    return ret;
-    // fail if the user_info has already been populated
-    if (op_state.is_populated()) {
-    set_err_msg(err_msg, "cannot overwrite already populated user");
-    return -EEXIST;
-    }		
-    // set the user info
-    user_info.user_id = user_id;
-    user_info.display_name = display_name;
-    user_info.type = TYPE_RGW;
-
-    if (!user_email.empty())
-      user_info.user_email = user_email;
-
-    CephContext *cct = store->ctx();
-    if (op_state.max_buckets_specified) {
-      user_info.max_buckets = op_state.get_max_buckets();
-    } else {
-      user_info.max_buckets = cct->_conf->rgw_user_max_buckets;
-    }
-
-    user_info.suspended = op_state.get_suspension_status();
-    user_info.admin = op_state.admin;
-    user_info.system = op_state.system;
-
-    if (op_state.op_mask_specified)
-      user_info.op_mask = op_state.get_op_mask();
-
-    if (op_state.has_bucket_quota()) {
-      user_info.bucket_quota = op_state.get_bucket_quota();
-    } else {
-      rgw_apply_default_bucket_quota(user_info.bucket_quota, cct->_conf);
-    }
-
-    if (op_state.temp_url_key_specified) {
-      map<int, string>::iterator iter;
-      for (iter = op_state.temp_url_keys.begin();
-          iter != op_state.temp_url_keys.end(); ++iter) {
-        user_info.temp_url_keys[iter->first] = iter->second;
-      }
-    }
-
-    if (op_state.has_user_quota()) {
-      user_info.user_quota = op_state.get_user_quota();
-    } else {
-      rgw_apply_default_user_quota(user_info.user_quota, cct->_conf);
-    }
-  } else {              // if renaming user (i.e. if old user_info is passed then simply copy them)
-    user_info.user_id = user_id;
-    user_info.display_name = (*old_user_info).display_name;
-    user_info.type = TYPE_RGW;
-    user_info.user_email = (*old_user_info).user_email;
-    user_info.max_buckets = (*old_user_info).max_buckets;
-    user_info.suspended = (*old_user_info).suspended;
-    user_info.admin = (*old_user_info).admin;
-    user_info.system = (*old_user_info).system;
-    user_info.op_mask = (*old_user_info).op_mask;
-    user_info.bucket_quota = (*old_user_info).bucket_quota;
-    user_info.temp_url_keys = (*old_user_info).temp_url_keys;
-    user_info.user_quota = (*old_user_info).user_quota;
-    user_info.access_keys = (*old_user_info).access_keys;
-    user_info.swift_keys = (*old_user_info).swift_keys;
-    user_info.subusers = (*old_user_info).subusers;
-    user_info.placement_tags = (*old_user_info).placement_tags;
-    user_info.caps = (*old_user_info).caps;
-  }
+  user_info = old_user_info;
+  user_info.user_id = user_id;
 
   // update the request
   op_state.set_user_info(user_info);
@@ -2219,15 +2109,6 @@ int RGWUser:: execute_rename(RGWUserAdminOpState& op_state, std::string *err_msg
     ret = keys.add(op_state, &subprocess_msg, defer_user_update);
     if (ret < 0) {
       set_err_msg(err_msg, "unable to create access key, " + subprocess_msg);
-      return ret;
-    }
-  }
-
-  // see if we need to add some caps
-  if (op_state.has_caps_op()) {
-    ret = caps.add(op_state, &subprocess_msg, defer_user_update);
-    if (ret < 0) {
-      set_err_msg(err_msg, "unable to add user capabilities, " + subprocess_msg);
       return ret;
     }
   }
