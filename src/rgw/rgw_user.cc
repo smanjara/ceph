@@ -1936,16 +1936,10 @@ int RGWUser::check_op(RGWUserAdminOpState& op_state, std::string *err_msg)
 
 int RGWUser::execute_user_rename(RGWUserAdminOpState& op_state, std::string *err_msg)
 {
- //unlink buckets from existing user
+
+ // unlink buckets from existing user
   rgw_user& old_uid = op_state.get_user_id();
   RGWUserInfo old_user_info = op_state.get_user_info(); // Save user info for later use
-
-/*
-  if (!op_state.has_existing_user()) {
-    set_err_msg(err_msg, "user does not exist");
-    return -ENOENT;
-  }
-*/
 
   bool is_truncated = false;
   string marker;
@@ -1986,8 +1980,14 @@ int RGWUser::execute_user_rename(RGWUserAdminOpState& op_state, std::string *err
     return ret;
   }
 
-  // Create new user with old user's attributes
+  // create new user with old user's attributes
   rgw_user& uid = op_state.get_new_uid();
+
+  if (old_uid.tenant != uid.tenant) {
+    set_err_msg(err_msg, "Users have to be under the same tenant namespace " 
+                + old_uid.tenant + "!=" + uid.tenant); 
+  }
+  
   string display_name = old_user_info.display_name;
   RGWUserAdminOpState new_op_state;
   new_op_state.set_user_id(uid);
@@ -2005,7 +2005,7 @@ int RGWUser::execute_user_rename(RGWUserAdminOpState& op_state, std::string *err
     }
 
 
-  // Link bucket and objects to new user
+  // link bucket and objects to new user
   ACLOwner owner;
   RGWAccessControlPolicy policy_instance;
   policy_instance.create_default(user_info.user_id, display_name);
@@ -2016,7 +2016,6 @@ int RGWUser::execute_user_rename(RGWUserAdminOpState& op_state, std::string *err
   map<string, bufferlist> attrs;
   for (vector<rgw_bucket>::iterator iter = read_buckets.begin(); iter != read_buckets.end(); ++iter) {
 
-    //RGWBucketEnt bucket_ent = i;
     RGWBucketInfo bucket_info;
     rgw_bucket bucket = *iter;
     RGWSysObjectCtx sys_ctx = store->svc.sysobj->init_obj_ctx();
@@ -2047,7 +2046,7 @@ int RGWUser::execute_user_rename(RGWUserAdminOpState& op_state, std::string *err
 
     store->get_bucket_instance_obj(bucket, obj_bucket_instance);
     auto inst_sysobj = obj_ctx.get_obj(obj_bucket_instance);
-    ret = sysobj.wop()
+    ret = inst_sysobj.wop()
               .set_objv_tracker(&objv_tracker)
               .write_attr(RGW_ATTR_ACL, aclbl, null_yield);
     if (ret < 0) {
@@ -2070,7 +2069,15 @@ int RGWUser::execute_user_rename(RGWUserAdminOpState& op_state, std::string *err
       return ret;
     }
 
-    ret = rgw_bucket_chown(store, user_info, bucket_info, marker, attrs);
+    RGWBucketInfo new_bucket_info;
+    ret = store->get_bucket_info(sys_ctx, bucket.tenant, bucket.name,
+  	new_info, NULL, null_yield, &attrs);
+    if (ret < 0) {
+      set_err_msg(err_msg, "failed to fetch bucket info for bucket= " + bucket.name);
+      return ret;
+    }
+
+    ret = rgw_bucket_chown(store, user_info, new_bucket_info, marker, attrs);
     if (ret < 0) {
       set_err_msg(err_msg, "failed to run bucket chown" + cpp_strerror(-ret));
       return ret;

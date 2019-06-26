@@ -1022,7 +1022,7 @@ int RGWBucket::link(RGWBucketAdminOpState& op_state,
 
     store->get_bucket_instance_obj(bucket, obj_bucket_instance);
     auto inst_sysobj = obj_ctx.get_obj(obj_bucket_instance);
-    r = sysobj.wop()
+    r = inst_sysobj.wop()
               .set_objv_tracker(&objv_tracker)
               .write_attr(RGW_ATTR_ACL, aclbl, null_yield);
     if (r < 0) {
