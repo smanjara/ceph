@@ -2071,7 +2071,7 @@ int RGWUser::execute_user_rename(RGWUserAdminOpState& op_state, std::string *err
 
     RGWBucketInfo new_bucket_info;
     ret = store->get_bucket_info(sys_ctx, bucket.tenant, bucket.name,
-  	new_info, NULL, null_yield, &attrs);
+  	new_bucket_info, NULL, null_yield, &attrs);
     if (ret < 0) {
       set_err_msg(err_msg, "failed to fetch bucket info for bucket= " + bucket.name);
       return ret;
@@ -2092,17 +2092,76 @@ int RGWUser:: execute_rename(RGWUserAdminOpState& op_state, RGWUserInfo& old_use
   int ret = 0;
   bool defer_user_update = true;
 
-  RGWUserInfo user_info;
-
   rgw_user& user_id = op_state.get_user_id();
 
+  RGWUserInfo user_info;
   user_info = old_user_info;
   user_info.user_id = user_id;
+
+  // update swift_keys
+  RGWAccessKey old_key;
+  auto modify_keys = user_info.swift_keys;
+  map<string, RGWAccessKey>::iterator it;
+  it = modify_keys.begin();
+  if (it != modify_keys.end()) {
+    old_key = it->second;
+  }
+
+  map<std::string, RGWAccessKey> *keys_map;
+  map<std::string, RGWAccessKey>::iterator kiter;
+  map<string, RGWAccessKey>::iterator iter;
+  iter = user_info.swift_keys.begin();
+
+/* 
+  keys_map = keys.swift_keys;
+  kiter = keys_map->find(iter->first);
+  if (kiter != keys_map->end()) {
+    rgw_remove_key_index(store, kiter->second);
+    keys_map->erase(kiter);
+  }
+*/
+ 
+  if (iter != user_info.swift_keys.end()) {
+    user_info.swift_keys.erase(iter);
+  }
+
+  // update swift_keys with new user id
+  std::string id;
+  user_id.to_str(id);
+  id.append(":");
+  id.append(old_key.subuser);
+
+  old_key.id = id;
+  user_info.swift_keys.emplace(id, old_key);
 
   // update the request
   op_state.set_user_info(user_info);
   op_state.set_populated();
   op_state.set_initialized();
+
+/* 
+  for (iter = user_info.swift_keys.begin(); iter != user_info.swift_keys.end(); ++iter) {
+    
+    map<std::string, RGWAccessKey>::iterator kiter;
+    RGWAccessKey& key = iter->second;
+    id = iter->first;
+
+    kiter = keys_map->find(id);
+    rgw_remove_key_index(store, kiter->second);
+    keys_map->erase(kiter);
+
+    user_id.to_str(id);
+    id.append(":");
+    id.append(key.subuser);
+
+    key.id = id;
+    key_pair.first = id;
+    key_pair.second = key;
+    keys_map->insert(key_pair);
+    user_info.swift_keys[id] = key;
+  }
+  */
+
 
   // update the helper objects
   ret = init_members(op_state);
