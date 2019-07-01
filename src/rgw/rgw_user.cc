@@ -1939,7 +1939,7 @@ int RGWUser::execute_user_rename(RGWUserAdminOpState& op_state, std::string *err
 
  // unlink buckets from existing user
   rgw_user& old_uid = op_state.get_user_id();
-  RGWUserInfo old_user_info = op_state.get_user_info(); // Save user info for later use
+  RGWUserInfo old_user_info = op_state.get_user_info();
 
   bool is_truncated = false;
   string marker;
@@ -1960,7 +1960,7 @@ int RGWUser::execute_user_rename(RGWUserAdminOpState& op_state, std::string *err
     std::map<std::string, RGWBucketEnt>::iterator it;
     for (it = m.begin(); it != m.end(); ++it) {
       RGWBucketEnt obj = it->second;
-      read_buckets.push_back(obj.bucket);  //Save the list of all buckets of the user to be able to use after bucket unlink
+      read_buckets.push_back(obj.bucket);      //Save the list of all buckets of the user to be able to use after bucket unlink
       ret = rgw_unlink_bucket(store, old_uid, (obj.bucket.tenant), (obj.bucket.name));
       if (ret < 0) {
         set_err_msg(err_msg, "error unlinking bucket " + cpp_strerror(-ret));
@@ -1991,6 +1991,7 @@ int RGWUser::execute_user_rename(RGWUserAdminOpState& op_state, std::string *err
   string display_name = old_user_info.display_name;
   RGWUserAdminOpState new_op_state;
   new_op_state.set_user_id(uid);
+
   ret = execute_rename(new_op_state, old_user_info, &subprocess_msg);
   if (ret < 0) {
     set_err_msg(err_msg, "unable to create new user, " + subprocess_msg);
@@ -2050,7 +2051,7 @@ int RGWUser::execute_user_rename(RGWUserAdminOpState& op_state, std::string *err
               .set_objv_tracker(&objv_tracker)
               .write_attr(RGW_ATTR_ACL, aclbl, null_yield);
     if (ret < 0) {
-      set_err_msg(err_msg, "failed to set new acl");
+      set_err_msg(err_msg, "failed to set new acl on bucket " + bucket.name);
       return ret;
     }
 
@@ -2065,7 +2066,7 @@ int RGWUser::execute_user_rename(RGWUserAdminOpState& op_state, std::string *err
     ret = rgw_link_bucket(store, user_info.user_id, bucket_info.bucket,
             ceph::real_time(), true, &ep_data);
     if (ret < 0) {
-      set_err_msg(err_msg, "failed to relink bucket");
+      set_err_msg(err_msg, "failed to link bucket " + bucket.name + " to new user");
       return ret;
     }
 
@@ -2098,70 +2099,29 @@ int RGWUser:: execute_rename(RGWUserAdminOpState& op_state, RGWUserInfo& old_use
   user_info = old_user_info;
   user_info.user_id = user_id;
 
-  // update swift_keys
-  RGWAccessKey old_key;
+  // update swift_keys with new user id
   auto modify_keys = user_info.swift_keys;
   map<string, RGWAccessKey>::iterator it;
-  it = modify_keys.begin();
-  if (it != modify_keys.end()) {
-    old_key = it->second;
+
+  user_info.swift_keys.clear();
+
+  for (it = modify_keys.begin(); it != modify_keys.end(); it++) {
+
+      RGWAccessKey old_key;
+      old_key = it->second;
+
+      std::string id;
+      user_id.to_str(id);
+      id.append(":");
+      id.append(old_key.subuser);
+
+      old_key.id = id;
+      user_info.swift_keys[id] = old_key;
   }
 
-  map<std::string, RGWAccessKey> *keys_map;
-  map<std::string, RGWAccessKey>::iterator kiter;
-  map<string, RGWAccessKey>::iterator iter;
-  iter = user_info.swift_keys.begin();
-
-/* 
-  keys_map = keys.swift_keys;
-  kiter = keys_map->find(iter->first);
-  if (kiter != keys_map->end()) {
-    rgw_remove_key_index(store, kiter->second);
-    keys_map->erase(kiter);
-  }
-*/
- 
-  if (iter != user_info.swift_keys.end()) {
-    user_info.swift_keys.erase(iter);
-  }
-
-  // update swift_keys with new user id
-  std::string id;
-  user_id.to_str(id);
-  id.append(":");
-  id.append(old_key.subuser);
-
-  old_key.id = id;
-  user_info.swift_keys.emplace(id, old_key);
-
-  // update the request
   op_state.set_user_info(user_info);
   op_state.set_populated();
   op_state.set_initialized();
-
-/* 
-  for (iter = user_info.swift_keys.begin(); iter != user_info.swift_keys.end(); ++iter) {
-    
-    map<std::string, RGWAccessKey>::iterator kiter;
-    RGWAccessKey& key = iter->second;
-    id = iter->first;
-
-    kiter = keys_map->find(id);
-    rgw_remove_key_index(store, kiter->second);
-    keys_map->erase(kiter);
-
-    user_id.to_str(id);
-    id.append(":");
-    id.append(key.subuser);
-
-    key.id = id;
-    key_pair.first = id;
-    key_pair.second = key;
-    keys_map->insert(key_pair);
-    user_info.swift_keys[id] = key;
-  }
-  */
-
 
   // update the helper objects
   ret = init_members(op_state);
