@@ -244,6 +244,7 @@ struct RGWBucketAdminOpState {
   bool fix_index;
   bool delete_child_objects;
   bool bucket_stored;
+  bool yes_i_really_mean_it;
   int max_aio = 0;
 
   rgw_bucket bucket;
@@ -254,6 +255,7 @@ struct RGWBucketAdminOpState {
   void set_check_objects(bool value) { check_objects = value; }
   void set_fix_index(bool value) { fix_index = value; }
   void set_delete_children(bool value) { delete_child_objects = value; }
+  void set_override(bool value) { yes_i_really_mean_it = value; }
 
   void set_max_aio(int value) { max_aio = value; }
 
@@ -298,6 +300,7 @@ struct RGWBucketAdminOpState {
   bool is_user_op() { return !uid.empty(); }
   bool is_system_op() { return uid.empty(); }
   bool has_bucket_stored() { return bucket_stored; }
+  bool will_override() {return yes_i_really_mean_it; }
   int get_max_aio() { return max_aio; }
 
   RGWBucketAdminOpState() : list_buckets(false), stat_buckets(false), check_objects(false), 

@@ -5542,6 +5542,7 @@ int main(int argc, const char **argv)
   if (opt_cmd == OPT_BUCKET_LINK) {
     bucket_op.set_bucket_id(bucket_id);
     bucket_op.set_new_bucket_name(new_bucket_name);
+    bucket_op.set_override(yes_i_really_mean_it);
     string err;
     int r = RGWBucketAdminOp::link(store, bucket_op, &err);
     if (r < 0) {

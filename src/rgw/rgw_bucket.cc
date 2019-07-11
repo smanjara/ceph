@@ -269,7 +269,9 @@ int rgw_bucket_chown(RGWRados* const store, RGWUserInfo& user_info, RGWBucketInf
             return ret;
           }
         }
-      } cerr << count << " objects processed in " << bucket_info.bucket.name << " .Next marker " << list_op.params.marker.name << std::endl;
+      } 
+      cerr << count << " objects processed in " << bucket_info.bucket.name << ". Next marker " 
+      << list_op.params.marker.name << std::endl;
     } while(is_truncated);
     return 0;
 }
@@ -945,9 +947,9 @@ int RGWBucket::link(RGWBucketAdminOpState& op_state,
 
   std::string display_name = op_state.get_user_display_name();
   rgw_bucket& bucket = op_state.get_bucket();
-  if (!bucket_id.empty() && bucket_id != bucket.bucket_id) {
+  if (!bucket_id.empty() && bucket_id != bucket.bucket_id && !op_state.will_override()) {
     set_err_msg(err_msg,
-	"specified bucket id does not match " + bucket.bucket_id);
+	"specified bucket id does not match " + bucket.bucket_id + " (requires --yes-i-really-mean-it to override)");
     return -EINVAL;
   }
   rgw_bucket old_bucket = bucket;
