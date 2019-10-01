@@ -15,7 +15,7 @@ overrides:
             endpoints: [c1.client.0]
           - name: test-zone2
             is_default: true
+            is_archive: true
             endpoints: [c2.client.0]
           - name: test-zone3
             endpoints: [c1.client.1]
-            is_archive: true
