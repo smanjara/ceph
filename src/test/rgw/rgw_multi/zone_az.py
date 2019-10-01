@@ -12,7 +12,7 @@ class AZone(Zone):  # pylint: disable=too-many-ancestors
         super(AZone, self).__init__(name, zonegroup, cluster, data, zone_id, gateways)
 
     def is_read_only(self):
-        return False
+        return True
 
     def tier_type(self):
         return "archive"
