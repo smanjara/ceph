@@ -615,6 +615,7 @@ int RGWAsyncFetchRemoteObj::_send_request()
                        NULL, /* void (*progress_cb)(off_t, void *), */
                        NULL, /* void *progress_data*); */
                        dpp,
+                       stat_follow_olh,
                        &zones_trace,
                        &bytes_transferred);
 

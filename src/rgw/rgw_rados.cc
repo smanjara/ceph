@@ -3582,6 +3582,7 @@ int RGWRados::fetch_remote_obj(RGWObjectCtx& obj_ctx,
                void (*progress_cb)(off_t, void *),
                void *progress_data,
                const DoutPrefixProvider *dpp,
+               bool stat_follow_olh,
                rgw_zone_set *zones_trace,
                std::optional<uint64_t>* bytes_transferred)
 {
@@ -3671,7 +3672,7 @@ int RGWRados::fetch_remote_obj(RGWObjectCtx& obj_ctx,
 
   if (copy_if_newer) {
     /* need to get mtime for destination */
-    ret = get_obj_state(&obj_ctx, dest_bucket_info, src_obj, &dest_state, true, null_yield);
+    ret = get_obj_state(&obj_ctx, dest_bucket_info, src_obj, &dest_state, stat_follow_olh, null_yield);
     if (ret < 0)
       goto set_err_state;
 
@@ -3782,7 +3783,7 @@ int RGWRados::fetch_remote_obj(RGWObjectCtx& obj_ctx,
     if (copy_if_newer && canceled) {
       ldout(cct, 20) << "raced with another write of obj: " << dest_obj << dendl;
       obj_ctx.invalidate(dest_obj); /* object was overwritten */
-      ret = get_obj_state(&obj_ctx, dest_bucket_info, src_obj, &dest_state, true, null_yield);
+      ret = get_obj_state(&obj_ctx, dest_bucket_info, src_obj, &dest_state, stat_follow_olh, null_yield);
       if (ret < 0) {
         ldout(cct, 0) << "ERROR: " << __func__ << ": get_err_state() returned ret=" << ret << dendl;
         goto set_err_state;
@@ -3910,6 +3911,7 @@ int RGWRados::copy_obj(RGWObjectCtx& obj_ctx,
 
   bool remote_src;
   bool remote_dest;
+  bool stat_follow_olh = false;
 
   append_rand_alpha(cct, dest_obj.get_oid(), shadow_oid, 32);
   shadow_obj.init_ns(dest_obj.bucket, shadow_oid, shadow_ns);
@@ -3932,7 +3934,7 @@ int RGWRados::copy_obj(RGWObjectCtx& obj_ctx,
                dest_placement, src_mtime, mtime, mod_ptr,
                unmod_ptr, high_precision_time,
                if_match, if_nomatch, attrs_mod, copy_if_newer, attrs, category,
-               olh_epoch, delete_at, ptag, petag, progress_cb, progress_data, dpp);
+               olh_epoch, delete_at, ptag, petag, progress_cb, progress_data, dpp, stat_follow_olh);
   }
 
   map<string, bufferlist> src_attrs;
