@@ -1804,10 +1804,10 @@ RGWCoroutine *RGWArchiveDataSyncModule::sync_object(RGWDataSyncEnv *sync_env, RG
   }
 
   bool stat_follow_olh = true;
-  rgw_obj_key stat_dest_obj = key;
+  //rgw_obj_key stat_dest_key = key;
   return new RGWFetchRemoteObjCR(sync_env->async_rados, sync_env->store, sync_env->source_zone,
                                  bucket_info, std::nullopt,
-                                 stat_dest_obj, dest_key, versioned_epoch,
+                                 key, dest_key, versioned_epoch,
                                  true, zones_trace, nullptr, sync_env->dpp, stat_follow_olh);
 }
 

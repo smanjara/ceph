@@ -1101,6 +1101,7 @@ public:
                        void *progress_data,
                        const DoutPrefixProvider *dpp,
                        bool stat_follow_olh,
+                       bool stat_dest_obj,
                        rgw_zone_set *zones_trace= nullptr,
                        std::optional<uint64_t>* bytes_transferred = 0);
   /**
