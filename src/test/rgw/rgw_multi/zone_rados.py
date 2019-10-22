@@ -64,6 +64,7 @@ class RadosZone(Zone):
             log.info('comparing bucket=%s zones={%s, %s}', bucket_name, self.name, zone_conn.name)
             b1 = self.get_bucket(bucket_name)
             b2 = zone_conn.get_bucket(bucket_name)
+            log.debug('b2 bucket:')
 
             b1_versions = b1.list_versions()
             log.debug('bucket1 objects:')

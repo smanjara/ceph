@@ -20,7 +20,7 @@ class AZone(Zone):  # pylint: disable=too-many-ancestors
     def create(self, cluster, args=None, **kwargs):
         if args is None:
             args = ''
-        args += ['--tier-type', self.tier_type()]
+        args += ['--tier-type', self.tier_type(), '--read-only']
         return self.json_command(cluster, 'create', args)
 
     def has_buckets(self):
