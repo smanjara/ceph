@@ -2509,7 +2509,12 @@ public:
 					{ "version-id-marker" , marker_position.instance.c_str() },
 	                                { NULL, NULL } };
         // don't include tenant in the url, it's already part of instance_key
-        string p = string("/") + bs.bucket.name;
+        string p;
+        if (!bs.bucket.tenant.empty()) {
+          p = string("/") + bs.bucket.tenant + ":" + bs.bucket.name;
+        } else {
+          p = string("/") + bs.bucket.name;
+        }
         call(new RGWReadRESTResourceCR<bucket_list_result>(sync_env->cct, sync_env->conn, sync_env->http_manager, p, pairs, result));
       }
       if (retcode < 0) {
