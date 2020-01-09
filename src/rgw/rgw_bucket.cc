@@ -42,6 +42,7 @@
 #include "rgw_common.h"
 #include "rgw_reshard.h"
 #include "rgw_lc.h"
+#include "rgw_data_sync.h"
 
 // stolen from src/cls/version/cls_version.cc
 #define VERSION_ATTR "ceph.objclass.version"
@@ -3053,8 +3054,26 @@ int RGWMetadataHandlerPut_BucketInstance::put_post()
 }
 
 class RGWArchiveBucketInstanceMetadataHandler : public RGWBucketInstanceMetadataHandler {
+  ArchiveBucketLifecycle *archive_lc;
 public:
   RGWArchiveBucketInstanceMetadataHandler() {}
+
+  int do_put(RGWSI_MetaBackend_Handler::Op *op, string& entry, RGWObjVersionTracker& objv_tracker, optional_yield y) {
+    RGWBucketCompleteInfo bci;
+    real_time mtime;
+    RGWSI_Bucket_BI_Ctx ctx(op->ctx());
+
+    //int ret = read_bucket_instance_entry(ctx, entry, &bci, nullptr, y);
+    int ret = svc.bucket->read_bucket_instance_info(ctx, entry, &bci.info, &mtime, &bci.attrs, y);
+    if (ret < 0 && ret == -ENOENT) {
+        ret = archive_lc->apply_lifecycle();
+        if (ret < 0) {
+          ldout(cct, 0) << "ERROR: failed to init lifecycle on bucket=" << entry << dendl;
+          return ret;
+        }
+        return 0;
+    }
+  }
 
   int do_remove(RGWSI_MetaBackend_Handler::Op *op, string& entry, RGWObjVersionTracker& objv_tracker, optional_yield y) override {
     ldout(cct, 0) << "SKIP: bucket instance removal is not allowed on archive zone: bucket.instance:" << entry << dendl;

@@ -15,6 +15,7 @@
 
 #include "rgw_sync_module.h"
 #include "rgw_sync_trace.h"
+#include "rgw_lc.h"
 
 struct rgw_datalog_info {
   uint32_t num_shards;
@@ -595,6 +596,40 @@ public:
   bool supports_writes() override { return true; }
   bool supports_data_export() override { return false; }
   int create_instance(CephContext *cct, const JSONFormattable& config, RGWSyncModuleInstanceRef *instance) override;
+};
+
+#define ARCHIVE_RETENTION_DEFAULT 7
+struct ArchiveConfig {
+  string id{"archive"};
+
+  int archive_retention_days{0};
+  uint64_t sync_instance{0};
+
+  void dump(Formatter *f) const {
+    encode_json("id", id, f);
+    encode_json("archive_retention_days", archive_retention_days, f);
+  }
+
+  void init(CephContext *cct, const JSONFormattable& config) {
+    string uid = config["uid"]("archive");
+    archive_retention_days = config["archive_retention_days"](ARCHIVE_RETENTION_DEFAULT);
+  }
+
+  //void init_instance(const RGWRealm& realm, uint64_t instance_id) {
+  //  sync_instance = instance_id;
+  //}
+};
+class ArchiveBucketLifecycle {
+    ArchiveConfig *conf;
+    LCRule *rule;
+    int retention_period;
+    RGWLifecycleConfiguration lc_config;
+
+  public:
+    ArchiveBucketLifecycle(ArchiveConfig *_conf) : conf(_conf) {
+      retention_period = conf->archive_retention_days;
+    }
+    int apply_lifecycle();
 };
 
 #endif

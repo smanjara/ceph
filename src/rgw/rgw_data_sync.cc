@@ -64,6 +64,18 @@ void rgw_datalog_shard_data::decode_json(JSONObj *obj) {
   JSONDecoder::decode_json("entries", entries, obj);
 };
 
+template<class T>
+static string json_str(const char *name, const T& obj, bool pretty = false)
+{
+  stringstream ss;
+  JSONFormatter f(pretty);
+
+  encode_json(name, obj, &f);
+  f.flush(ss);
+
+  return ss.str();
+}
+
 class RGWReadDataSyncStatusMarkersCR : public RGWShardCollectCR {
   static constexpr int MAX_CONCURRENT_SHARDS = 16;
 
@@ -1738,34 +1750,72 @@ RGWCoroutine *RGWDefaultDataSyncModule::create_delete_marker(RGWDataSyncEnv *syn
                             &owner.id, &owner.display_name, true, &mtime, zones_trace);
 }
 
-class RGWArchiveDataSyncModule : public RGWDefaultDataSyncModule {
+using ArchiveConfigRef = std::shared_ptr<ArchiveConfig>;
+
+int ArchiveBucketLifecycle::apply_lifecycle() {
+  rule->init_simple_days_rule("Archive Version Expiration", "" /* all objects in all buckets */, retention_period);
+
+  lc_config.add_rule(*rule);
+
+  return 0;
+}
+class RGWArchiveDataSyncModule : public RGWDataSyncModule {
+  ArchiveConfigRef conf;
 public:
-  RGWArchiveDataSyncModule() {}
+  RGWArchiveDataSyncModule(CephContext *cct, const JSONFormattable& config) : 
+                            conf(make_shared<ArchiveConfig>()) { 
+     conf->init(cct, config);
+  }
+
+  //void init(RGWDataSyncEnv *sync_env, uint64_t instance_id) override {
+  //  conf.init_instance(sync_env->store->svc()->zone->get_realm(), instance_id);
+  //}
 
   RGWCoroutine *sync_object(RGWDataSyncEnv *sync_env, RGWBucketInfo& bucket_info, rgw_obj_key& key, std::optional<uint64_t> versioned_epoch, rgw_zone_set *zones_trace) override;
   RGWCoroutine *remove_object(RGWDataSyncEnv *sync_env, RGWBucketInfo& bucket_info, rgw_obj_key& key, real_time& mtime, bool versioned, uint64_t versioned_epoch, rgw_zone_set *zones_trace) override;
   RGWCoroutine *create_delete_marker(RGWDataSyncEnv *sync_env, RGWBucketInfo& bucket_info, rgw_obj_key& key, real_time& mtime,
                                      rgw_bucket_entry_owner& owner, bool versioned, uint64_t versioned_epoch, rgw_zone_set *zones_trace) override;
+  ArchiveConfigRef& get_conf() { return conf; }
 };
 
-class RGWArchiveSyncModuleInstance : public RGWDefaultSyncModuleInstance {
-  RGWArchiveDataSyncModule data_handler;
+class RGWArchiveSyncModuleInstance : public RGWSyncModuleInstance {
+  std::unique_ptr<RGWArchiveDataSyncModule> data_handler;
+  JSONFormattable effective_conf;
 public:
-  RGWArchiveSyncModuleInstance() {}
-  RGWDataSyncModule *get_data_handler() override {
-    return &data_handler;
-  }
+  RGWArchiveSyncModuleInstance(CephContext *cct, const JSONFormattable& config);
+  RGWDataSyncModule *get_data_handler() override;
   RGWMetadataHandler *alloc_bucket_meta_handler() override {
     return RGWArchiveBucketMetaHandlerAllocator::alloc();
   }
   RGWMetadataHandler *alloc_bucket_instance_meta_handler() override {
     return RGWArchiveBucketInstanceMetaHandlerAllocator::alloc();
   }
+  const JSONFormattable& get_effective_conf() {
+    return effective_conf;
+  }
 };
+
+RGWArchiveSyncModuleInstance::RGWArchiveSyncModuleInstance(CephContext *cct, const JSONFormattable& config)
+{
+  data_handler = std::unique_ptr<RGWArchiveDataSyncModule>(new RGWArchiveDataSyncModule(cct, config));
+  string jconf = json_str("conf", *data_handler->get_conf());
+  JSONParser p;
+  if (!p.parse(jconf.c_str(), jconf.size())) {
+    ldout(cct, 1) << "ERROR: failed to parse sync module effective conf: " << jconf << dendl;
+    effective_conf = config;
+  } else {
+    effective_conf.decode_json(&p);
+  }
+}
+
+RGWDataSyncModule *RGWArchiveSyncModuleInstance::get_data_handler()
+{
+  return data_handler.get();
+}
 
 int RGWArchiveSyncModule::create_instance(CephContext *cct, const JSONFormattable& config, RGWSyncModuleInstanceRef *instance)
 {
-  instance->reset(new RGWArchiveSyncModuleInstance());
+  instance->reset(new RGWArchiveSyncModuleInstance(cct, config));
   return 0;
 }
 
