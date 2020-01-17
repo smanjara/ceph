@@ -598,7 +598,7 @@ public:
   int create_instance(CephContext *cct, const JSONFormattable& config, RGWSyncModuleInstanceRef *instance) override;
 };
 
-#define ARCHIVE_RETENTION_DEFAULT 7
+#define ARCHIVE_RETENTION_DEFAULT 1
 struct ArchiveConfig {
   string id{"archive"};
 
@@ -619,17 +619,28 @@ struct ArchiveConfig {
   //  sync_instance = instance_id;
   //}
 };
+/*
 class ArchiveBucketLifecycle {
     ArchiveConfig *conf;
-    LCRule *rule;
+    LCRule *lc_rule;
     int retention_period;
     RGWLifecycleConfiguration lc_config;
 
   public:
     ArchiveBucketLifecycle(ArchiveConfig *_conf) : conf(_conf) {
-      retention_period = conf->archive_retention_days;
+      //retention_period = conf->archive_retention_days;
+      retention_period = 1;
     }
-    int apply_lifecycle();
+
+    int apply_lifecycle() {
+      lc_rule->init_simple_days_rule("Archive Version Expiration", "", 1);
+
+      lc_config.add_rule(*lc_rule);
+
+      return 0;
+      }
 };
+*/
+
 
 #endif

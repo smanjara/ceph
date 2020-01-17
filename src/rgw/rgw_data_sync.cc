@@ -1752,13 +1752,14 @@ RGWCoroutine *RGWDefaultDataSyncModule::create_delete_marker(RGWDataSyncEnv *syn
 
 using ArchiveConfigRef = std::shared_ptr<ArchiveConfig>;
 
-int ArchiveBucketLifecycle::apply_lifecycle() {
-  rule->init_simple_days_rule("Archive Version Expiration", "" /* all objects in all buckets */, retention_period);
+//int ArchiveBucketLifecycle::apply_lifecycle() {
+ // lc_rule.init_simple_days_rule("Archive Version Expiration", "" /* all objects in all buckets */, 1);
 
-  lc_config.add_rule(*rule);
+ // lc_config.add_rule(lc_rule);
 
-  return 0;
-}
+ // return 0;
+//}
+
 class RGWArchiveDataSyncModule : public RGWDataSyncModule {
   ArchiveConfigRef conf;
 public:

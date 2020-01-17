@@ -2903,7 +2903,7 @@ public:
   }
 
   int do_put(RGWSI_MetaBackend_Handler::Op *op, string& entry,
-             RGWMetadataObject *_obj, RGWObjVersionTracker& objv_tracker,
+             RGWMetadataObject *obj, RGWObjVersionTracker& objv_tracker,
 	     optional_yield y,
              RGWMDLogSyncType sync_type) override;
 
@@ -3053,26 +3053,55 @@ int RGWMetadataHandlerPut_BucketInstance::put_post()
   return STATUS_APPLIED;
 }
 
+class ArchiveBucketLifecycle {
+    ArchiveConfig conf;
+    LCRule lc_rule;
+    int retention_period;
+    RGWLifecycleConfiguration lc_config;
+
+  public:
+    ArchiveBucketLifecycle() {
+      //retention_period = conf->archive_retention_days;
+      retention_period = 1;
+    }
+
+    int apply_lifecycle() {
+      lc_rule.init_simple_days_rule("Archive Version Expiration", "" /* all objects in all buckets */, 1);
+
+      lc_config.add_rule(lc_rule);
+
+      return 0;
+      }
+};
+
 class RGWArchiveBucketInstanceMetadataHandler : public RGWBucketInstanceMetadataHandler {
-  ArchiveBucketLifecycle *archive_lc;
+  ArchiveBucketLifecycle archive_lc;
 public:
   RGWArchiveBucketInstanceMetadataHandler() {}
 
-  int do_put(RGWSI_MetaBackend_Handler::Op *op, string& entry, RGWObjVersionTracker& objv_tracker, optional_yield y) {
+  int do_put(RGWSI_MetaBackend_Handler::Op *op, string& entry,
+             RGWMetadataObject *obj, RGWObjVersionTracker& objv_tracker,
+	           optional_yield y,
+             RGWMDLogSyncType sync_type) override {
     RGWBucketCompleteInfo bci;
     real_time mtime;
     RGWSI_Bucket_BI_Ctx ctx(op->ctx());
 
     //int ret = read_bucket_instance_entry(ctx, entry, &bci, nullptr, y);
+    ldout(cct, 20) << "Reading bucket info of bucket:" << entry << dendl;
     int ret = svc.bucket->read_bucket_instance_info(ctx, entry, &bci.info, &mtime, &bci.attrs, y);
     if (ret < 0 && ret == -ENOENT) {
-        ret = archive_lc->apply_lifecycle();
+        ldout(cct, 20) << "Applying lifecycle policy to bucket: " << entry << dendl;
+        ret = archive_lc.apply_lifecycle();
+        ldout(cct, 20) << "Applied lifecycle policy to bucket: " << entry << dendl;
         if (ret < 0) {
           ldout(cct, 0) << "ERROR: failed to init lifecycle on bucket=" << entry << dendl;
           return ret;
         }
-        return 0;
     }
+
+    return RGWBucketInstanceMetadataHandler::do_put(op, entry, obj,
+                                            objv_tracker, y, sync_type);
   }
 
   int do_remove(RGWSI_MetaBackend_Handler::Op *op, string& entry, RGWObjVersionTracker& objv_tracker, optional_yield y) override {
