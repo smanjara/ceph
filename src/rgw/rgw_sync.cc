@@ -488,41 +488,46 @@ public:
   int operate() override {
     auto store = env->store;
     RGWRESTConn *conn = store->svc()->zone->get_master_conn();
+    bool need_retry;
+    int ret = 0;
     reenter(this) {
-      yield {
-	char buf[16];
-	snprintf(buf, sizeof(buf), "%d", shard_id);
-        rgw_http_param_pair pairs[] = { { "type" , "metadata" },
+      do {
+        yield {
+          need_retry = false;
+	    char buf[16];
+	    snprintf(buf, sizeof(buf), "%d", shard_id);
+          rgw_http_param_pair pairs[] = { { "type" , "metadata" },
 	                                { "id", buf },
 	                                { "period", period.c_str() },
-					{ "info" , NULL },
+					  { "info" , NULL },
 	                                { NULL, NULL } };
 
-        string p = "/admin/log/";
+          string p = "/admin/log/";
 
-        http_op = new RGWRESTReadResource(conn, p, pairs, NULL,
+          http_op = new RGWRESTReadResource(conn, p, pairs, NULL,
                                           env->http_manager);
 
-        init_new_io(http_op);
+          init_new_io(http_op);
 
-        int ret = http_op->aio_read();
-        if (ret < 0) {
-          ldpp_dout(env->dpp, 0) << "ERROR: failed to read from " << p << dendl;
-          log_error() << "failed to send http operation: " << http_op->to_str() << " ret=" << ret << std::endl;
+          ret = http_op->aio_read();
+          if (ret < 0) {
+            ldpp_dout(env->dpp, 0) << "ERROR: failed to read from " << p << dendl;
+            log_error() << "failed to send http operation: " << http_op->to_str() << " ret=" << ret << std::endl;
+            http_op->put();
+            return set_cr_error(ret);
+          }
+
+          return io_block(0);
+        }
+        yield {
+          int ret = http_op->wait_retry(&need_retry, shard_info, null_yield);
           http_op->put();
-          return set_cr_error(ret);
-        }
-
-        return io_block(0);
-      }
-      yield {
-        int ret = http_op->wait(shard_info, null_yield);
-        http_op->put();
-        if (ret < 0) {
-          return set_cr_error(ret);
-        }
+          if (ret < 0 && ret != -5) {
+            return set_cr_error(ret);
+            }
+          }
+        } while (need_retry);
         return set_cr_done();
-      }
     }
     return 0;
   }
@@ -590,7 +595,7 @@ public:
   int request_complete() override {
     int ret = http_op->wait(result, null_yield);
     http_op->put();
-    if (ret < 0 && ret != -ENOENT) {
+    if (ret < 0 && ret != -ENOENT && ret != -5) {
       ldpp_dout(sync_env->dpp, 0) << "ERROR: failed to list remote mdlog shard, ret=" << ret << dendl;
       return ret;
     }
@@ -1282,6 +1287,7 @@ int RGWMetaSyncSingleEntryCR::operate() {
         pos = raw_key.find(':');
         section = raw_key.substr(0, pos);
         key = raw_key.substr(pos + 1);
+        tn->log(20, SSTR("key: " << key << "raw_key: " << raw_key));
         tn->log(10, SSTR("fetching remote metadata entry" << (tries == 0 ? "" : " (retry)")));
         call(new RGWReadRemoteMetadataCR(sync_env, section, key, &md_bl, tn));
       }

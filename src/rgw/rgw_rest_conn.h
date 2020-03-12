@@ -256,6 +256,7 @@ class RGWRESTReadResource : public RefCountedObject, public RGWIOProvider {
 
   RGWHTTPManager *mgr;
   RGWRESTStreamReadRequest req;
+  bool need_retry{false};
 
   void init_common(param_vec_t *extra_headers);
 
@@ -317,6 +318,9 @@ public:
   int wait(T *dest, optional_yield y);
 
   template <class T>
+  int wait_retry(bool *need_retry, T *dest, optional_yield y);
+
+  template <class T>
   int fetch(T *dest);
 };
 
@@ -356,6 +360,25 @@ int RGWRESTReadResource::wait(T *dest, optional_yield y)
   int ret = req.wait(y);
   if (ret < 0) {
     return ret;
+  }
+
+  ret = decode_resource(dest);
+  if (ret < 0) {
+    return ret;
+  }
+  return 0;
+}
+
+template <class T>
+int RGWRESTReadResource::wait_retry(bool *need_retry, T *dest, optional_yield y)
+{
+  int ret = req.wait(y);
+  if (ret < 0) {
+    if (ret == -5) {
+      *need_retry = true;
+    } else {
+      return ret;
+    }
   }
 
   ret = decode_resource(dest);

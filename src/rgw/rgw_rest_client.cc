@@ -795,7 +795,7 @@ int RGWRESTStreamRWRequest::send(RGWHTTPManager *mgr)
   return 0;
 }
 
-int RGWRESTStreamRWRequest::complete_request(string *etag,
+int RGWRESTStreamRWRequest::complete_request(bool *need_retry, string *etag,
                                              real_time *mtime,
                                              uint64_t *psize,
                                              map<string, string> *pattrs,
@@ -803,6 +803,9 @@ int RGWRESTStreamRWRequest::complete_request(string *etag,
 {
   int ret = wait(null_yield);
   if (ret < 0) {
+    if (ret == -5) {
+      *need_retry = true;
+    }
     return ret;
   }
 

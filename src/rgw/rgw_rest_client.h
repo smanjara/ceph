@@ -114,6 +114,7 @@ private:
   bool send_paused{false};
   bool stream_writes{false};
   bool write_stream_complete{false};
+  bool need_retry{false};
 protected:
   int handle_header(const string& name, const string& val) override;
 public:
@@ -176,7 +177,7 @@ public:
   int send_request(RGWAccessKey& key, map<string, string>& extra_headers, const rgw_obj& obj, RGWHTTPManager *mgr);
   int send_request(RGWAccessKey *key, map<string, string>& extra_headers, const string& resource, RGWHTTPManager *mgr, bufferlist *send_data = nullptr /* optional input data */);
 
-  int complete_request(string *etag = nullptr,
+  int complete_request(bool *need_retry, string *etag = nullptr,
                        real_time *mtime = nullptr,
                        uint64_t *psize = nullptr,
                        map<string, string> *pattrs = nullptr,

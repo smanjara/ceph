@@ -159,8 +159,9 @@ int RGWRESTConn::put_obj_async(const rgw_user& uid, rgw_obj& obj, uint64_t obj_s
 }
 
 int RGWRESTConn::complete_request(RGWRESTStreamS3PutObj *req, string& etag, real_time *mtime)
-{
-  int ret = req->complete_request(&etag, mtime);
+{ 
+  bool need_retry;
+  int ret = req->complete_request(&need_retry, &etag, mtime);
   delete req;
 
   return ret;
@@ -300,8 +301,9 @@ int RGWRESTConn::complete_request(RGWRESTStreamRWRequest *req,
                                   uint64_t *psize,
                                   map<string, string> *pattrs,
                                   map<string, string> *pheaders)
-{
-  int ret = req->complete_request(etag, mtime, psize, pattrs, pheaders);
+{ 
+  bool need_retry;
+  int ret = req->complete_request(&need_retry, etag, mtime, psize, pattrs, pheaders);
   delete req;
 
   return ret;
@@ -314,35 +316,42 @@ int RGWRESTConn::get_resource(const string& resource,
                      bufferlist *send_data,
 		     RGWHTTPManager *mgr)
 {
-  string url;
-  int ret = get_url(url);
-  if (ret < 0)
-    return ret;
+  bool need_retry;
+  int ret = 0;
+  do {
+    need_retry = false;
+    string url;
+    ret = get_url(url);
+    if (ret < 0)
+      return ret;
 
-  param_vec_t params;
+    param_vec_t params;
 
-  if (extra_params) {
-    params.insert(params.end(), extra_params->begin(), extra_params->end());
-  }
+    if (extra_params) {
+      params.insert(params.end(), extra_params->begin(), extra_params->end());
+    }
 
-  populate_params(params, nullptr, self_zone_group);
+    populate_params(params, nullptr, self_zone_group);
 
-  RGWStreamIntoBufferlist cb(bl);
+    RGWStreamIntoBufferlist cb(bl);
 
-  RGWRESTStreamReadRequest req(cct, url, &cb, NULL, &params, host_style);
+    RGWRESTStreamReadRequest req(cct, url, &cb, NULL, &params, host_style);
 
-  map<string, string> headers;
-  if (extra_headers) {
-    headers.insert(extra_headers->begin(), extra_headers->end());
-  }
+    map<string, string> headers;
+    if (extra_headers) {
+      headers.insert(extra_headers->begin(), extra_headers->end());
+    }
 
-  ret = req.send_request(&key, headers, resource, mgr, send_data);
-  if (ret < 0) {
-    ldout(cct, 5) << __func__ << ": send_request() resource=" << resource << " returned ret=" << ret << dendl;
-    return ret;
-  }
+    ret = req.send_request(&key, headers, resource, mgr, send_data);
+    if (ret < 0) {
+      ldout(cct, 5) << __func__ << ": send_request() resource=" << resource << " returned ret=" << ret << dendl;
+      return ret;
+    }
 
-  return req.complete_request();
+    ret = req.complete_request(&need_retry);
+  } while (need_retry);
+
+  return ret;
 }
 
 RGWRESTReadResource::RGWRESTReadResource(RGWRESTConn *_conn,
@@ -380,14 +389,15 @@ void RGWRESTReadResource::init_common(param_vec_t *extra_headers)
 }
 
 int RGWRESTReadResource::read()
-{
+{ 
+  bool need_retry;
   int ret = req.send_request(&conn->get_key(), headers, resource, mgr);
   if (ret < 0) {
     ldout(cct, 5) << __func__ << ": send_request() resource=" << resource << " returned ret=" << ret << dendl;
     return ret;
   }
 
-  return req.complete_request();
+  return req.complete_request(&need_retry);
 }
 
 int RGWRESTReadResource::aio_read()
@@ -438,7 +448,8 @@ void RGWRESTSendResource::init_common(param_vec_t *extra_headers)
 }
 
 int RGWRESTSendResource::send(bufferlist& outbl)
-{
+{ 
+  bool need_retry;
   req.set_send_length(outbl.length());
   req.set_outbl(outbl);
 
@@ -448,7 +459,7 @@ int RGWRESTSendResource::send(bufferlist& outbl)
     return ret;
   }
 
-  return req.complete_request();
+  return req.complete_request(&need_retry);
 }
 
 int RGWRESTSendResource::aio_send(bufferlist& outbl)
