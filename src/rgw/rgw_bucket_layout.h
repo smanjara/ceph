@@ -61,8 +61,9 @@ void decode(bucket_index_layout_generation& l, bufferlist::const_iterator& bl);
 
 
 enum class BucketReshardState : uint8_t {
-  None,
-  InProgress,
+  NOT_RESHARDING,
+  IN_PROGRESS,
+  DONE,
 };
 
 // describes the layout of bucket index objects

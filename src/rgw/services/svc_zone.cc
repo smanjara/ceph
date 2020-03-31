@@ -958,11 +958,13 @@ bool RGWSI_Zone::need_to_log_metadata() const
     (zonegroup->zones.size() > 1 || current_period->is_multi_zonegroups_with_zones());
 }
 
+/*
 bool RGWSI_Zone::can_reshard() const
 {
   return current_period->get_id().empty() ||
     (zonegroup->zones.size() == 1 && current_period->is_single_zonegroup());
 }
+*/
 
 /**
   * Check to see if the bucket metadata could be synced
