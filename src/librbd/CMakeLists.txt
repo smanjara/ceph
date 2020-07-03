@@ -189,7 +189,9 @@ if(WITH_RBD_RWL)
     cache/rwl/Request.cc
     cache/rwl/SyncPoint.cc
     cache/rwl/Types.cc
-    cache/ReplicatedWriteLog.cc)
+    cache/ReplicatedWriteLog.cc
+    cache/AbstractWriteLog.cc
+    cache/WriteLogCache.cc)
 endif()
 
 add_library(rbd_api STATIC librbd.cc)
