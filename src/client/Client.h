@@ -1368,6 +1368,7 @@ private:
   ceph::unordered_set<dir_result_t*> opened_dirs;
   uint64_t fd_gen = 1;
 
+  bool   mount_aborted = false;
   bool   blocklisted = false;
 
   ceph::unordered_map<vinodeno_t, Inode*> inode_map;
