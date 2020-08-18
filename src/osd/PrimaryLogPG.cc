@@ -7023,9 +7023,6 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	    goto fail;
 	  }
 	}
-        if (!oi.manifest.is_chunked()) {
-          oi.manifest.clear();
-        }
 
 	pg_t raw_pg;
 	chunk_info_t chunk_info;
