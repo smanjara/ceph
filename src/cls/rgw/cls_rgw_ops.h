@@ -42,7 +42,7 @@ struct rgw_cls_obj_prepare_op
     encode(c, bl);
     encode(tag, bl);
     encode(locator, bl);
-    encode(log_op, bl);
+    encode(bool{false} /* legacy: log_op */, bl);
     encode(key, bl);
     encode(uint16_t{false} /* bilog_flags */, bl);
     encode(zones_trace, bl);
@@ -61,6 +61,8 @@ struct rgw_cls_obj_prepare_op
       decode(locator, bl);
     }
     if (struct_v >= 4) {
+      // just for legacy
+      bool log_op;
       decode(log_op, bl);
     }
     if (struct_v >= 5) {

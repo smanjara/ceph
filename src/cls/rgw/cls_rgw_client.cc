@@ -273,6 +273,11 @@ void cls_rgw_bucket_prepare_op(ObjectWriteOperation& o, RGWModifyOp op, string& 
   call.key = key;
   call.locator = locator;
   call.zones_trace = zones_trace;
+  bufferlist in;
+  encode(call, in);
+  o.exec(RGW_CLASS, RGW_BUCKET_PREPARE_OP, in);
+}
+
 void cls_rgw_bucket_complete_op(ObjectWriteOperation& o, RGWModifyOp op, const string& tag,
                                 const rgw_bucket_entry_ver& ver,
                                 const cls_rgw_obj_key& key,
