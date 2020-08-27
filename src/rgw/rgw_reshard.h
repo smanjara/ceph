@@ -21,6 +21,7 @@
 #include "cls/lock/cls_lock_client.h"
 
 #include "rgw_common.h"
+#include "common/fault_injector.h"
 
 
 class RGWReshard;
@@ -89,7 +90,7 @@ private:
   int set_reshard_status(rgw::BucketReshardState s);
   
   int do_reshard(int num_shards,
-		 int max_entries,
+		 int max_entries, FaultInjector<std::string_view> f,
                  bool verbose,
                  ostream *os,
 		 Formatter *formatter);
@@ -101,7 +102,7 @@ public:
 		   const RGWBucketInfo& _bucket_info,
                    const std::map<string, bufferlist>& _bucket_attrs,
 		   RGWBucketReshardLock* _outer_reshard_lock);
-  int execute(int num_shards, int max_op_entries,
+  int execute(int num_shards, FaultInjector<std::string_view> f, int max_op_entries,
               bool verbose = false, ostream *out = nullptr,
               Formatter *formatter = nullptr,
 	      RGWReshard *reshard_log = nullptr);
@@ -191,7 +192,7 @@ private:
     string lock_name;
     rados::cls::lock::Lock instance_lock;
     int num_logshards;
-
+    FaultInjector<std::string_view> f;
     bool verbose;
     ostream *out;
     Formatter *formatter;
@@ -231,7 +232,7 @@ public:
   int clear_bucket_resharding(const string& bucket_instance_oid, cls_rgw_reshard_entry& entry);
 
   /* reshard thread */
-  int process_single_logshard(int logshard_num);
+  int process_single_logshard(int logshard_num, FaultInjector<std::string_view>& f);
   int process_all_logshards();
   bool going_down();
   void start_processor();

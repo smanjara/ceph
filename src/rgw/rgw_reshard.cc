@@ -13,6 +13,8 @@
 #include "cls/lock/cls_lock_client.h"
 #include "common/errno.h"
 #include "common/ceph_json.h"
+#include "common/fault_injector.h"
+
 
 #include "common/dout.h"
 
@@ -497,6 +499,7 @@ int RGWBucketReshardLock::renew(const Clock::time_point& now) {
 
 int RGWBucketReshard::do_reshard(int num_shards,
 				 int max_entries,
+         FaultInjector<std::string_view> f,
 				 bool verbose,
 				 ostream *out,
 				 Formatter *formatter)
@@ -632,12 +635,20 @@ int RGWBucketReshard::do_reshard(int num_shards,
   } else if (out) {
     (*out) << " " << total_entries << std::endl;
   }
-  
+
   ret = target_shards_mgr.finish();
   if (ret < 0) {
     lderr(store->ctx()) << "ERROR: failed to reshard" << dendl;
     return -EIO;
   }
+
+  ldout(store->ctx(), 0) << "Injecting error" << dendl;
+
+  if (ret == f.check("test")) {
+    return ret;
+  }
+
+  ldout(store->ctx(), 0) << "Injecting succeeded" << dendl;
 
   //overwrite current_index for the next reshard process
   bucket_info.layout.current_index = *bucket_info.layout.target_index;
@@ -667,7 +678,7 @@ int RGWBucketReshard::set_reshard_status(rgw::BucketReshardState s) {
     return 0;
 }
 
-int RGWBucketReshard::execute(int num_shards, int max_op_entries,
+int RGWBucketReshard::execute(int num_shards, FaultInjector<std::string_view> f, int max_op_entries,
                               bool verbose, ostream *out, Formatter *formatter,
 			      RGWReshard* reshard_log)
 {
@@ -693,7 +704,7 @@ int RGWBucketReshard::execute(int num_shards, int max_op_entries,
   prev_index = bucket_info.layout.current_index;
 
   ret = do_reshard(num_shards,
-		   max_op_entries,
+		   max_op_entries, f,
                    verbose, out, formatter);
   if (ret < 0) {
     goto error_out;
@@ -947,7 +958,7 @@ void RGWReshardWait::stop()
   }
 }
 
-int RGWReshard::process_single_logshard(int logshard_num)
+int RGWReshard::process_single_logshard(int logshard_num, FaultInjector<std::string_view>& f)
 {
   string marker;
   bool truncated = true;
@@ -1024,15 +1035,15 @@ int RGWReshard::process_single_logshard(int logshard_num)
 	}
 
 	{
-    RGWBucketReshard br(store, bucket_info, attrs, nullptr);
-    ret = br.execute(entry.new_num_shards, max_entries, false, nullptr,
-        nullptr, this);
-    if (ret < 0) {
-      ldout(store->ctx(), 0) <<  __func__ <<
-        ": Error during resharding bucket " << entry.bucket_name << ":" <<
-        cpp_strerror(-ret)<< dendl;
-      return ret;
-    }
+	RGWBucketReshard br(store, bucket_info, attrs, nullptr);
+	ret = br.execute(entry.new_num_shards, f, max_entries, false, nullptr,
+			 nullptr, this);
+	if (ret < 0) {
+	  ldout(store->ctx(), 0) <<  __func__ <<
+	    ": Error during resharding bucket " << entry.bucket_name << ":" <<
+	    cpp_strerror(-ret)<< dendl;
+	  return ret;
+	}
 
     ldout(store->ctx(), 20) << __func__ <<
       " removing reshard queue entry for bucket " << entry.bucket_name <<
@@ -1085,7 +1096,7 @@ int RGWReshard::process_all_logshards()
 
     ldout(store->ctx(), 20) << "processing logshard = " << logshard << dendl;
 
-    ret = process_single_logshard(i);
+    ret = process_single_logshard(i, f);
 
     ldout(store->ctx(), 20) << "finish processing logshard = " << logshard << " , ret = " << ret << dendl;
   }

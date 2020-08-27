@@ -66,6 +66,7 @@ extern "C" {
 #include "services/svc_mdlog.h"
 #include "services/svc_meta_be_otp.h"
 #include "services/svc_zone.h"
+#include "common/fault_injector.h"
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rgw
@@ -426,6 +427,7 @@ void usage()
   cout << "   --topic                   bucket notifications/pubsub topic name\n";
   cout << "   --subscription            pubsub subscription name\n";
   cout << "   --event-id                event id in a pubsub subscription\n";
+  cout << "   --fault-inject            for testing fault injection\n";
   cout << "\n";
   generic_client_usage();
 }
@@ -3103,6 +3105,7 @@ int main(int argc, const char **argv)
   int check_head_obj_locator = false;
   int max_buckets = -1;
   bool max_buckets_specified = false;
+  string fault_inject;
   map<string, bool> categories;
   string caps;
   int check_objects = false;
@@ -3645,6 +3648,8 @@ int main(int argc, const char **argv)
     } else if (ceph_argparse_witharg(args, i, &val, "--dest-owner", (char*)NULL)) {
       opt_dest_owner.emplace(val);
       opt_dest_owner = val;
+    } else if (ceph_argparse_witharg(args, i, &val, "--fault-inject", (char*)NULL)) {
+      // do nothing
     } else if (ceph_argparse_binary_flag(args, i, &detail, NULL, "--detail", (char*)NULL)) {
       // do nothing
     } else if (strncmp(*i, "-", 1) == 0) {
@@ -6861,6 +6866,7 @@ next:
   }
 
   if (opt_cmd == OPT::BUCKET_RESHARD) {
+
     rgw_bucket bucket;
     RGWBucketInfo bucket_info;
     map<string, bufferlist> attrs;
@@ -6886,8 +6892,9 @@ next:
       max_entries = DEFAULT_RESHARD_MAX_ENTRIES;
     }
 
-    return br.execute(num_shards, max_entries,
-                      verbose, &cout, formatter.get());
+    FaultInjector<std::string_view> fault_in;
+    return br.execute(num_shards, fault_in, max_entries,
+                        verbose, &cout, formatter.get());
   }
 
   if (opt_cmd == OPT::RESHARD_ADD) {
@@ -6995,6 +7002,10 @@ next:
 
   if (opt_cmd == OPT::RESHARD_PROCESS) {
     RGWReshard reshard(store, true, &cout);
+    
+    if (fault_inject.empty()) {
+      FaultInjector<std::string_view> f;
+    }
 
     int ret = reshard.process_all_logshards();
     if (ret < 0) {
