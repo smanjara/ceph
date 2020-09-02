@@ -926,11 +926,6 @@ public:
         bs_initialized = false;
       }
 
-      int guard_reshard(const DoutPrefixProvider *dpp, const rgw_obj& obj_instance, BucketShard **pbs, std::function<int(BucketShard *)> call);
-    public:
-
-      UpdateIndex(RGWRados::Bucket *_target, const rgw_obj& _obj);
-
       int get_bucket_shard(BucketShard **pbs, const DoutPrefixProvider *dpp) {
         if (!bs_initialized) {
           int r = init_bs(dpp);
@@ -941,6 +936,11 @@ public:
         *pbs = &bs;
         return 0;
       }
+
+      int guard_reshard(BucketShard **pbs, std::function<int(BucketShard *)> call);
+    public:
+
+      UpdateIndex(RGWRados::Bucket *_target, const rgw_obj& _obj);
 
       void set_bilog_flags(uint16_t flags) {
         bilog_flags = flags;
