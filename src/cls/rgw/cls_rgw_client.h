@@ -348,9 +348,9 @@ void cls_rgw_bucket_update_stats(librados::ObjectWriteOperation& o,
                                  bool absolute,
                                  const std::map<RGWObjCategory, rgw_bucket_category_stats>& stats);
 
-void cls_rgw_bucket_prepare_op(librados::ObjectWriteOperation& o, RGWModifyOp op, const std::string& tag,
-                               const cls_rgw_obj_key& key, const std::string& locator, bool log_op,
-                               uint16_t bilog_op, const rgw_zone_set& zones_trace);
+void cls_rgw_bucket_prepare_op(librados::ObjectWriteOperation& o, RGWModifyOp op, std::string& tag,
+                               const cls_rgw_obj_key& key, const std::string& locator,
+                               rgw_zone_set& zones_trace);
 
 void cls_rgw_bucket_complete_op(librados::ObjectWriteOperation& o, RGWModifyOp op, const std::string& tag,
                                 const rgw_bucket_entry_ver& ver,

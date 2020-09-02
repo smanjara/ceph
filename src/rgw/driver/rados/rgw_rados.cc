@@ -6976,7 +6976,9 @@ int RGWRados::Bucket::UpdateIndex::prepare(const DoutPrefixProvider *dpp, RGWMod
     }
   }
 
-  bool add_log = log_op && store->svc.zone->need_to_log_data();
+  int r = guard_reshard(nullptr, [&](BucketShard *bs) -> int {
+				   return store->cls_obj_prepare_op(*bs, op, optag, obj, y, zones_trace);
+				 });
 
   int r = guard_reshard(dpp, obj, nullptr, [&](BucketShard *bs) -> int {
 				   return store->cls_obj_prepare_op(dpp, *bs, op, optag, obj, bilog_flags, y, zones_trace, add_log);
@@ -9304,9 +9306,8 @@ bool RGWRados::process_expire_objects(const DoutPrefixProvider *dpp, optional_yi
   return obj_expirer->inspect_all_shards(dpp, utime_t(), ceph_clock_now(), y);
 }
 
-int RGWRados::cls_obj_prepare_op(const DoutPrefixProvider *dpp, BucketShard& bs, RGWModifyOp op, string& tag,
-                                 rgw_obj& obj, uint16_t bilog_flags, optional_yield y, rgw_zone_set *_zones_trace,
-                                 bool log_op)
+int RGWRados::cls_obj_prepare_op(BucketShard& bs, RGWModifyOp op, string& tag,
+                                 rgw_obj& obj, optional_yield y, rgw_zone_set *_zones_trace)
 {
   const bool bitx = cct->_conf->rgw_bucket_index_transaction_instrumentation;
   ldout_bitx(bitx, dpp, 10) << "ENTERING " << __func__ << ": bucket-shard=" << bs << " obj=" << obj << " tag=" << tag << " op=" << op << dendl_bitx;
@@ -9323,10 +9324,8 @@ int RGWRados::cls_obj_prepare_op(const DoutPrefixProvider *dpp, BucketShard& bs,
 
   cls_rgw_obj_key key(obj.key.get_index_key_name(), obj.key.instance);
   cls_rgw_guard_bucket_resharding(o, -ERR_BUSY_RESHARDING);
-  cls_rgw_bucket_prepare_op(o, op, tag, key, obj.key.get_loc(), log_op, bilog_flags, zones_trace);
-  int ret = bs.bucket_obj.operate(dpp, &o, y);
-  ldout_bitx(bitx, dpp, 10) << "EXITING " << __func__ << ": ret=" << ret << dendl_bitx;
-  return ret;
+  cls_rgw_bucket_prepare_op(o, op, tag, key, obj.key.get_loc(), zones_trace);
+  return bs.bucket_obj.operate(&o, y);
 }
 
 int RGWRados::cls_obj_complete_op(BucketShard& bs, const rgw_obj& obj, RGWModifyOp op, string& tag,
