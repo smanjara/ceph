@@ -71,12 +71,11 @@ void test_stats(librados::IoCtx& ioctx, const string& oid, RGWObjCategory catego
 }
 
 void index_prepare(librados::IoCtx& ioctx, const string& oid, RGWModifyOp index_op,
-                   const string& tag, const cls_rgw_obj_key& key, const string& loc,
-                   uint16_t bi_flags = 0)
+                   const string& tag, const cls_rgw_obj_key& key, const string& loc)
 {
   ObjectWriteOperation op;
   rgw_zone_set zones_trace;
-  cls_rgw_bucket_prepare_op(op, index_op, tag, key, loc, bi_flags, zones_trace);
+  cls_rgw_bucket_prepare_op(op, index_op, tag, key, loc, zones_trace);
   ASSERT_EQ(0, ioctx.operate(oid, &op));
 }
 
@@ -465,8 +464,7 @@ TEST_F(cls_rgw, index_list)
     string tag = str_int("tag", i);
     string loc = str_int("loc", i);
 
-    index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj, loc,
-		  0 /* bi_flags */);
+    index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj, loc);
 
     rgw_bucket_dir_entry_meta meta;
     meta.category = RGWObjCategory::None;
@@ -543,9 +541,7 @@ TEST_F(cls_rgw, index_list_delimited)
       string loc = str_int("loc", i);
       const string obj = str_int(p, i);
 
-      index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj, loc,
-		    0 /* bi_flags */);
-
+      index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj, loc);
       index_complete(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, epoch, obj, meta,
 		     0 /* bi_flags */, false /* log_op */);
     }
@@ -558,9 +554,7 @@ TEST_F(cls_rgw, index_list_delimited)
       string loc = str_int("loc", i);
       const string obj = p + str_int("f", i);
 
-      index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj, loc,
-		    0 /* bi_flags */);
-
+      index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj, loc);
       index_complete(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, epoch, obj, meta,
 		     0 /* bi_flags */, false /* log_op */);
     }
@@ -649,8 +643,7 @@ TEST_F(cls_rgw, bi_list)
     string obj = str_int(i % 4 ? "obj" : "об'єкт", i);
     string tag = str_int("tag", i);
     string loc = str_int("loc", i);
-    index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj, loc,
-		  RGW_BILOG_FLAG_VERSIONED_OP);
+    index_prepare(ioctx, bucket_oid, CLS_RGW_OP_ADD, tag, obj, loc);
 
     rgw_bucket_dir_entry_meta meta;
     meta.category = RGWObjCategory::None;
