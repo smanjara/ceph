@@ -808,6 +808,7 @@ public:
                      uint64_t size, uint64_t accounted_size,
                      std::map<std::string, bufferlist>& attrs,
                      bool modify_tail, bool assume_noent,
+                     RGWObjState *state,
                      void *index_op, optional_yield y);
       int write_meta(const DoutPrefixProvider *dpp, uint64_t size, uint64_t accounted_size,
                      std::map<std::string, bufferlist>& attrs, optional_yield y);
@@ -909,7 +910,6 @@ public:
       BucketShard bs;
       bool bs_initialized{false};
       bool blind;
-      bool prepared{false};
       rgw_zone_set *zones_trace{nullptr};
 
       int init_bs(const DoutPrefixProvider *dpp) {
@@ -965,8 +965,6 @@ public:
                  std::list<rgw_obj_index_key> *remove_objs);
 
       const std::string *get_optag() { return &optag; }
-
-      bool is_prepared() { return prepared; }
     }; // class UpdateIndex
 
     class List {
