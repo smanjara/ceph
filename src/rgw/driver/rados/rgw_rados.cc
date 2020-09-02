@@ -9331,7 +9331,7 @@ int RGWRados::cls_obj_prepare_op(const DoutPrefixProvider *dpp, BucketShard& bs,
 
 int RGWRados::cls_obj_complete_op(BucketShard& bs, const rgw_obj& obj, RGWModifyOp op, string& tag,
                                   int64_t pool, uint64_t epoch,
-                                  rgw_bucket_dir_entry& ent, RGWObjCategory category,
+                                  const rgw_bucket_dir_entry& ent, RGWObjCategory category,
                                   list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags,
                                   rgw_zone_set *_zones_trace, bool log_op)
 {
@@ -9375,7 +9375,7 @@ int RGWRados::cls_obj_complete_op(BucketShard& bs, const rgw_obj& obj, RGWModify
 
 int RGWRados::cls_obj_complete_add(BucketShard& bs, const rgw_obj& obj, string& tag,
                                    int64_t pool, uint64_t epoch,
-                                   rgw_bucket_dir_entry& ent, RGWObjCategory category,
+                                   const rgw_bucket_dir_entry& ent, RGWObjCategory category,
                                    list<rgw_obj_index_key> *remove_objs, uint16_t bilog_flags,
                                    rgw_zone_set *zones_trace, bool log_op)
 {
