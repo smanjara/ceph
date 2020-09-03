@@ -3222,11 +3222,6 @@ int RGWRados::Object::Write::_do_write_meta(uint64_t size, uint64_t accounted_si
                           !obj.key.instance.empty();
 
   bool versioned_op = (target->versioning_enabled() || is_olh || versioned_target);
-
-  if (versioned_op) {
-    index_op->set_bilog_flags(RGW_BILOG_FLAG_VERSIONED_OP);
-  }
-
   auto& ioctx = ref.ioctx;
 
   tracepoint(rgw_rados, operate_enter, req_id.c_str());
@@ -3254,7 +3249,8 @@ int RGWRados::Object::Write::_do_write_meta(uint64_t size, uint64_t accounted_si
   r = index_op->complete(rctx.dpp, poolid, epoch, size, accounted_size,
                         meta.set_mtime, etag, content_type,
                         storage_class, meta.owner,
-			 meta.category, meta.remove_objs, rctx.y,
+			 meta.category, meta.remove_objs,
+       versioned_op ? RGW_BILOG_FLAG_VERSIONED_OP : 0, rctx.y,
 			 meta.user_data, meta.appendable, log_op);
   tracepoint(rgw_rados, complete_exit, req_id.c_str());
   if (r < 0)
@@ -5837,7 +5833,6 @@ int RGWRados::Object::Delete::delete_obj(optional_yield y, const DoutPrefixProvi
   RGWRados::Bucket::UpdateIndex index_op(&bop, obj);
 
   index_op.set_zones_trace(params.zones_trace);
-  index_op.set_bilog_flags(params.bilog_flags);
 
   if (params.null_verid) {
     index_op.set_bilog_flags(params.bilog_flags | RGW_BILOG_NULL_VERSION);
@@ -5863,7 +5858,8 @@ int RGWRados::Object::Delete::delete_obj(optional_yield y, const DoutPrefixProvi
       tombstone_entry entry{*state};
       obj_tombstone_cache->add(obj, entry);
     }
-    r = index_op.complete_del(dpp, poolid, ioctx.get_last_version(), state->mtime, params.remove_objs, y, log_op);
+    r = index_op.complete_del(dpp, poolid, ioctx.get_last_version(), state->mtime, params.remove_objs,
+                              params.bilog_flags, y, log_op);
 
     int ret = target->complete_atomic_modification(dpp, y);
     if (ret < 0) {
@@ -5948,7 +5944,7 @@ int RGWRados::delete_obj_index(const rgw_obj& obj, ceph::real_time mtime,
   RGWRados::Bucket bop(this, bucket_info);
   RGWRados::Bucket::UpdateIndex index_op(&bop, obj);
 
-  return index_op.complete_del(dpp, -1 /* pool */, 0, mtime, nullptr, y);
+  return index_op.complete_del(dpp, -1 /* pool */, 0, mtime, nullptr, 0 /* bilog_flags */, y);
 }
 
 static void generate_fake_tag(const DoutPrefixProvider *dpp, RGWRados* store, map<string, bufferlist>& attrset, RGWObjManifest& manifest, bufferlist& manifest_bl, bufferlist& tag_bl)
@@ -6607,7 +6603,7 @@ int RGWRados::set_attrs(const DoutPrefixProvider *dpp, RGWObjectCtx* octx, RGWBu
       int64_t poolid = ioctx.get_id();
       r = index_op.complete(dpp, poolid, epoch, state->size, state->accounted_size,
                             mtime, etag, content_type, storage_class, owner,
-                            RGWObjCategory::Main, nullptr, y, nullptr, false, log_op);
+                            RGWObjCategory::Main, nullptr, 0, y, nullptr, false, log_op);
     } else {
       int ret = index_op.cancel(dpp, nullptr, y, log_op);
       if (ret < 0) {
@@ -6991,6 +6987,7 @@ int RGWRados::Bucket::UpdateIndex::complete(const DoutPrefixProvider *dpp, int64
                                             const ACLOwner& owner,
                                             RGWObjCategory category,
                                             list<rgw_obj_index_key> *remove_objs,
+                                             uint16_t bilog_flags,
 					    optional_yield y,
 					    const string *user_data,
                                             bool appendable,
@@ -7038,6 +7035,7 @@ int RGWRados::Bucket::UpdateIndex::complete_del(const DoutPrefixProvider *dpp,
                                                 int64_t poolid, uint64_t epoch,
                                                 real_time& removed_mtime,
                                                 list<rgw_obj_index_key> *remove_objs,
+                                                uint16_t bilog_flags,
                                                 optional_yield y,
                                                 bool log_op)
 {

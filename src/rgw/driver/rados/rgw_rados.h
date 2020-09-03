@@ -924,7 +924,6 @@ public:
       RGWRados::Bucket *target;
       std::string optag;
       rgw_obj obj;
-      uint16_t bilog_flags{0};
       BucketShard bs;
       bool bs_initialized{false};
       bool blind;
@@ -962,14 +961,6 @@ public:
         return 0;
       }
 
-      void set_bilog_flags(uint16_t flags) {
-        bilog_flags = flags;
-      }
-
-      int get_bilog_flags() {
-        return bilog_flags;
-      }
-
       void set_zones_trace(rgw_zone_set *_zones_trace) {
         zones_trace = _zones_trace;
       }
@@ -981,6 +972,7 @@ public:
                    const std::string& storage_class,
                    const ACLOwner& owner, RGWObjCategory category,
 		   std::list<rgw_obj_index_key> *remove_objs,
+       uint16_t bilog_flags,
 		   optional_yield y,
 		   const std::string *user_data = nullptr,
 		   bool appendable = false,
@@ -989,6 +981,7 @@ public:
                        int64_t poolid, uint64_t epoch,
                        ceph::real_time& removed_mtime, /* mtime of removed object */
                        std::list<rgw_obj_index_key> *remove_objs,
+                       uint16_t bilog_flags,
                        optional_yield y,
                        bool log_op = true);
       int cancel(const DoutPrefixProvider *dpp,
