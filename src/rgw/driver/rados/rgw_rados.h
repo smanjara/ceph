@@ -948,7 +948,7 @@ public:
 
     public:
 
-      UpdateIndex(RGWRados::Bucket *_target, const rgw_obj& _obj);
+      UpdateIndex(RGWRados::Bucket *_target, const rgw_obj& _obj, rgw_zone_set *zones_trace = nullptr);
 
       int get_bucket_shard(BucketShard **pbs, const DoutPrefixProvider *dpp, optional_yield y) {
         if (!bs_initialized) {
