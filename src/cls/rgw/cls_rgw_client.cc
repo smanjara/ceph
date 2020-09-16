@@ -294,9 +294,7 @@ void CLSRGWCompleteModifyOpBase::complete_op(librados::ObjectWriteOperation& o,
   call.bilog_flags = this->bilog_flags;
   if (remove_objs)
     call.remove_objs = *remove_objs;
-  if (this->zones_trace) {
-    call.zones_trace = *this->zones_trace;
-  }
+  call.zones_trace = this->zones_trace;
   encode(call, in);
   o.exec(RGW_CLASS, RGW_BUCKET_COMPLETE_OP, in);
 }
@@ -508,8 +506,7 @@ void CLSRGWLinkOLHBase::link_olh(librados::ObjectWriteOperation& op,
   call.log_op = this->log_op;
   call.unmod_since = unmod_since;
   call.high_precision_time = high_precision_time;
-  ceph_assert(this->zones_trace);
-  call.zones_trace = *this->zones_trace;
+  call.zones_trace = this->zones_trace;
   encode(call, in);
   op.exec(RGW_CLASS, RGW_BUCKET_LINK_OLH, in);
 }
@@ -525,8 +522,7 @@ void CLSRGWUnlinkInstance::unlink_instance(librados::ObjectWriteOperation& op,
   call.olh_epoch = olh_epoch;
   call.olh_tag = olh_tag;
   call.log_op = this->log_op;
-  ceph_assert(this->zones_trace);
-  call.zones_trace = *this->zones_trace;
+  call.zones_trace = this->zones_trace;
   encode(call, in);
   op.exec(RGW_CLASS, RGW_BUCKET_UNLINK_INSTANCE, in);
 }
