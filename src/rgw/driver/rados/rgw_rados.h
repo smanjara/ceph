@@ -1338,9 +1338,10 @@ public:
   int olh_init_modification_impl(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, RGWObjState& state, const rgw_obj& olh_obj, std::string *op_tag, optional_yield y);
   template <class CLSRGWBucketModifyOpT, class F, class... Args>
   int with_bilog(F&& on_flushed, const RGWBucketInfo& bucket_info, Args&&... args);
-  template <bool DeleteMarkerV>
-  int bucket_index_link_olh(const DoutPrefixProvider *dpp,
-                            RGWBucketInfo& bucket_info, RGWObjState& olh_state,
+  template <bool DeleteMarkerV, class OpIssuerT>
+  int bucket_index_link_olh(OpIssuerT& op_issuer,
+                            const RGWBucketInfo& bucket_info,
+                            RGWObjState& olh_state,
                             const rgw_obj& obj_instance,
                             const std::string& op_tag, struct rgw_bucket_dir_entry_meta *meta,
                             uint64_t olh_epoch,
@@ -1348,7 +1349,9 @@ public:
 			    optional_yield y,
                             rgw_zone_set *zones_trace = nullptr,
                             bool log_data_change = false);
-  int bucket_index_unlink_instance(const DoutPrefixProvider *dpp,
+    template <class OpIssuerT>
+  int bucket_index_unlink_instance(OpIssuerT& op_issuer,
+                                   const DoutPrefixProvider *dpp,
                                    RGWBucketInfo& bucket_info,
                                    const rgw_obj& obj_instance,
                                    const std::string& op_tag, const std::string& olh_tag,
@@ -1362,11 +1365,28 @@ public:
                                 std::map<uint64_t, std::vector<rgw_bucket_olh_log_entry> > *log, bool *is_truncated, optional_yield y);
   int bucket_index_trim_olh_log(const DoutPrefixProvider *dpp, RGWBucketInfo& bucket_info, RGWObjState& obj_state, const rgw_obj& obj_instance, uint64_t ver, optional_yield y);
   int bucket_index_clear_olh(const DoutPrefixProvider *dpp, RGWBucketInfo& bucket_info, const std::string& olh_tag, const rgw_obj& obj_instance, optional_yield y);
-  int apply_olh_log(const DoutPrefixProvider *dpp, RGWObjectCtx& obj_ctx, RGWObjState& obj_state, RGWBucketInfo& bucket_info, const rgw_obj& obj,
-                    bufferlist& obj_tag, std::map<uint64_t, std::vector<rgw_bucket_olh_log_entry> >& log,
-                    uint64_t *plast_ver, optional_yield y, bool null_verid, rgw_zone_set *zones_trace = nullptr, bool log_op = true);
-  int update_olh(const DoutPrefixProvider *dpp, RGWObjectCtx& obj_ctx, RGWObjState *state, RGWBucketInfo& bucket_info, const rgw_obj& obj, optional_yield y,
-		 rgw_zone_set *zones_trace = nullptr, bool null_verid = false, bool log_op = true);
+  template <class BILogHandlerT>
+  int apply_olh_log(const DoutPrefixProvider *dpp,
+                    RGWObjectCtx& ctx,
+                    RGWObjState& obj_state,
+                    const RGWBucketInfo& bucket_info,
+                    const rgw_obj& obj,
+                    bufferlist& obj_tag,
+                    map<uint64_t, vector<rgw_bucket_olh_log_entry> >& log,
+                    BILogHandlerT&& bilog_handler,
+                    uint64_t *plast_ver,
+                    optional_yield y, bool null_verid,
+                    rgw_zone_set *zones_trace = nullptr,
+                    bool log_op = true);
+  template <class BILogHandlerT>
+  int update_olh(const DoutPrefixProvider *dpp,
+                 RGWObjectCtx& obj_ctx,
+                 RGWObjState *state,
+                 const RGWBucketInfo& bucket_info,
+                 const rgw_obj& obj,
+                 BILogHandlerT&& bilog_handler,
+                 rgw_zone_set *zones_trace = nullptr,
+                 bool null_verid = false, bool log_op = true);
   int clear_olh(const DoutPrefixProvider *dpp,
                 RGWObjectCtx& obj_ctx,
                 const rgw_obj& obj,
