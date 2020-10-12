@@ -90,10 +90,12 @@ private:
   int update_bucket(rgw::BucketReshardState s);
   
   int do_reshard(int num_shards,
-		 int max_entries, FaultInjector<std::string_view> f,
+                 int max_entries, FaultInjector<std::string_view>& f,
+                 std::optional<std::string> inject_error_at,
+                 std::optional<std::string> inject_abort_at,
                  bool verbose,
                  ostream *os,
-		 Formatter *formatter);
+                 Formatter *formatter);
 public:
 
   // pass nullptr for the final parameter if no outer reshard lock to
@@ -102,7 +104,8 @@ public:
 		   const RGWBucketInfo& _bucket_info,
                    const std::map<string, bufferlist>& _bucket_attrs,
 		   RGWBucketReshardLock* _outer_reshard_lock);
-  int execute(int num_shards, FaultInjector<std::string_view> f, int max_op_entries,
+  int execute(int num_shards, FaultInjector<std::string_view>& f, std::optional<std::string> inject_error_at,
+              std::optional<std::string> inject_abort_at, int max_op_entries,
               bool verbose = false, ostream *out = nullptr,
               Formatter *formatter = nullptr,
 	      RGWReshard *reshard_log = nullptr);
@@ -232,7 +235,7 @@ public:
   int clear_bucket_resharding(const string& bucket_instance_oid, cls_rgw_reshard_entry& entry);
 
   /* reshard thread */
-  int process_single_logshard(int logshard_num, FaultInjector<std::string_view>& f);
+  int process_single_logshard(int logshard_num);
   int process_all_logshards();
   bool going_down();
   void start_processor();

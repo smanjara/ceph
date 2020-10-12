@@ -499,7 +499,9 @@ int RGWBucketReshardLock::renew(const Clock::time_point& now) {
 
 int RGWBucketReshard::do_reshard(int num_shards,
 				 int max_entries,
-         FaultInjector<std::string_view> f,
+         FaultInjector<std::string_view>& f,
+         std::optional<std::string> inject_error_at,
+         std::optional<std::string> inject_abort_at,
 				 bool verbose,
 				 ostream *out,
 				 Formatter *formatter)
@@ -603,6 +605,18 @@ int RGWBucketReshard::do_reshard(int num_shards,
 	  return ret;
 	}
 
+  if (inject_error_at) {
+    f.inject(*inject_error_at, InjectError{-EIO});
+    ret = f.check(*inject_error_at);
+    if (ret == -EIO) {
+      lderr(store->ctx()) << "Error" << dendl;
+      return ret;
+    }
+  } else if (inject_abort_at) {
+    f.inject(*inject_abort_at, InjectAbort{});
+    f.check(*inject_abort_at);
+  }
+
 	Clock::time_point now = Clock::now();
 	if (reshard_lock.should_renew(now)) {
 	  // assume outer locks have timespans at least the size of ours, so
@@ -671,9 +685,14 @@ int RGWBucketReshard::update_bucket(rgw::BucketReshardState s) {
     return 0;
 }
 
-int RGWBucketReshard::execute(int num_shards, FaultInjector<std::string_view> f, int max_op_entries,
-                              bool verbose, ostream *out, Formatter *formatter,
-			      RGWReshard* reshard_log)
+int RGWBucketReshard::execute(int num_shards,
+                              FaultInjector<std::string_view>& f,
+                              std::optional<std::string> inject_error_at,
+                              std::optional<std::string> inject_abort_at,
+                              int max_op_entries,
+                              bool verbose, ostream *out,
+                              Formatter *formatter,
+                              RGWReshard* reshard_log)
 {
   int ret = reshard_lock.lock();
   if (ret < 0) {
@@ -696,9 +715,7 @@ int RGWBucketReshard::execute(int num_shards, FaultInjector<std::string_view> f,
   // keep a copy of old index layout
   prev_index = bucket_info.layout.current_index;
 
-  ret = do_reshard(num_shards,
-		   max_op_entries, f,
-                   verbose, out, formatter);
+  ret = do_reshard(num_shards, max_op_entries, f, inject_error_at, inject_abort_at, verbose, out, formatter);
   if (ret < 0) {
     goto error_out;
   }
@@ -946,7 +963,7 @@ void RGWReshardWait::stop()
   }
 }
 
-int RGWReshard::process_single_logshard(int logshard_num, FaultInjector<std::string_view>& f)
+int RGWReshard::process_single_logshard(int logshard_num)
 {
   string marker;
   bool truncated = true;
@@ -1024,7 +1041,9 @@ int RGWReshard::process_single_logshard(int logshard_num, FaultInjector<std::str
 
 	{
 	RGWBucketReshard br(store, bucket_info, attrs, nullptr);
-	ret = br.execute(entry.new_num_shards, f, max_entries, false, nullptr,
+
+  FaultInjector<std::string_view> f;
+	ret = br.execute(entry.new_num_shards, f, std::nullopt, std::nullopt, max_entries, false, nullptr,
 			 nullptr, this);
 	if (ret < 0) {
 	  ldout(store->ctx(), 0) <<  __func__ <<
@@ -1084,7 +1103,7 @@ int RGWReshard::process_all_logshards()
 
     ldout(store->ctx(), 20) << "processing logshard = " << logshard << dendl;
 
-    ret = process_single_logshard(i, f);
+    ret = process_single_logshard(i);
 
     ldout(store->ctx(), 20) << "finish processing logshard = " << logshard << " , ret = " << ret << dendl;
   }
