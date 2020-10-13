@@ -55,6 +55,13 @@
 * RBD: compare-and-write operation is no longer limited to 512-byte sectors.
   Assuming proper alignment, it now allows operating on stripe units (4M by
   default).
+  * "mdlog-list", "datalog-list", "sync-error-list" no longer accepts
+    start and end dates, but does accept a single optional start marker.
+  * "mdlog-trim", "datalog-trim", "sync-error-trim" only accept a
+    single marker giving the end of the trimmed range.
+  * Similarly the date ranges and marker ranges have been removed on
+    the RESTful DATALog and MDLog list and trim operations.
+  * The same as above happened also to "bilog-trim"
 
 >=17.2.1
 
