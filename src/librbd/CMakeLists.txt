@@ -128,6 +128,7 @@ set(librbd_internal_srcs
   managed_lock/Utils.cc
   migration/FileStream.cc
   migration/HttpClient.cc
+  migration/HttpStream.cc
   migration/ImageDispatch.cc
   migration/NativeFormat.cc
   migration/OpenSourceImageRequest.cc
