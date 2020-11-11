@@ -5530,7 +5530,7 @@ int main(int argc, const char **argv)
   RGWUser user;
   int ret = 0;
   if (!(user_id.empty() && access_key.empty()) || !subuser.empty()) {
-    ret = user.init(store, user_op);
+    ret = user.init(store, user_op, null_yield);
     if (ret < 0) {
       cerr << "user.init failed: " << cpp_strerror(-ret) << std::endl;
       return -ret;
@@ -5561,7 +5561,7 @@ int main(int argc, const char **argv)
     if (!user_op.has_existing_user()) {
       user_op.set_generate_key(); // generate a new key by default
     }
-    ret = user.add(user_op, &err_msg);
+    ret = user.add(user_op, null_yield, &err_msg);
     if (ret < 0) {
       cerr << "could not create user: " << err_msg << std::endl;
       if (ret == -ERR_INVALID_TENANT_NAME)
@@ -5570,7 +5570,7 @@ int main(int argc, const char **argv)
       return -ret;
     }
     if (!subuser.empty()) {
-      ret = user.subusers.add(user_op, &err_msg);
+      ret = user.subusers.add(user_op, null_yield, &err_msg);
       if (ret < 0) {
         cerr << "could not create subuser: " << err_msg << std::endl;
         return -ret;
@@ -5611,7 +5611,7 @@ int main(int argc, const char **argv)
 
     break;
   case OPT::SUBUSER_CREATE:
-    ret = user.subusers.add(user_op, &err_msg);
+    ret = user.subusers.add(user_op, null_yield, &err_msg);
     if (ret < 0) {
       cerr << "could not create subuser: " << err_msg << std::endl;
       return -ret;
@@ -5627,7 +5627,7 @@ int main(int argc, const char **argv)
 
     break;
   case OPT::SUBUSER_RM:
-    ret = user.subusers.remove(user_op, &err_msg);
+    ret = user.subusers.remove(user_op, null_yield, &err_msg);
     if (ret < 0) {
       cerr << "could not remove subuser: " << err_msg << std::endl;
       return -ret;
@@ -5635,7 +5635,7 @@ int main(int argc, const char **argv)
 
     break;
   case OPT::CAPS_ADD:
-    ret = user.caps.add(user_op, &err_msg);
+    ret = user.caps.add(user_op, null_yield, &err_msg);
     if (ret < 0) {
       cerr << "could not add caps: " << err_msg << std::endl;
       return -ret;
@@ -5643,7 +5643,7 @@ int main(int argc, const char **argv)
 
     break;
   case OPT::CAPS_RM:
-    ret = user.caps.remove(user_op, &err_msg);
+    ret = user.caps.remove(user_op, null_yield, &err_msg);
     if (ret < 0) {
       cerr << "could not remove caps: " << err_msg << std::endl;
       return -ret;
@@ -5651,7 +5651,7 @@ int main(int argc, const char **argv)
 
     break;
   case OPT::KEY_CREATE:
-    ret = user.keys.add(user_op, &err_msg);
+    ret = user.keys.add(user_op, null_yield, &err_msg);
     if (ret < 0) {
       cerr << "could not create key: " << err_msg << std::endl;
       return -ret;
@@ -5659,7 +5659,7 @@ int main(int argc, const char **argv)
 
     break;
   case OPT::KEY_RM:
-    ret = user.keys.remove(user_op, &err_msg);
+    ret = user.keys.remove(user_op, null_yield, &err_msg);
     if (ret < 0) {
       cerr << "could not remove key: " << err_msg << std::endl;
       return -ret;
