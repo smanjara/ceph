@@ -3919,8 +3919,8 @@ void *newMotrStore(CephContext *cct)
     const auto& ha_ep    = g_conf().get_val<std::string>("motr_ha_endpoint");
     const auto& proc_fid = g_conf().get_val<std::string>("motr_my_fid");
     const auto& profile  = g_conf().get_val<std::string>("motr_profile_fid");
-    const auto& admin_proc_ep  = g_conf().get_val<std::string>("motr_admin_endpoint");
-    const auto& admin_proc_fid = g_conf().get_val<std::string>("motr_admin_fid");
+    const auto& admin_proc_ep  = g_conf().get_val<std::string>("admin_motr_endpoint");
+    const auto& admin_proc_fid = g_conf().get_val<std::string>("admin_motr_fid");
     const int init_flags = cct->get_init_flags();
     ldout(cct, 0) << "INFO: motr my endpoint: " << proc_ep << dendl;
     ldout(cct, 0) << "INFO: motr ha endpoint: " << ha_ep << dendl;
@@ -3929,9 +3929,9 @@ void *newMotrStore(CephContext *cct)
     store->conf.mc_local_addr  = proc_ep.c_str();
     store->conf.mc_process_fid = proc_fid.c_str();
 
-    ldout(cct, 0) << "INFO: init flags:       " << init_flags << dendl;
-    ldout(cct, 0) << "INFO: motr admin endpoint: " << admin_proc_ep << dendl;
-    ldout(cct, 0) << "INFO: motr admin fid:   " << admin_proc_fid << dendl;
+    ldout(cct, 0) << "INFO: init flags:        " << init_flags << dendl;
+    ldout(cct, 0) << "INFO: admin motr endpoint:  " << admin_proc_ep << dendl;
+    ldout(cct, 0) << "INFO: admin motr  fid:    " << admin_proc_fid << dendl;
 
     // HACK this is so that radosge-admin uses a different client
     if (init_flags == 0) {

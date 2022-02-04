@@ -4228,13 +4228,32 @@ int main(int argc, const char **argv)
     bool need_cache = readonly_ops_list.find(opt_cmd) == readonly_ops_list.end();
     bool need_gc = (gc_ops_list.find(opt_cmd) != gc_ops_list.end()) && !bypass_gc;
 
-    DriverManager::Config cfg = DriverManager::get_config(true, g_ceph_context);
+    std::string rgw_store = "rados";
+    const auto& config_store = g_conf().get_val<std::string>("rgw_backend_store");
+    #ifdef WITH_RADOSGW_DBSTORE
+    if (config_store == "dbstore") {
+      rgw_store = "dbstore";
+    }
+    #endif
 
-    auto config_store_type = g_conf().get_val<std::string>("rgw_config_store");
-    cfgstore = DriverManager::create_config_store(dpp(), config_store_type);
-    if (!cfgstore) {
-      cerr << "couldn't init config storage provider" << std::endl;
-      return EIO;
+    #ifdef WITH_RADOSGW_MOTR
+    if (config_store == "motr") {
+      rgw_store = "motr";
+    }
+    #endif
+    lsubdout(cct, rgw, 1) << "RGW CONF BACKEND STORE = " << config_store << dendl;
+    lsubdout(cct, rgw, 1) << "RGW BACKEND STORE = " << rgw_store << dendl;
+
+    if (raw_storage_op) {
+      store = StoreManager::get_raw_storage(dpp(), g_ceph_context, rgw_store);
+    } else {
+      store = StoreManager::get_storage(dpp(), g_ceph_context, rgw_store, false, false, false,
+					   false, false,
+					   need_cache && g_conf()->rgw_cache_enabled, need_gc);
+    }
+    if (!store) {
+      cerr << "couldn't init storage provider" << std::endl;
+      return 5; //EIO
     }
 
     if (raw_storage_op) {
