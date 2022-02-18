@@ -1568,8 +1568,8 @@ MotrAtomicWriter::MotrAtomicWriter(const DoutPrefixProvider *dpp,
               ptail_placement_rule(_ptail_placement_rule),
               olh_epoch(_olh_epoch),
               unique_tag(_unique_tag),
-              obj(_store, obj->get_key(), obj->get_bucket()),
-              old_obj(_store, obj->get_key(), obj->get_bucket()) {}
+              obj(_store, _head_obj->get_key(), _head_obj->get_bucket()),
+              old_obj(_store, _head_obj->get_key(), _head_obj->get_bucket()) {}
 
 static const unsigned MAX_BUFVEC_NR = 256;
 
