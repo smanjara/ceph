@@ -359,12 +359,6 @@ int MotrUser::load_user_from_idx(const DoutPrefixProvider *dpp,
     objv_tracker.read_version = objv_tr->read_version;
   }
 
-  if (!info.access_keys.empty()) {
-    for(auto key : info.access_keys) {
-      access_key_tracker.insert(key.first);
-    }
-  }
-
   return 0;
 }
 
@@ -399,16 +393,6 @@ int MotrUser::store_user(const DoutPrefixProvider* dpp,
   obj_version& obj_ver = objv_tr.read_version;
 
   ldpp_dout(dpp, 20) << "Store_user(): User = " << info.user_id.id << dendl;
-  std::string access_key;
-  std::string secret_key;
-  if (!info.access_keys.empty()) {
-    std::map<std::string, RGWAccessKey>::const_iterator iter = info.access_keys.begin();
-    const RGWAccessKey& k = iter->second;
-    access_key = k.id;
-    secret_key = k.key;
-    MotrAccessKey MGWUserKeys(access_key, secret_key, info.user_id.id);
-    store->store_access_key(dpp, y, MGWUserKeys);
-  }
 
   orig_info.user_id.id = info.user_id.id;
   // XXX: we open and close motr idx 2 times in this method:
@@ -461,30 +445,6 @@ int MotrUser::store_user(const DoutPrefixProvider* dpp,
     secret_key = k.key;
     MotrAccessKey MGWUserKeys(access_key, secret_key, info.user_id.to_str());
     store->store_access_key(dpp, y, MGWUserKeys);
-    access_key_tracker.insert(access_key);
-  }
-
-  // Check if any key need to be deleted
-  if (access_key_tracker.size() != info.access_keys.size()) {
-    std::string key_for_deletion;
-    for (auto key : access_key_tracker) {
-      if (!info.get_key(key)) {
-        key_for_deletion = key;
-        ldpp_dout(dpp, 0) << "Deleting access key: " << key_for_deletion << dendl;
-        store->delete_access_key(dpp, y, key_for_deletion);
-        if (rc < 0) {
-          ldpp_dout(dpp, 0) << "Unable to delete access key" << rc << dendl;
-        }
-      }
-    }
-    if(rc >= 0){
-      access_key_tracker.erase(key_for_deletion);
-    }
-  }
-
-  if (!info.user_email.empty()) {
-     MotrEmailInfo MGWEmailInfo(info.user_id.to_str(), info.user_email);
-     store->store_email_info(dpp, y, MGWEmailInfo);
   }
 
   // Create user info index to store all buckets that are belong
@@ -3176,7 +3136,7 @@ int MotrStore::get_user_by_access_key(const DoutPrefixProvider *dpp, const std::
 
   uinfo.user_id.id = access_key.user_id;
   ldout(cctx, 0) << "Loading user: " << uinfo.user_id.id << dendl;
-  rc = load_user_from_idx(dpp, this, uinfo, nullptr, nullptr);
+  rc = MotrUser().load_user_from_idx(dpp, this, uinfo, nullptr, nullptr);
   if (rc < 0){
     ldout(cctx, 0) << "Failed to load user: rc = " << rc << dendl;
     return rc;
