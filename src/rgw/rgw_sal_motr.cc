@@ -359,6 +359,12 @@ int MotrUser::load_user_from_idx(const DoutPrefixProvider *dpp,
     objv_tracker.read_version = objv_tr->read_version;
   }
 
+  if (!info.access_keys.empty()) {
+    for(auto key : info.access_keys) {
+      access_key_tracker.insert(key.first);
+    }
+  }
+
   return 0;
 }
 
@@ -445,6 +451,25 @@ int MotrUser::store_user(const DoutPrefixProvider* dpp,
     secret_key = k.key;
     MotrAccessKey MGWUserKeys(access_key, secret_key, info.user_id.to_str());
     store->store_access_key(dpp, y, MGWUserKeys);
+    access_key_tracker.insert(access_key);
+  }
+
+  // Check if any key need to be deleted
+  if (access_key_tracker.size() != info.access_keys.size()) {
+    std::string key_for_deletion;
+    for (auto key : access_key_tracker) {
+      if (!info.get_key(key)) {
+        key_for_deletion = key;
+        ldpp_dout(dpp, 0) << "Deleting access key: " << key_for_deletion << dendl;
+        store->delete_access_key(dpp, y, key_for_deletion);
+        if (rc < 0) {
+          ldpp_dout(dpp, 0) << "Unable to delete access key" << rc << dendl;
+        }
+      }
+    }
+    if(rc >= 0){
+      access_key_tracker.erase(key_for_deletion);
+    }
   }
 
   // Create user info index to store all buckets that are belong
@@ -3196,6 +3221,31 @@ int MotrStore::store_access_key(const DoutPrefixProvider *dpp, optional_yield y,
     ldout(cctx, 0) << "Failed to store key: rc = " << rc << dendl;
     return rc;
   }
+  return rc;
+}
+
+int MotrStore::delete_access_key(const DoutPrefixProvider *dpp, optional_yield y, std::string access_key)
+{
+  int rc;
+  bufferlist bl;
+  rc = do_idx_op_by_name(RGW_IAM_MOTR_ACCESS_KEY,
+                                M0_IC_DEL, access_key, bl);
+  if (rc < 0){
+    ldout(cctx, 0) << "Failed to delete key: rc = " << rc << dendl;
+  }
+  return rc;
+}
+
+int MotrStore::store_email_info(const DoutPrefixProvider *dpp, optional_yield y, MotrEmailInfo& email_info )
+{
+  int rc;
+  bufferlist bl;
+  email_info.encode(bl);
+  rc = do_idx_op_by_name(RGW_IAM_MOTR_EMAIL_KEY,
+                                M0_IC_PUT, email_info.email_id, bl);
+  if (rc < 0) {
+    ldout(cctx, 0) << "Failed to store the user by email as key: rc = " << rc << dendl;
+  } 
   return rc;
 }
 

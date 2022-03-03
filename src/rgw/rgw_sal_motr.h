@@ -183,8 +183,8 @@ class MotrUser : public StoreUser {
 
   public:
     std::set<std::string> access_key_tracker;
-    MotrUser(MotrStore *_st, const rgw_user& _u) : StoreUser(_u), store(_st) { }
-    MotrUser(MotrStore *_st, const RGWUserInfo& _i) : StoreUser(_i), store(_st) { }
+    MotrUser(MotrStore *_st, const rgw_user& _u) : User(_u), store(_st) { }
+    MotrUser(MotrStore *_st, const RGWUserInfo& _i) : User(_i), store(_st) { }
     MotrUser(MotrStore *_st) : store(_st) { }
     MotrUser(MotrUser& _o) = default;
     MotrUser() {}
@@ -1084,6 +1084,8 @@ class MotrStore : public StoreDriver {
                           std::string key_str, bufferlist &bl, bool update=true);
     int check_n_create_global_indices();
     int store_access_key(const DoutPrefixProvider *dpp, optional_yield y, MotrAccessKey access_key);
+    int delete_access_key(const DoutPrefixProvider *dpp, optional_yield y, std::string access_key);
+    int store_email_info(const DoutPrefixProvider *dpp, optional_yield y, MotrEmailInfo& email_info);
 
     int init_metadata_cache(const DoutPrefixProvider *dpp, CephContext *cct);
     MotrMetaCache* get_obj_meta_cache() {return obj_meta_cache;}
