@@ -1502,7 +1502,7 @@ int MotrObject::MotrDeleteOp::delete_obj(const DoutPrefixProvider* dpp, optional
   bufferlist bl;
   string bucket_index_iname = "motr.rgw.bucket.index." + source->get_bucket()->get_name();
   rc = source->store->do_idx_op_by_name(bucket_index_iname,
-                                        M0_IC_DEL, source->get_key().get_oid(), bl);
+                                            M0_IC_DEL, source->get_key().to_str(), bl);
   if (rc < 0) {
     ldpp_dout(dpp, 0) << "Failed to del object's entry from bucket index. " << dendl;
     return rc;
