@@ -2514,7 +2514,7 @@ int MotrMultipartUpload::abort(const DoutPrefixProvider *dpp, CephContext *cct)
   bl.clear();
   // Remove the upload from bucket multipart index.
   rc = store->do_idx_op_by_name(bucket_multipart_iname,
-                                M0_IC_DEL, meta_obj->get_key().get_oid(), bl);
+                                  M0_IC_DEL, meta_obj->get_key().to_str(), bl);
   return rc;
 }
 
