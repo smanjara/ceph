@@ -1026,12 +1026,8 @@ static int bucket_stats(rgw::sal::Store* store,
 
   std::string bucket_ver, master_ver;
   std::string max_marker;
-  int ret = store->getRados()->get_bucket_stats_and_bilog_meta(bucket_info,
-                                                               RGW_NO_SHARD,
-                                                               &bucket_ver,
-                                                               &master_ver,
-                                                               stats,
-                                                               &max_marker);
+  ret = bucket->read_stats(dpp, index, RGW_NO_SHARD, &bucket_ver, &master_ver, stats, &max_marker);
+
   if (ret < 0) {
     cerr << "error getting bucket stats bucket=" << bucket->get_name() << " ret=" << ret << std::endl;
     return ret;
@@ -1142,8 +1138,7 @@ int RGWBucketAdminOp::limit_check(rgw::sal::Store* store,
 	/* need stats for num_entries */
 	string bucket_ver, master_ver;
 	std::map<RGWObjCategory, RGWStorageStats> stats;
-	ret = store->getRados()->get_bucket_stats(dpp, info, RGW_NO_SHARD, &bucket_ver,
-						  &master_ver, stats);
+        ret = bucket->read_stats(dpp, index, RGW_NO_SHARD, &bucket_ver, &master_ver, stats, nullptr);
 
 	if (ret < 0)
 	  continue;
