@@ -596,8 +596,8 @@ public:
                         const map<string, bufferlist>& bucket_attrs,
                         RGWLifecycleConfiguration *config);
   int remove_bucket_config(RGWBucketInfo& bucket_info,
-                           const map<string, bufferlist>& bucket_attrs);
-
+                           const map<string, bufferlist>& bucket_attrs,
+			   bool merge_attrs = true);
   CephContext *get_cct() const override { return cct; }
   rgw::sal::Lifecycle *get_lc() const { return sal_lc.get(); }
   unsigned get_subsys() const;
