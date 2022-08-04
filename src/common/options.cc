@@ -7050,6 +7050,10 @@ std::vector<Option> get_rgw_options() {
     .set_default(0)
     .set_description(""),
 
+    Option("rgw_sync_data_full_inject_err_probability", Option::TYPE_FLOAT, Option::LEVEL_DEV)
+    .set_default(0)
+    .set_description(""),
+
     Option("rgw_sync_meta_inject_err_probability", Option::TYPE_FLOAT, Option::LEVEL_DEV)
     .set_default(0)
     .set_description(""),

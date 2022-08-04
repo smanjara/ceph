@@ -1490,6 +1490,7 @@ OPTION(rgw_sync_lease_period, OPT_INT) // time in second for lease that rgw take
 OPTION(rgw_sync_log_trim_interval, OPT_INT) // time in seconds between attempts to trim sync logs
 
 OPTION(rgw_sync_data_inject_err_probability, OPT_DOUBLE) // range [0, 1]
+OPTION(rgw_sync_data_full_inject_err_probability, OPT_DOUBLE) // range [0, 1]
 OPTION(rgw_sync_meta_inject_err_probability, OPT_DOUBLE) // range [0, 1]
 OPTION(rgw_sync_trace_history_size, OPT_INT) // max number of complete sync trace entries to keep
 OPTION(rgw_sync_trace_per_node_log_size, OPT_INT) // how many log entries to keep per node
