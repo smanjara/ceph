@@ -6840,6 +6840,20 @@ std::vector<Option> get_rgw_options() {
     .set_default("data_log")
     .set_description(""),
 
+    Option("rgw_bucket_sync_spawn_window", Option::TYPE_INT, Option::LEVEL_DEV)
+    .set_default(20)
+    .set_description("Bucket sync spawn window")
+    .set_long_description(
+        "The maximum number of items that bucket sync is willing to "
+        "process in parallel (per remote bilog shard)."),
+
+    Option("rgw_data_sync_spawn_window", Option::TYPE_INT, Option::LEVEL_DEV)
+    .set_default(20)
+    .set_description("Data sync spawn window")
+    .set_long_description(
+        "The maximum number of items that data sync is willing to "
+        "process in parallel (per remote datalog shard)."),
+
     Option("rgw_bucket_quota_ttl", Option::TYPE_INT, Option::LEVEL_ADVANCED)
     .set_default(600)
     .set_description("Bucket quota stats cache TTL")

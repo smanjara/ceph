@@ -1451,6 +1451,8 @@ OPTION(rgw_data_log_window, OPT_INT) // data log entries window (in seconds)
 OPTION(rgw_data_log_changes_size, OPT_INT) // number of in-memory entries to hold for data changes log
 OPTION(rgw_data_log_num_shards, OPT_INT) // number of objects to keep data changes log on
 OPTION(rgw_data_log_obj_prefix, OPT_STR) //
+OPTION(rgw_bucket_sync_spawn_window, OPT_INT) // maximum number of items processed by bucket sync in parallel per bilog shard
+OPTION(rgw_data_sync_spawn_window, OPT_INT) // maximum number of items processed by data sync in parallel per datalog shard
 
 OPTION(rgw_bucket_quota_ttl, OPT_INT) // time for cached bucket stats to be cached within rgw instance
 OPTION(rgw_bucket_quota_cache_size, OPT_INT) // number of entries in bucket quota cache

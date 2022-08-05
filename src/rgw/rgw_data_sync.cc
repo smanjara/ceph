@@ -1433,12 +1433,13 @@ public:
   }
 };
 
-rgw_raw_obj datalog_oid_for_error_repo(RGWDataSyncCtx *sc, rgw::sal::RadosStore* store,
+rgw_raw_obj datalog_oid_for_error_repo(RGWDataSyncCtx *sc, rgw::sal::RGWRadosStore *store,
                                       rgw_pool& pool, rgw_bucket_shard& bs) {
   int datalog_shard = store->svc()->datalog_rados->choose_oid(bs);
   string oid = RGWDataSyncStatusManager::shard_obj_name(sc->source_zone, datalog_shard);
   return rgw_raw_obj(pool, oid + ".retry");
   }
+
 
 class RGWDataIncrementalSyncFullObligationCR: public RGWCoroutine {
   RGWDataSyncCtx *sc;
@@ -1517,7 +1518,7 @@ RGWCoroutine* data_sync_single_entry(RGWDataSyncCtx *sc, const rgw_bucket_shard&
                                       lease_cr.get(), tn);
 }
 
-static ceph::real_time timestamp_for_bucket_shard(rgw::sal::RadosStore* store,
+static ceph::real_time timestamp_for_bucket_shard(rgw::sal::RGWRadosStore *store,
                                                 const rgw_data_sync_status& sync_status,
                                                 const rgw_bucket_shard& bs) {
   int datalog_shard = store->svc()->datalog_rados->choose_oid(bs);
@@ -1674,7 +1675,6 @@ class RGWDataSyncShardCR : public RGWCoroutine {
   bc::flat_set<rgw_data_notify_entry>::iterator modified_iter;
 
   uint64_t total_entries = 0;
-  static constexpr int spawn_window = BUCKET_SHARD_SYNC_SPAWN_WINDOW;
   bool *reset_backoff = nullptr;
 
   boost::intrusive_ptr<RGWContinuousLeaseCR> lease_cr;
@@ -4138,6 +4138,7 @@ done:
   }
 };
 
+
 class RGWBucketFullSyncCR : public RGWCoroutine {
   RGWDataSyncCtx *sc;
   RGWDataSyncEnv *sync_env;
@@ -4285,7 +4286,7 @@ int RGWBucketFullSyncCR::operate(const DoutPrefixProvider *dpp)
                                  entry->key, &marker_tracker, zones_trace, tn),
                       false);
         }
-        drain_with_cb(BUCKET_SYNC_SPAWN_WINDOW,
+        drain_with_cb(cct->_conf->rgw_bucket_sync_spawn_window,
                       [&](uint64_t stack_id, int ret) {
                 if (ret < 0) {
                   tn->log(10, "a sync operation returned error");
@@ -4677,7 +4678,7 @@ int RGWBucketShardIncrementalSyncCR::operate(const DoutPrefixProvider *dpp)
                   false);
           }
         // }
-        drain_with_cb(BUCKET_SYNC_SPAWN_WINDOW,
+        drain_with_cb(cct->_conf->rgw_bucket_sync_spawn_window,
                       [&](uint64_t stack_id, int ret) {
                 if (ret < 0) {
                   tn->log(10, "a sync operation returned error");
