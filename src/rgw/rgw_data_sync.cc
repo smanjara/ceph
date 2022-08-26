@@ -1789,6 +1789,8 @@ public:
         yield;
       }
       tn->log(10, "took lease");
+      if (reset_backoff)
+	*reset_backoff = true;
       oid = full_data_sync_index_shard_oid(sc->source_zone, shard_id);
       marker_tracker.emplace(sc, status_oid, sync_marker, tn);
       total_entries = sync_marker.pos;
@@ -1884,6 +1886,8 @@ public:
         }
         set_status("lease acquired");
         tn->log(10, "took lease");
+	if (reset_backoff)
+	  *reset_backoff = true;
       }
       marker_tracker.emplace(sc, status_oid, sync_marker, tn);
       do {
