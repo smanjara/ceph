@@ -174,6 +174,7 @@ if(WITH_RADOSGW_KAFKA_ENDPOINT)
 endif()
 
 add_library(rgw_common OBJECT ${librgw_common_srcs})
+add_sanitizers(rgw_common)
 
 target_include_directories(rgw_common SYSTEM PUBLIC "services")
 target_include_directories(rgw_common PUBLIC "${CMAKE_SOURCE_DIR}/src/dmclock/support/src")
@@ -250,6 +251,7 @@ endif()
 add_library(rgw_a STATIC
     ${rgw_a_srcs}
     $<TARGET_OBJECTS:rgw_common>)
+add_sanitizers(rgw_a)
 
 add_dependencies(rgw_a civetweb_h)
 
@@ -324,6 +326,7 @@ endif()
 add_library(rgw_schedulers STATIC ${rgw_schedulers_srcs})
 target_link_libraries(rgw_schedulers
   PUBLIC dmclock::dmclock)
+add_sanitizers(rgw_schedulers)
 
 add_library(radosgw SHARED ${radosgw_srcs} ${rgw_a_srcs} rgw_main.cc
   $<TARGET_OBJECTS:rgw_kmip>
@@ -361,12 +364,14 @@ target_link_libraries(radosgwd radosgw librados
   ${ALLOC_LIBS})
 set_target_properties(radosgwd PROPERTIES OUTPUT_NAME radosgw)
 install(TARGETS radosgwd DESTINATION bin)
+add_sanitizers(radosgw)
 
 set(radosgw_admin_srcs
   rgw_admin.cc
   rgw_sync_checkpoint.cc
   rgw_orphan.cc)
 add_executable(radosgw-admin ${radosgw_admin_srcs})
+add_sanitizers(radosgw-admin)
 target_link_libraries(radosgw-admin ${rgw_libs} librados
   cls_rgw_client cls_otp_client cls_lock_client cls_refcount_client
   cls_log_client cls_timeindex_client neorados_cls_fifo
@@ -378,6 +383,7 @@ install(TARGETS radosgw-admin DESTINATION bin)
 set(radosgw_es_srcs
   rgw_es_main.cc)
 add_executable(radosgw-es ${radosgw_es_srcs})
+add_sanitizers(radosgw-es)
 target_link_libraries(radosgw-es ${rgw_libs} librados
   cls_rgw_client cls_otp_client cls_lock_client cls_refcount_client
   cls_log_client cls_timeindex_client neorados_cls_fifo
@@ -389,6 +395,7 @@ install(TARGETS radosgw-es DESTINATION bin)
 set(radosgw_token_srcs
   rgw_token.cc)
 add_executable(radosgw-token ${radosgw_token_srcs})
+add_sanitizers(radosgw-token)
 target_link_libraries(radosgw-token librados
   global ${ALLOC_LIBS})
 install(TARGETS radosgw-token DESTINATION bin)
@@ -396,6 +403,7 @@ install(TARGETS radosgw-token DESTINATION bin)
 set(radosgw_object_expirer_srcs
   rgw_object_expirer.cc)
 add_executable(radosgw-object-expirer ${radosgw_object_expirer_srcs})
+add_sanitizers(radosgw-object-expirer)
 target_link_libraries(radosgw-object-expirer ${rgw_libs} librados
   cls_rgw_client cls_otp_client cls_lock_client cls_refcount_client
   cls_log_client cls_timeindex_client neorados_cls_fifo
@@ -408,6 +416,7 @@ set(librgw_srcs
   librgw.cc
   rgw_file.cc)
 add_library(rgw SHARED ${librgw_srcs})
+add_sanitizers(rgw)
 target_link_libraries(rgw
   PRIVATE
   ${rgw_libs}
@@ -446,12 +455,14 @@ install(TARGETS rgw DESTINATION ${CMAKE_INSTALL_LIBDIR})
 if(WITH_TESTS)
   add_executable(ceph_rgw_jsonparser
     rgw_jsonparser.cc)
+  add_sanitizers(ceph_rgw_jsonparser)
   target_link_libraries(ceph_rgw_jsonparser
     ${rgw_libs}
     global)
 
   add_executable(ceph_rgw_multiparser
     rgw_multiparser.cc)
+  add_sanitizers(ceph_rgw_multiparser)
   target_link_libraries(ceph_rgw_multiparser
     ${rgw_libs}
     global)

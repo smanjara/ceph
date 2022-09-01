@@ -206,6 +206,7 @@ if(${WITH_RADOSGW})
   add_executable(test_cors
     ${test_cors_srcs}
     )
+  add_sanitizers(test_cors)
   target_link_libraries(test_cors
     librados
     ${rgw_libs}
@@ -220,6 +221,7 @@ if(${WITH_RADOSGW})
   add_executable(ceph_test_cls_rgw_meta
     ${test_cls_rgw_meta_srcs}
     )
+  add_sanitizers(ceph_test_cls_rgw_meta)
   target_link_libraries(ceph_test_cls_rgw_meta
     librados
     ${rgw_libs}
@@ -246,6 +248,7 @@ if(${WITH_RADOSGW})
   add_executable(ceph_test_cls_rgw_log
     ${ceph_test_cls_rgw_log_srcs}
     )
+  add_sanitizers(ceph_test_cls_rgw_log)
   target_link_libraries(ceph_test_cls_rgw_log
     librados
     ${rgw_libs}
@@ -269,6 +272,7 @@ if(${WITH_RADOSGW})
 add_executable(ceph_test_librgw_file
   librgw_file.cc
   )
+add_sanitizers(ceph_test_librgw_file)
 if(WITH_RADOSGW_FCGI_FRONTEND)
 target_include_directories(ceph_test_librgw_file SYSTEM PRIVATE ${FCGI_INCLUDE_DIR})
 endif(WITH_RADOSGW_FCGI_FRONTEND)
@@ -285,6 +289,7 @@ install(TARGETS ceph_test_librgw_file DESTINATION ${CMAKE_INSTALL_BINDIR})
 add_executable(ceph_test_librgw_file_cd
   librgw_file_cd.cc
   )
+add_sanitizers(ceph_test_librgw_file_cd)
 target_link_libraries(ceph_test_librgw_file_cd
   rgw
   librados
@@ -306,6 +311,7 @@ target_link_libraries(ceph_test_librgw_file_gp
   ${EXTRALIBS}
   )
 install(TARGETS ceph_test_librgw_file_gp DESTINATION ${CMAKE_INSTALL_BINDIR})
+add_sanitizers(ceph_test_librgw_file_gp)
 
 # ceph_test_librgw_file_nfsns (nfs namespace tests)
 add_executable(ceph_test_librgw_file_nfsns
@@ -322,6 +328,7 @@ target_link_libraries(ceph_test_librgw_file_nfsns
   ${UNITTEST_LIBS}
   ${EXTRALIBS}
   )
+add_sanitizers(ceph_test_librgw_file_gp)
   target_link_libraries(ceph_test_librgw_file_nfsns spawn)
 install(TARGETS ceph_test_librgw_file_nfsns DESTINATION ${CMAKE_INSTALL_BINDIR})
 
@@ -329,6 +336,7 @@ install(TARGETS ceph_test_librgw_file_nfsns DESTINATION ${CMAKE_INSTALL_BINDIR})
 add_executable(ceph_test_librgw_file_aw
   librgw_file_aw.cc
   )
+add_sanitizers(ceph_test_librgw_file_aw)
 target_link_libraries(ceph_test_librgw_file_aw
   rgw
   librados
@@ -342,6 +350,7 @@ install(TARGETS ceph_test_librgw_file_aw DESTINATION ${CMAKE_INSTALL_BINDIR})
 add_executable(ceph_test_librgw_file_marker
   librgw_file_marker.cc
   )
+add_sanitizers(ceph_test_librgw_file_marker)
 target_include_directories(ceph_test_librgw_file_marker SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/src/rgw")
 target_link_libraries(ceph_test_librgw_file_marker
   rgw
@@ -357,6 +366,7 @@ install(TARGETS ceph_test_librgw_file_marker DESTINATION ${CMAKE_INSTALL_BINDIR}
 add_executable(ceph_test_librgw_file_xattr
   librgw_file_xattr.cc
   )
+add_sanitizers(ceph_test_librgw_file_xattr)
 target_include_directories(ceph_test_librgw_file_xattr SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/src/rgw")
 target_link_libraries(ceph_test_librgw_file_xattr
   rgw
@@ -371,6 +381,7 @@ target_link_libraries(ceph_test_librgw_file_xattr spawn)
 add_executable(ceph_test_rgw_token
   test_rgw_token.cc
   )
+add_sanitizers(ceph_test_rgw_token)
 target_link_libraries(ceph_test_rgw_token
   rgw
   ceph-common
@@ -383,6 +394,7 @@ add_executable(test_rgw_ldap
   ${CMAKE_SOURCE_DIR}/src/rgw/rgw_ldap.cc
   test_rgw_ldap.cc
   )
+add_sanitizers(test_rgw_ldap)
 target_link_libraries(test_rgw_ldap
   librados
   ceph-common
