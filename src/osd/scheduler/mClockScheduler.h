@@ -138,6 +138,7 @@ class mClockScheduler : public OpScheduler, md_config_obs_t {
   using SubQueue = std::map<priority_t,
 	std::list<OpSchedulerItem>,
 	std::greater<priority_t>>;
+  using SubQueueIter = SubQueue::iterator;
   mclock_queue_t scheduler;
   /**
    * high_priority
@@ -146,7 +147,7 @@ class mClockScheduler : public OpScheduler, md_config_obs_t {
    * Invariant: entries are never empty
    */
   SubQueue high_priority;
-  priority_t immediate_class_priority = std::numeric_limits<priority_t>::max();
+  std::list<OpSchedulerItem> immediate;
 
   static scheduler_id_t get_scheduler_id(const OpSchedulerItem &item) {
     return scheduler_id_t{
@@ -215,7 +216,7 @@ public:
   // Enqueue op in the back of the regular queue
   void enqueue(OpSchedulerItem &&item) final;
 
-  // Enqueue the op in the front of the high priority queue
+  // Enqueue the op in the front of the high priority queue or the immediate queue (based on priority)
   void enqueue_front(OpSchedulerItem &&item) final;
 
   // Return an op to be dispatch
@@ -223,7 +224,7 @@ public:
 
   // Returns if the queue is empty
   bool empty() const final {
-    return scheduler.empty() && high_priority.empty();
+    return immediate.empty() && scheduler.empty() && high_priority.empty();
   }
 
   // Formatted output of the queue

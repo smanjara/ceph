@@ -414,6 +414,7 @@ void mClockScheduler::dump(ceph::Formatter &f) const
 {
   // Display queue sizes
   f.open_object_section("queue_sizes");
+  f.dump_int("immediate", immediate.size());
   f.dump_int("high_priority_queue", high_priority.size());
   f.dump_int("scheduler", scheduler.request_count());
   f.close_section();
@@ -448,7 +449,7 @@ void mClockScheduler::enqueue(OpSchedulerItem&& item)
   
   // TODO: move this check into OpSchedulerItem, handle backwards compat
   if (op_scheduler_class::immediate == id.class_id) {
-    enqueue_high(immediate_class_priority, std::move(item));
+    immediate.push_front(std::move(item));
   } else if (priority >= cutoff) {
     enqueue_high(priority, std::move(item));
   } else {
@@ -467,7 +468,7 @@ void mClockScheduler::enqueue(OpSchedulerItem&& item)
   }
 
  dout(20) << __func__ << " client_count: " << scheduler.client_count()
-          << " queue_sizes: [ "
+          << " queue_sizes: [ imm: " << immediate.size()
 	  << " high_priority_queue: " << high_priority.size()
           << " sched: " << scheduler.request_count() << " ]"
           << dendl;
@@ -486,7 +487,7 @@ void mClockScheduler::enqueue_front(OpSchedulerItem&& item)
   auto id = get_scheduler_id(item);
 
   if (op_scheduler_class::immediate == id.class_id) {
-    enqueue_high(immediate_class_priority, std::move(item), true);
+    immediate.push_back(std::move(item));
   } else if (priority >= cutoff) {
     enqueue_high(priority, std::move(item), true);
   } else {
@@ -509,7 +510,11 @@ void mClockScheduler::enqueue_high(unsigned priority,
 
 WorkItem mClockScheduler::dequeue()
 {
-  if (!high_priority.empty()) {
+  if (!immediate.empty()) {
+    WorkItem work_item{std::move(immediate.back())};
+    immediate.pop_back();
+    return work_item;
+  } else if (!high_priority.empty()) {
     auto iter = high_priority.begin();
     // invariant: high_priority entries are never empty
     assert(!iter->second.empty());
