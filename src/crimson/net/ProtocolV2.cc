@@ -99,6 +99,17 @@ inline uint64_t generate_client_cookie() {
       1, std::numeric_limits<uint64_t>::max());
 }
 
+std::size_t get_msg_size(const FrameAssembler &rx_frame_asm)
+{
+  ceph_assert(rx_frame_asm.get_num_segments() > 0);
+  size_t sum = 0;
+  // we don't include SegmentIndex::Msg::HEADER.
+  for (size_t idx = 1; idx < rx_frame_asm.get_num_segments(); idx++) {
+    sum += rx_frame_asm.get_segment_logical_len(idx);
+  }
+  return sum;
+}
+
 } // namespace anonymous
 
 namespace crimson::net {
@@ -154,6 +165,7 @@ void ProtocolV2::start_connect(const entity_addr_t& _peer_addr,
                                const entity_name_t& _peer_name)
 {
   ceph_assert(state == state_t::NONE);
+  ceph_assert(!frame_assembler.has_socket());
   ceph_assert(!gate.is_closed());
   conn.peer_addr = _peer_addr;
   conn.target_addr = _peer_addr;
@@ -174,20 +186,49 @@ void ProtocolV2::start_accept(SocketRef&& new_socket,
                               const entity_addr_t& _peer_addr)
 {
   ceph_assert(state == state_t::NONE);
+  ceph_assert(!frame_assembler.has_socket());
   // until we know better
   conn.target_addr = _peer_addr;
-  frame_assembler->set_socket(std::move(new_socket));
-  has_socket = true;
-  is_socket_valid = true;
+  frame_assembler.set_socket(std::move(sock));
   logger().info("{} ProtocolV2::start_accept(): target_addr={}", conn, _peer_addr);
   messenger.accept_conn(
     seastar::static_pointer_cast<SocketConnection>(conn.shared_from_this()));
   execute_accepting();
 }
 
-void ProtocolV2::trigger_state(state_t new_state, io_state_t new_io_state, bool reentrant)
+// TODO: Frame related implementations, probably to a separate class.
+
+seastar::future<FrameAssemblerV2::read_main_t>
+ProtocolV2::read_main_preamble()
 {
-  if (!reentrant && new_state == state) {
+  return frame_assembler.read_main_preamble(
+#ifdef UNIT_TESTS_BUILT
+  ).then([this](auto ret) {
+    INTERCEPT_FRAME(ret.tag, bp_type_t::READ);
+    return ret;
+  });
+#else
+  );
+#endif
+}
+
+template <class F>
+ceph::bufferlist ProtocolV2::get_buffer(F &tx_frame)
+{
+  INTERCEPT_FRAME(F::tag, bp_type_t::WRITE);
+  return frame_assembler.get_buffer(tx_frame);
+}
+
+template <class F>
+seastar::future<> ProtocolV2::write_flush_frame(F &tx_frame)
+{
+  INTERCEPT_FRAME(F::tag, bp_type_t::WRITE);
+  return frame_assembler.write_flush_frame(tx_frame);
+}
+
+void ProtocolV2::trigger_state(state_t _state, out_state_t _out_state, bool reentrant)
+{
+  if (!reentrant && _state == state) {
     logger().error("{} is not allowed to re-trigger state {}",
                    conn, get_state_name(state));
     ceph_abort();
@@ -362,11 +403,11 @@ ProtocolV2::banner_exchange(bool is_connect)
                  CEPH_MSGR2_REQUIRED_FEATURES,
                  CEPH_BANNER_V2_PREFIX);
   INTERCEPT_CUSTOM(custom_bp_t::BANNER_WRITE, bp_type_t::WRITE);
-  return frame_assembler->write_flush(std::move(bl)).then([this] {
+  return frame_assembler.write_flush(std::move(bl)).then([this] {
       // 2. read peer banner
       unsigned banner_len = strlen(CEPH_BANNER_V2_PREFIX) + sizeof(ceph_le16);
       INTERCEPT_CUSTOM(custom_bp_t::BANNER_READ, bp_type_t::READ);
-      return frame_assembler->read_exactly(banner_len); // or read exactly?
+      return frame_assembler.read_exactly(banner_len); // or read exactly?
     }).then([this] (auto bl) {
       // 3. process peer banner and read banner_payload
       unsigned banner_prefix_len = strlen(CEPH_BANNER_V2_PREFIX);
@@ -396,7 +437,7 @@ ProtocolV2::banner_exchange(bool is_connect)
       }
       logger().debug("{} GOT banner: payload_len={}", conn, payload_len);
       INTERCEPT_CUSTOM(custom_bp_t::BANNER_PAYLOAD_READ, bp_type_t::READ);
-      return frame_assembler->read(payload_len);
+      return frame_assembler.read(payload_len);
     }).then([this, is_connect] (bufferlist bl) {
       // 4. process peer banner_payload and send HelloFrame
       auto p = bl.cbegin();
@@ -430,20 +471,20 @@ ProtocolV2::banner_exchange(bool is_connect)
       }
       peer_supported_features = _peer_supported_features;
       bool is_rev1 = HAVE_MSGR2_FEATURE(peer_supported_features, REVISION_1);
-      frame_assembler->set_is_rev1(is_rev1);
+      frame_assembler.set_is_rev1(is_rev1);
 
       auto hello = HelloFrame::Encode(messenger.get_mytype(),
                                       conn.target_addr);
       logger().debug("{} WRITE HelloFrame: my_type={}, peer_addr={}",
                      conn, ceph_entity_type_name(messenger.get_mytype()),
                      conn.target_addr);
-      return frame_assembler->write_flush_frame(hello);
+      return write_flush_frame(hello);
     }).then([this] {
       //5. read peer HelloFrame
-      return frame_assembler->read_main_preamble();
+      return read_main_preamble();
     }).then([this](auto ret) {
-      expect_tag(Tag::HELLO, ret.tag, conn, "read_hello_frame");
-      return frame_assembler->read_frame_payload();
+      expect_tag(Tag::HELLO, ret.tag, conn, __func__);
+      return frame_assembler.read_frame_payload();
     }).then([this](auto payload) {
       // 6. process peer HelloFrame
       auto hello = HelloFrame::Decode(payload->back());
@@ -459,11 +500,11 @@ ProtocolV2::banner_exchange(bool is_connect)
 
 seastar::future<> ProtocolV2::handle_auth_reply()
 {
-  return frame_assembler->read_main_preamble(
+  return read_main_preamble(
   ).then([this](auto ret) {
     switch (ret.tag) {
       case Tag::AUTH_BAD_METHOD:
-        return frame_assembler->read_frame_payload(
+        return frame_assembler.read_frame_payload(
         ).then([this](auto payload) {
           // handle_auth_bad_method() logic
           auto bad_method = AuthBadMethodFrame::Decode(payload->back());
@@ -484,7 +525,7 @@ seastar::future<> ProtocolV2::handle_auth_reply()
           return client_auth(bad_method.allowed_methods());
         });
       case Tag::AUTH_REPLY_MORE:
-        return frame_assembler->read_frame_payload(
+        return frame_assembler.read_frame_payload(
         ).then([this](auto payload) {
           // handle_auth_reply_more() logic
           auto auth_more = AuthReplyMoreFrame::Decode(payload->back());
@@ -497,12 +538,12 @@ seastar::future<> ProtocolV2::handle_auth_reply()
           auto more_reply = AuthRequestMoreFrame::Encode(reply);
           logger().debug("{} WRITE AuthRequestMoreFrame: payload_len={}",
                          conn, reply.length());
-          return frame_assembler->write_flush_frame(more_reply);
+          return write_flush_frame(more_reply);
         }).then([this] {
           return handle_auth_reply();
         });
       case Tag::AUTH_DONE:
-        return frame_assembler->read_frame_payload(
+        return frame_assembler.read_frame_payload(
         ).then([this](auto payload) {
           // handle_auth_done() logic
           auto auth_done = AuthDoneFrame::Decode(payload->back());
@@ -522,11 +563,11 @@ seastar::future<> ProtocolV2::handle_auth_reply()
             abort_in_fault();
           }
           auth_meta->con_mode = auth_done.con_mode();
-          frame_assembler->create_session_stream_handlers(*auth_meta, false);
+          frame_assembler.create_session_stream_handlers(*auth_meta, false);
           return finish_auth();
         });
       default: {
-        unexpected_tag(ret.tag, conn, "handle_auth_reply");
+        unexpected_tag(ret.tag, conn, __func__);
         return seastar::now();
       }
     }
@@ -546,8 +587,7 @@ seastar::future<> ProtocolV2::client_auth(std::vector<uint32_t> &allowed_methods
     logger().debug("{} WRITE AuthRequestFrame: method={},"
                    " preferred_modes={}, payload_len={}",
                    conn, auth_method, preferred_modes, bl.length());
-    return frame_assembler->write_flush_frame(frame
-    ).then([this] {
+    return write_flush_frame(frame).then([this] {
       return handle_auth_reply();
     });
   } catch (const crimson::auth::error& e) {
@@ -560,7 +600,7 @@ seastar::future<> ProtocolV2::client_auth(std::vector<uint32_t> &allowed_methods
 seastar::future<ProtocolV2::next_step_t>
 ProtocolV2::process_wait()
 {
-  return frame_assembler->read_frame_payload(
+  return frame_assembler.read_frame_payload(
   ).then([this](auto payload) {
     // handle_wait() logic
     logger().debug("{} GOT WaitFrame", conn);
@@ -595,13 +635,12 @@ ProtocolV2::client_connect()
                  conn.policy.features_supported,
                  conn.policy.features_required | msgr2_required,
                  flags, client_cookie);
-  return frame_assembler->write_flush_frame(client_ident
-  ).then([this] {
-    return frame_assembler->read_main_preamble();
+  return write_flush_frame(client_ident).then([this] {
+    return read_main_preamble();
   }).then([this](auto ret) {
     switch (ret.tag) {
       case Tag::IDENT_MISSING_FEATURES:
-        return frame_assembler->read_frame_payload(
+        return frame_assembler.read_frame_payload(
         ).then([this](auto payload) {
           // handle_ident_missing_features() logic
           auto ident_missing = IdentMissingFeaturesFrame::Decode(payload->back());
@@ -614,10 +653,10 @@ ProtocolV2::client_connect()
       case Tag::WAIT:
         return process_wait();
       case Tag::SERVER_IDENT:
-        return frame_assembler->read_frame_payload(
+        return frame_assembler.read_frame_payload(
         ).then([this](auto payload) {
           // handle_server_ident() logic
-          io_handler.requeue_out_sent();
+          requeue_out_sent();
           auto server_ident = ServerIdentFrame::Decode(payload->back());
           logger().debug("{} GOT ServerIdentFrame:"
                          " addrs={}, gid={}, gs={},"
@@ -698,13 +737,13 @@ ProtocolV2::client_reconnect()
                  " server_cookie={}, gs={}, cs={}, in_seq={}",
                  conn, messenger.get_myaddrs(),
                  client_cookie, server_cookie,
-                 global_seq, connect_seq, io_handler.get_in_seq());
-  return frame_assembler->write_flush_frame(reconnect).then([this] {
-    return frame_assembler->read_main_preamble();
+                 global_seq, connect_seq, get_in_seq());
+  return write_flush_frame(reconnect).then([this] {
+    return read_main_preamble();
   }).then([this](auto ret) {
     switch (ret.tag) {
       case Tag::SESSION_RETRY_GLOBAL:
-        return frame_assembler->read_frame_payload(
+        return frame_assembler.read_frame_payload(
         ).then([this](auto payload) {
           // handle_session_retry_global() logic
           auto retry = RetryGlobalFrame::Decode(payload->back());
@@ -715,7 +754,7 @@ ProtocolV2::client_reconnect()
           return client_reconnect();
         });
       case Tag::SESSION_RETRY:
-        return frame_assembler->read_frame_payload(
+        return frame_assembler.read_frame_payload(
         ).then([this](auto payload) {
           // handle_session_retry() logic
           auto retry = RetryFrame::Decode(payload->back());
@@ -726,13 +765,8 @@ ProtocolV2::client_reconnect()
           return client_reconnect();
         });
       case Tag::SESSION_RESET:
-        return frame_assembler->read_frame_payload(
+        return frame_assembler.read_frame_payload(
         ).then([this](auto payload) {
-          if (unlikely(state != state_t::CONNECTING)) {
-            logger().debug("{} triggered {} before reset_session()",
-                           conn, get_state_name(state));
-            abort_protocol();
-          }
           // handle_session_reset() logic
           auto reset = ResetFrame::Decode(payload->back());
           logger().warn("{} GOT ResetFrame: full={}", conn, reset.full());
@@ -742,7 +776,7 @@ ProtocolV2::client_reconnect()
       case Tag::WAIT:
         return process_wait();
       case Tag::SESSION_RECONNECT_OK:
-        return frame_assembler->read_frame_payload(
+        return frame_assembler.read_frame_payload(
         ).then([this](auto payload) {
           // handle_reconnect_ok() logic
           auto reconnect_ok = ReconnectOkFrame::Decode(payload->back());
@@ -761,9 +795,9 @@ ProtocolV2::client_reconnect()
 
 void ProtocolV2::execute_connecting()
 {
-  ceph_assert_always(!is_socket_valid);
-  trigger_state(state_t::CONNECTING, io_state_t::delay, false);
-  gated_execute("execute_connecting", conn, [this] {
+  trigger_state(state_t::CONNECTING, out_state_t::delay, false);
+  frame_assembler.shutdown_socket();
+  gated_execute("execute_connecting", [this] {
       global_seq = messenger.get_global_seq();
       assert(client_cookie != 0);
       if (!conn.policy.lossy && server_cookie != 0) {
@@ -805,6 +839,11 @@ void ProtocolV2::execute_connecting()
                            conn, get_state_name(state));
             abort_protocol();
           }
+          gate.dispatch_in_background(
+              "reset_close_socket_connecting",
+              *this,
+              [this] { return frame_assembler.reset_and_close_socket(); });
+          INTERCEPT_N_RW(custom_bp_t::SOCKET_CONNECTING);
           return Socket::connect(conn.peer_addr);
         }).then([this](SocketRef new_socket) {
           logger().debug("{} socket connected", conn);
@@ -815,24 +854,12 @@ void ProtocolV2::execute_connecting()
               abort_protocol();
             });
           }
-          if (!has_socket) {
-            frame_assembler->set_socket(std::move(new_socket));
-            has_socket = true;
-          } else {
-            gate.dispatch_in_background(
-              "replace_socket_connecting",
-              conn,
-              [this, new_socket=std::move(new_socket)]() mutable {
-                return frame_assembler->replace_shutdown_socket(std::move(new_socket));
-              }
-            );
-          }
-          is_socket_valid = true;
+          frame_assembler.set_socket(std::move(sock));
           return seastar::now();
         }).then([this] {
           auth_meta = seastar::make_lw_shared<AuthConnectionMeta>();
-          frame_assembler->reset_handlers();
-          frame_assembler->start_recording();
+          frame_assembler.reset_handlers();
+          frame_assembler.start_recording();
           return banner_exchange(true);
         }).then([this] (auto&& ret) {
           auto [_peer_type, _my_addr_from_peer] = std::move(ret);
@@ -847,7 +874,7 @@ void ProtocolV2::execute_connecting()
                            conn, get_state_name(state));
             abort_protocol();
           }
-          frame_assembler->learn_socket_ephemeral_port_as_connector(
+          frame_assembler.learn_socket_ephemeral_port_as_connector(
               _my_addr_from_peer.get_port());
           if (unlikely(_my_addr_from_peer.is_legacy())) {
             logger().warn("{} peer sent a legacy address for me: {}",
@@ -920,8 +947,7 @@ seastar::future<> ProtocolV2::_auth_bad_method(int r)
                 "allowed_methods={}, allowed_modes={})",
                 conn, auth_meta->auth_method, cpp_strerror(r),
                 allowed_methods, allowed_modes);
-  return frame_assembler->write_flush_frame(bad_method
-  ).then([this] {
+  return write_flush_frame(bad_method).then([this] {
     return server_auth();
   });
 }
@@ -947,10 +973,9 @@ seastar::future<> ProtocolV2::_handle_auth_request(bufferlist& auth_payload, boo
     logger().debug("{} WRITE AuthDoneFrame: gid={}, con_mode={}, payload_len={}",
                    conn, conn.peer_global_id,
                    ceph_con_mode_name(auth_meta->con_mode), reply.length());
-    return frame_assembler->write_flush_frame(auth_done
-    ).then([this] {
+    return write_flush_frame(auth_done).then([this] {
       ceph_assert(auth_meta);
-      frame_assembler->create_session_stream_handlers(*auth_meta, true);
+      frame_assembler.create_session_stream_handlers(*auth_meta, true);
       return finish_auth();
     });
    }
@@ -959,12 +984,11 @@ seastar::future<> ProtocolV2::_handle_auth_request(bufferlist& auth_payload, boo
     auto more = AuthReplyMoreFrame::Encode(reply);
     logger().debug("{} WRITE AuthReplyMoreFrame: payload_len={}",
                    conn, reply.length());
-    return frame_assembler->write_flush_frame(more
-    ).then([this] {
-      return frame_assembler->read_main_preamble();
+    return write_flush_frame(more).then([this] {
+      return read_main_preamble();
     }).then([this](auto ret) {
-      expect_tag(Tag::AUTH_REQUEST_MORE, ret.tag, conn, "read_auth_request_more");
-      return frame_assembler->read_frame_payload();
+      expect_tag(Tag::AUTH_REQUEST_MORE, ret.tag, conn, __func__);
+      return frame_assembler.read_frame_payload();
     }).then([this](auto payload) {
       auto auth_more = AuthRequestMoreFrame::Decode(payload->back());
       logger().debug("{} GOT AuthRequestMoreFrame: payload_len={}",
@@ -986,10 +1010,10 @@ seastar::future<> ProtocolV2::_handle_auth_request(bufferlist& auth_payload, boo
 
 seastar::future<> ProtocolV2::server_auth()
 {
-  return frame_assembler->read_main_preamble(
+  return read_main_preamble(
   ).then([this](auto ret) {
-    expect_tag(Tag::AUTH_REQUEST, ret.tag, conn, "read_auth_request");
-    return frame_assembler->read_frame_payload();
+    expect_tag(Tag::AUTH_REQUEST, ret.tag, conn, __func__);
+    return frame_assembler.read_frame_payload();
   }).then([this](auto payload) {
     // handle_auth_request() logic
     auto request = AuthRequestFrame::Decode(payload->back());
@@ -1028,8 +1052,7 @@ ProtocolV2::send_wait()
 {
   auto wait = WaitFrame::Encode();
   logger().debug("{} WRITE WaitFrame", conn);
-  return frame_assembler->write_flush_frame(wait
-  ).then([] {
+  return write_flush_frame(wait).then([] {
     return next_step_t::wait;
   });
 }
@@ -1047,7 +1070,7 @@ ProtocolV2::reuse_connection(
 
   existing_proto->trigger_replacing(reconnect,
                                     do_reset,
-                                    frame_assembler->to_replace(),
+                                    frame_assembler.to_replace(),
                                     std::move(auth_meta),
                                     peer_global_seq,
                                     client_cookie,
@@ -1193,7 +1216,7 @@ ProtocolV2::handle_existing_connection(SocketConnectionRef existing_conn)
 seastar::future<ProtocolV2::next_step_t>
 ProtocolV2::server_connect()
 {
-  return frame_assembler->read_frame_payload(
+  return frame_assembler.read_frame_payload(
   ).then([this](auto payload) {
     // handle_client_ident() logic
     auto client_ident = ClientIdentFrame::Decode(payload->back());
@@ -1245,8 +1268,7 @@ ProtocolV2::server_connect()
       auto ident_missing_features = IdentMissingFeaturesFrame::Encode(feat_missing);
       logger().warn("{} WRITE IdentMissingFeaturesFrame: features={} (peer missing)",
                     conn, feat_missing);
-      return frame_assembler->write_flush_frame(ident_missing_features
-      ).then([] {
+      return write_flush_frame(ident_missing_features).then([] {
         return next_step_t::wait;
       });
     }
@@ -1284,9 +1306,9 @@ ProtocolV2::server_connect()
 seastar::future<ProtocolV2::next_step_t>
 ProtocolV2::read_reconnect()
 {
-  return frame_assembler->read_main_preamble(
+  return read_main_preamble(
   ).then([this](auto ret) {
-    expect_tag(Tag::SESSION_RECONNECT, ret.tag, conn, "read_session_reconnect");
+    expect_tag(Tag::SESSION_RECONNECT, ret.tag, conn, "read_reconnect");
     return server_reconnect();
   });
 }
@@ -1296,8 +1318,7 @@ ProtocolV2::send_retry(uint64_t connect_seq)
 {
   auto retry = RetryFrame::Encode(connect_seq);
   logger().warn("{} WRITE RetryFrame: cs={}", conn, connect_seq);
-  return frame_assembler->write_flush_frame(retry
-  ).then([this] {
+  return write_flush_frame(retry).then([this] {
     return read_reconnect();
   });
 }
@@ -1307,8 +1328,7 @@ ProtocolV2::send_retry_global(uint64_t global_seq)
 {
   auto retry = RetryGlobalFrame::Encode(global_seq);
   logger().warn("{} WRITE RetryGlobalFrame: gs={}", conn, global_seq);
-  return frame_assembler->write_flush_frame(retry
-  ).then([this] {
+  return write_flush_frame(retry).then([this] {
     return read_reconnect();
   });
 }
@@ -1318,9 +1338,8 @@ ProtocolV2::send_reset(bool full)
 {
   auto reset = ResetFrame::Encode(full);
   logger().warn("{} WRITE ResetFrame: full={}", conn, full);
-  return frame_assembler->write_flush_frame(reset
-  ).then([this] {
-    return frame_assembler->read_main_preamble();
+  return write_flush_frame(reset).then([this] {
+    return read_main_preamble();
   }).then([this](auto ret) {
     expect_tag(Tag::CLIENT_IDENT, ret.tag, conn, "post_send_reset");
     return server_connect();
@@ -1330,7 +1349,7 @@ ProtocolV2::send_reset(bool full)
 seastar::future<ProtocolV2::next_step_t>
 ProtocolV2::server_reconnect()
 {
-  return frame_assembler->read_frame_payload(
+  return frame_assembler.read_frame_payload(
   ).then([this](auto payload) {
     // handle_reconnect() logic
     auto reconnect = ReconnectFrame::Decode(payload->back());
@@ -1495,8 +1514,8 @@ void ProtocolV2::execute_accepting()
           }
 #endif
           auth_meta = seastar::make_lw_shared<AuthConnectionMeta>();
-          frame_assembler->reset_handlers();
-          frame_assembler->start_recording();
+          frame_assembler.reset_handlers();
+          frame_assembler.start_recording();
           return banner_exchange(false);
         }).then([this] (auto&& ret) {
           auto [_peer_type, _my_addr_from_peer] = std::move(ret);
@@ -1520,7 +1539,7 @@ void ProtocolV2::execute_accepting()
           messenger.learned_addr(_my_addr_from_peer, conn);
           return server_auth();
         }).then([this] {
-          return frame_assembler->read_main_preamble();
+          return read_main_preamble();
         }).then([this](auto ret) {
           switch (ret.tag) {
             case Tag::CLIENT_IDENT:
@@ -1569,17 +1588,16 @@ seastar::future<> ProtocolV2::finish_auth()
 {
   ceph_assert(auth_meta);
 
-  auto records = frame_assembler->stop_recording();
+  auto records = frame_assembler.stop_recording();
   const auto sig = auth_meta->session_key.empty() ? sha256_digest_t() :
     auth_meta->session_key.hmac_sha256(nullptr, records.rxbuf);
   auto sig_frame = AuthSignatureFrame::Encode(sig);
   logger().debug("{} WRITE AuthSignatureFrame: signature={}", conn, sig);
-  return frame_assembler->write_flush_frame(sig_frame
-  ).then([this] {
-    return frame_assembler->read_main_preamble();
+  return write_flush_frame(sig_frame).then([this] {
+    return read_main_preamble();
   }).then([this](auto ret) {
     expect_tag(Tag::AUTH_SIGNATURE, ret.tag, conn, "post_finish_auth");
-    return frame_assembler->read_frame_payload();
+    return frame_assembler.read_frame_payload();
   }).then([this, txbuf=std::move(records.txbuf)](auto payload) {
     // handle_auth_signature() logic
     auto sig_frame = AuthSignatureFrame::Decode(payload->back());
@@ -1692,7 +1710,7 @@ ProtocolV2::send_server_ident()
                  conn.policy.features_required | msgr2_required,
                  flags, server_cookie);
 
-  return frame_assembler->write_flush_frame(server_ident);
+  return write_flush_frame(server_ident);
 }
 
 // REPLACING state
@@ -1709,38 +1727,30 @@ void ProtocolV2::trigger_replacing(bool reconnect,
                                    uint64_t new_connect_seq,
                                    uint64_t new_msg_seq)
 {
-  ceph_assert_always(has_socket || state == state_t::CONNECTING);
-  ceph_assert_always(!mover.socket->is_shutdown());
-  trigger_state(state_t::REPLACING, io_state_t::delay, false);
-  if (is_socket_valid) {
-    frame_assembler->shutdown_socket();
-    is_socket_valid = false;
-  }
-  gate.dispatch_in_background(
-      "trigger_replacing",
-      conn,
-      [this,
-       reconnect,
-       do_reset,
-       mover = std::move(mover),
-       new_auth_meta = std::move(new_auth_meta),
-       new_client_cookie, new_peer_name,
-       new_conn_features, new_peer_supported_features,
-       new_peer_global_seq,
-       new_connect_seq, new_msg_seq] () mutable {
-    ceph_assert_always(state == state_t::REPLACING);
-    io_handler.dispatch_accept();
-    // state may become CLOSING, close mover.socket and abort later
-    return wait_exit_io(
-    ).then([this] {
-      ceph_assert_always(frame_assembler);
+  trigger_state(state_t::REPLACING, out_state_t::delay, false);
+  frame_assembler.shutdown_socket();
+  dispatchers.ms_handle_accept(
+      seastar::static_pointer_cast<SocketConnection>(conn.shared_from_this()));
+  gate.dispatch_in_background("trigger_replacing", *this,
+                 [this,
+                  reconnect,
+                  do_reset,
+                  mover = std::move(mover),
+                  new_auth_meta = std::move(new_auth_meta),
+                  new_client_cookie, new_peer_name,
+                  new_conn_features, new_peer_supported_features,
+                  new_peer_global_seq,
+                  new_connect_seq, new_msg_seq] () mutable {
+    return wait_out_exit_dispatching().then([this, do_reset] {
+      if (do_reset) {
+        reset_session(true);
+      }
       protocol_timer.cancel();
       auto done = std::move(execution_done);
       execution_done = seastar::now();
       return done;
     }).then([this,
              reconnect,
-             do_reset,
              mover = std::move(mover),
              new_auth_meta = std::move(new_auth_meta),
              new_client_cookie, new_peer_name,
@@ -1758,25 +1768,21 @@ void ProtocolV2::trigger_replacing(bool reconnect,
         });
       }
 
+      gate.dispatch_in_background(
+          "reset_close_socket_replacing",
+          *this,
+          [this] { return frame_assembler.reset_and_close_socket(); });
       auth_meta = std::move(new_auth_meta);
       peer_global_seq = new_peer_global_seq;
-      gate.dispatch_in_background(
-        "replace_frame_assembler",
-        conn,
-        [this, mover=std::move(mover)]() mutable {
-          return frame_assembler->replace_by(std::move(mover));
-        }
-      );
-      is_socket_valid = true;
-      has_socket = true;
+      frame_assembler.replace_by(std::move(mover));
 
       if (reconnect) {
         connect_seq = new_connect_seq;
         // send_reconnect_ok() logic
-        io_handler.requeue_out_sent_up_to(new_msg_seq);
-        auto reconnect_ok = ReconnectOkFrame::Encode(io_handler.get_in_seq());
-        logger().debug("{} WRITE ReconnectOkFrame: msg_seq={}", conn, io_handler.get_in_seq());
-        return frame_assembler->write_flush_frame(reconnect_ok);
+        requeue_out_sent_up_to(new_msg_seq);
+        auto reconnect_ok = ReconnectOkFrame::Encode(get_in_seq());
+        logger().debug("{} WRITE ReconnectOkFrame: msg_seq={}", conn, get_in_seq());
+        return write_flush_frame(reconnect_ok);
       } else {
         client_cookie = new_client_cookie;
         assert(conn.get_peer_type() == new_peer_name.type());
@@ -1786,7 +1792,7 @@ void ProtocolV2::trigger_replacing(bool reconnect,
         conn.set_features(new_conn_features);
         peer_supported_features = new_peer_supported_features;
         bool is_rev1 = HAVE_MSGR2_FEATURE(peer_supported_features, REVISION_1);
-        frame_assembler->set_is_rev1(is_rev1);
+        frame_assembler.set_is_rev1(is_rev1);
         return send_server_ident();
       }
     }).then([this, reconnect] {
@@ -1812,23 +1818,242 @@ void ProtocolV2::trigger_replacing(bool reconnect,
 
 void ProtocolV2::notify_out_fault(const char *where, std::exception_ptr eptr)
 {
-  fault(state_t::READY, where, eptr);
+  ceph::bufferlist bl;
+
+  if (unlikely(require_keepalive)) {
+    auto keepalive_frame = KeepAliveFrame::Encode();
+    bl.append(get_buffer(keepalive_frame));
+  }
+
+  if (unlikely(maybe_keepalive_ack.has_value())) {
+    auto keepalive_ack_frame = KeepAliveFrameAck::Encode(*maybe_keepalive_ack);
+    bl.append(get_buffer(keepalive_ack_frame));
+  }
+
+  if (require_ack && num_msgs == 0u) {
+    auto ack_frame = AckFrame::Encode(get_in_seq());
+    bl.append(get_buffer(ack_frame));
+  }
+
+  std::for_each(msgs.begin(), msgs.begin()+num_msgs, [this, &bl](const MessageURef& msg) {
+    // TODO: move to common code
+    // set priority
+    msg->get_header().src = messenger.get_myname();
+
+    msg->encode(conn.features, 0);
+
+    ceph_assert(!msg->get_seq() && "message already has seq");
+    msg->set_seq(increment_out_seq());
+
+    ceph_msg_header &header = msg->get_header();
+    ceph_msg_footer &footer = msg->get_footer();
+
+    ceph_msg_header2 header2{header.seq,        header.tid,
+                             header.type,       header.priority,
+                             header.version,
+                             ceph_le32(0),      header.data_off,
+                             ceph_le64(get_in_seq()),
+                             footer.flags,      header.compat_version,
+                             header.reserved};
+
+    auto message = MessageFrame::Encode(header2,
+        msg->get_payload(), msg->get_middle(), msg->get_data());
+    logger().debug("{} --> #{} === {} ({})",
+		   conn, msg->get_seq(), *msg, msg->get_type());
+    bl.append(get_buffer(message));
+  });
+
+  return bl;
 }
 
-void ProtocolV2::execute_ready()
+seastar::future<> ProtocolV2::read_message(utime_t throttle_stamp, std::size_t msg_size)
+{
+  return frame_assembler.read_frame_payload(
+  ).then([this, throttle_stamp, msg_size](auto payload) {
+    utime_t recv_stamp{seastar::lowres_system_clock::now()};
+
+    // we need to get the size before std::moving segments data
+    auto msg_frame = MessageFrame::Decode(*payload);
+    // XXX: paranoid copy just to avoid oops
+    ceph_msg_header2 current_header = msg_frame.header();
+
+    logger().trace("{} got {} + {} + {} byte message,"
+                   " envelope type={} src={} off={} seq={}",
+                   conn, msg_frame.front_len(), msg_frame.middle_len(),
+                   msg_frame.data_len(), current_header.type, conn.get_peer_name(),
+                   current_header.data_off, current_header.seq);
+
+    ceph_msg_header header{current_header.seq,
+                           current_header.tid,
+                           current_header.type,
+                           current_header.priority,
+                           current_header.version,
+                           ceph_le32(msg_frame.front_len()),
+                           ceph_le32(msg_frame.middle_len()),
+                           ceph_le32(msg_frame.data_len()),
+                           current_header.data_off,
+                           conn.get_peer_name(),
+                           current_header.compat_version,
+                           current_header.reserved,
+                           ceph_le32(0)};
+    ceph_msg_footer footer{ceph_le32(0), ceph_le32(0),
+                           ceph_le32(0), ceph_le64(0), current_header.flags};
+
+    auto conn_ref = seastar::static_pointer_cast<SocketConnection>(
+        conn.shared_from_this());
+    Message *message = decode_message(nullptr, 0, header, footer,
+        msg_frame.front(), msg_frame.middle(), msg_frame.data(), conn_ref);
+    if (!message) {
+      logger().warn("{} decode message failed", conn);
+      abort_in_fault();
+    }
+
+    // store reservation size in message, so we don't get confused
+    // by messages entering the dispatch queue through other paths.
+    message->set_dispatch_throttle_size(msg_size);
+
+    message->set_throttle_stamp(throttle_stamp);
+    message->set_recv_stamp(recv_stamp);
+    message->set_recv_complete_stamp(utime_t{seastar::lowres_system_clock::now()});
+
+    // check received seq#.  if it is old, drop the message.
+    // note that incoming messages may skip ahead.  this is convenient for the
+    // client side queueing because messages can't be renumbered, but the (kernel)
+    // client will occasionally pull a message out of the sent queue to send
+    // elsewhere.  in that case it doesn't matter if we "got" it or not.
+    uint64_t cur_seq = get_in_seq();
+    if (message->get_seq() <= cur_seq) {
+      logger().error("{} got old message {} <= {} {}, discarding",
+                     conn, message->get_seq(), cur_seq, *message);
+      if (HAVE_FEATURE(conn.features, RECONNECT_SEQ) &&
+          local_conf()->ms_die_on_old_message) {
+        ceph_assert(0 == "old msgs despite reconnect_seq feature");
+      }
+      return seastar::now();
+    } else if (message->get_seq() > cur_seq + 1) {
+      logger().error("{} missed message? skipped from seq {} to {}",
+                     conn, cur_seq, message->get_seq());
+      if (local_conf()->ms_die_on_skipped_message) {
+        ceph_assert(0 == "skipped incoming seq");
+      }
+    }
+
+    // note last received message.
+    set_in_seq(message->get_seq());
+    logger().debug("{} <== #{} === {} ({})",
+		   conn, message->get_seq(), *message, message->get_type());
+    notify_ack();
+    ack_out_sent(current_header.ack_seq);
+
+    // TODO: change MessageRef with seastar::shared_ptr
+    auto msg_ref = MessageRef{message, false};
+    // throttle the reading process by the returned future
+    return dispatchers.ms_dispatch(conn_ref, std::move(msg_ref));
+  });
+}
+
+void ProtocolV2::execute_ready(bool dispatch_connect)
 {
   assert(conn.policy.lossy || (client_cookie != 0 && server_cookie != 0));
-  protocol_timer.cancel();
-  ceph_assert_always(is_socket_valid);
-  trigger_state(state_t::READY, io_state_t::open, false);
+  trigger_state(state_t::READY, out_state_t::open, false);
+  if (dispatch_connect) {
+    dispatchers.ms_handle_connect(
+	seastar::static_pointer_cast<SocketConnection>(conn.shared_from_this()));
+  }
+#ifdef UNIT_TESTS_BUILT
+  if (conn.interceptor) {
+    conn.interceptor->register_conn_ready(conn);
+  }
+#endif
+  gated_execute("execute_ready", [this] {
+    protocol_timer.cancel();
+    return seastar::keep_doing([this] {
+      return read_main_preamble(
+      ).then([this](auto ret) {
+        switch (ret.tag) {
+          case Tag::MESSAGE: {
+            size_t msg_size = get_msg_size(*ret.rx_frame_asm);
+            return seastar::futurize_invoke([this] {
+              // throttle_message() logic
+              if (!conn.policy.throttler_messages) {
+                return seastar::now();
+              }
+              // TODO: message throttler
+              ceph_assert(false);
+              return seastar::now();
+            }).then([this, msg_size] {
+              // throttle_bytes() logic
+              if (!conn.policy.throttler_bytes) {
+                return seastar::now();
+              }
+              if (!msg_size) {
+                return seastar::now();
+              }
+              logger().trace("{} wants {} bytes from policy throttler {}/{}",
+                             conn, msg_size,
+                             conn.policy.throttler_bytes->get_current(),
+                             conn.policy.throttler_bytes->get_max());
+              return conn.policy.throttler_bytes->get(msg_size);
+            }).then([this, msg_size] {
+              // TODO: throttle_dispatch_queue() logic
+              utime_t throttle_stamp{seastar::lowres_system_clock::now()};
+              return read_message(throttle_stamp, msg_size);
+            });
+          }
+          case Tag::ACK:
+            return frame_assembler.read_frame_payload(
+            ).then([this](auto payload) {
+              // handle_message_ack() logic
+              auto ack = AckFrame::Decode(payload->back());
+              logger().debug("{} GOT AckFrame: seq={}", conn, ack.seq());
+              ack_out_sent(ack.seq());
+            });
+          case Tag::KEEPALIVE2:
+            return frame_assembler.read_frame_payload(
+            ).then([this](auto payload) {
+              // handle_keepalive2() logic
+              auto keepalive_frame = KeepAliveFrame::Decode(payload->back());
+              logger().debug("{} GOT KeepAliveFrame: timestamp={}",
+                             conn, keepalive_frame.timestamp());
+              notify_keepalive_ack(keepalive_frame.timestamp());
+              set_last_keepalive(seastar::lowres_system_clock::now());
+            });
+          case Tag::KEEPALIVE2_ACK:
+            return frame_assembler.read_frame_payload(
+            ).then([this](auto payload) {
+              // handle_keepalive2_ack() logic
+              auto keepalive_ack_frame = KeepAliveFrameAck::Decode(payload->back());
+              auto _last_keepalive_ack =
+                seastar::lowres_system_clock::time_point{keepalive_ack_frame.timestamp()};
+              set_last_keepalive_ack(_last_keepalive_ack);
+              logger().debug("{} GOT KeepAliveFrameAck: timestamp={}",
+                             conn, _last_keepalive_ack);
+            });
+          default: {
+            unexpected_tag(ret.tag, conn, "execute_ready");
+            return seastar::now();
+          }
+        }
+      });
+    }).handle_exception([this] (std::exception_ptr eptr) {
+      if (state != state_t::READY) {
+        logger().info("{} execute_ready(): protocol aborted at {} -- {}",
+                      conn, get_state_name(state), eptr);
+        assert(state == state_t::REPLACING ||
+               state == state_t::CLOSING);
+        return;
+      }
+      fault(false, "execute_ready()", eptr);
+    });
+  });
 }
 
 // STANDBY state
 
 void ProtocolV2::execute_standby()
 {
-  ceph_assert_always(!is_socket_valid);
-  trigger_state(state_t::STANDBY, io_state_t::delay, false);
+  trigger_state(state_t::STANDBY, out_state_t::delay, false);
+  frame_assembler.shutdown_socket();
 }
 
 void ProtocolV2::notify_out()
@@ -1844,9 +2069,9 @@ void ProtocolV2::notify_out()
 
 void ProtocolV2::execute_wait(bool max_backoff)
 {
-  ceph_assert_always(!is_socket_valid);
-  trigger_state(state_t::WAIT, io_state_t::delay, false);
-  gated_execute("execute_wait", conn, [this, max_backoff] {
+  trigger_state(state_t::WAIT, out_state_t::delay, false);
+  frame_assembler.shutdown_socket();
+  gated_execute("execute_wait", [this, max_backoff] {
     double backoff = protocol_timer.last_dur();
     if (max_backoff) {
       backoff = local_conf().get_val<double>("ms_max_backoff");
@@ -1882,11 +2107,9 @@ void ProtocolV2::execute_wait(bool max_backoff)
 
 void ProtocolV2::execute_server_wait()
 {
-  ceph_assert_always(is_socket_valid);
-  trigger_state(state_t::SERVER_WAIT, io_state_t::none, false);
-  gated_execute("execute_server_wait", conn, [this] {
-    return frame_assembler->read_exactly(1
-    ).then([this](auto bl) {
+  trigger_state(state_t::SERVER_WAIT, out_state_t::none, false);
+  gated_execute("execute_server_wait", [this] {
+    return frame_assembler.read_exactly(1).then([this] (auto bl) {
       logger().warn("{} SERVER_WAIT got read, abort", conn);
       abort_in_fault();
     }).handle_exception([this](std::exception_ptr eptr) {
@@ -1970,10 +2193,7 @@ void ProtocolV2::do_close(
   if (f_accept_new) {
     (*f_accept_new)();
   }
-  if (is_socket_valid) {
-    frame_assembler->shutdown_socket();
-    is_socket_valid = false;
-  }
+  frame_assembler.shutdown_socket();
   assert(!gate.is_closed());
   auto handshake_closed = gate.close();
   auto io_closed = io_handler.close_io(
@@ -1984,13 +2204,7 @@ void ProtocolV2::do_close(
   closed_clean_fut = seastar::when_all(
       std::move(handshake_closed), std::move(io_closed)
   ).discard_result().then([this] {
-    ceph_assert_always(!exit_io.has_value());
-    if (has_socket) {
-      ceph_assert_always(frame_assembler);
-      return frame_assembler->close_shutdown_socket();
-    } else {
-      return seastar::now();
-    }
+    return frame_assembler.reset_and_close_socket(false);
   }).then([this] {
     logger().debug("{} closed!", conn);
     messenger.closed_conn(

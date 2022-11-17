@@ -6,7 +6,7 @@
 #include <seastar/core/shared_future.hh>
 #include <seastar/core/sleep.hh>
 
-#include "io_handler.h"
+#include "Protocol.h"
 
 namespace crimson::net {
 
@@ -120,6 +120,17 @@ private:
              const char *where,
              std::exception_ptr eptr);
 
+ private:
+  seastar::future<FrameAssemblerV2::read_main_t> read_main_preamble();
+
+  template <class F>
+  ceph::bufferlist get_buffer(F &tx_frame);
+
+  template <class F>
+  seastar::future<> write_flush_frame(F &tx_frame);
+
+  void fault(bool backoff, const char* func_name, std::exception_ptr eptr);
+
   void reset_session(bool is_full);
   seastar::future<std::tuple<entity_type_t, entity_addr_t>>
   banner_exchange(bool is_connect);
@@ -192,7 +203,8 @@ private:
                          uint64_t new_msg_seq);
 
   // READY
-  void execute_ready();
+  seastar::future<> read_message(utime_t throttle_stamp, std::size_t msg_size);
+  void execute_ready(bool dispatch_connect);
 
   // STANDBY
   void execute_standby();

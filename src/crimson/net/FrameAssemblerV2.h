@@ -12,8 +12,6 @@
 namespace crimson::net {
 
 class SocketConnection;
-class FrameAssemblerV2;
-using FrameAssemblerV2Ref = std::unique_ptr<FrameAssemblerV2>;
 
 class FrameAssemblerV2 {
 public:
@@ -45,7 +43,7 @@ public:
 
   mover_t to_replace();
 
-  seastar::future<> replace_by(mover_t &&);
+  void replace_by(mover_t &&);
 
   /*
    * auth signature interfaces
@@ -63,8 +61,7 @@ public:
    * socket maintainence interfaces
    */
 
-  // the socket exists and not shutdown
-  bool is_socket_valid() const;
+  bool has_socket() const;
 
   void set_socket(SocketRef &&);
 
@@ -72,9 +69,7 @@ public:
 
   void shutdown_socket();
 
-  seastar::future<> replace_shutdown_socket(SocketRef &&);
-
-  seastar::future<> close_shutdown_socket();
+  seastar::future<> reset_and_close_socket(bool do_reset=true);
 
   /*
    * socket read and write interfaces
@@ -108,9 +103,6 @@ public:
 
   template <class F>
   ceph::bufferlist get_buffer(F &tx_frame) {
-#ifdef UNIT_TESTS_BUILT
-    intercept_frame(F::tag, true);
-#endif
     auto bl = tx_frame.get_buffer(tx_frame_asm);
     log_main_preamble(bl);
     return bl;
@@ -122,16 +114,8 @@ public:
     return write_flush(std::move(bl));
   }
 
-  static FrameAssemblerV2Ref create(SocketConnection &conn);
-
 private:
-  bool has_socket() const;
-
   void log_main_preamble(const ceph::bufferlist &bl);
-
-#ifdef UNIT_TESTS_BUILT
-  void intercept_frame(ceph::msgr::v2::Tag, bool is_write);
-#endif
 
   SocketConnection &conn;
 

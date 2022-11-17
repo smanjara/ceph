@@ -6,10 +6,6 @@
 #include "Errors.h"
 #include "SocketConnection.h"
 
-#ifdef UNIT_TESTS_BUILT
-#include "Interceptor.h"
-#endif
-
 using ceph::msgr::v2::FrameAssembler;
 using ceph::msgr::v2::FrameError;
 using ceph::msgr::v2::preamble_block_t;
@@ -29,20 +25,6 @@ namespace crimson::net {
 FrameAssemblerV2::FrameAssemblerV2(SocketConnection &_conn)
   : conn{_conn}
 {}
-
-#ifdef UNIT_TESTS_BUILT
-// should be consistent to intercept() in ProtocolV2.cc
-void FrameAssemblerV2::intercept_frame(Tag tag, bool is_write)
-{
-  assert(has_socket());
-  if (conn.interceptor) {
-    auto type = is_write ? bp_type_t::WRITE : bp_type_t::READ;
-    auto action = conn.interceptor->intercept(
-        conn, Breakpoint{tag, type});
-    socket->set_trap(type, action, &conn.interceptor->blocker);
-  }
-}
-#endif
 
 void FrameAssemblerV2::set_is_rev1(bool _is_rev1)
 {
@@ -68,7 +50,7 @@ void FrameAssemblerV2::reset_handlers()
 FrameAssemblerV2::mover_t
 FrameAssemblerV2::to_replace()
 {
-  assert(is_socket_valid());
+  assert(has_socket());
   socket = nullptr;
   return mover_t{
       std::move(conn.socket),
@@ -76,19 +58,14 @@ FrameAssemblerV2::to_replace()
       std::move(session_comp_handlers)};
 }
 
-seastar::future<> FrameAssemblerV2::replace_by(FrameAssemblerV2::mover_t &&mover)
+void FrameAssemblerV2::replace_by(FrameAssemblerV2::mover_t &&mover)
 {
+  set_socket(std::move(mover.socket));
   record_io = false;
   rxbuf.clear();
   txbuf.clear();
   session_stream_handlers = std::move(mover.session_stream_handlers);
   session_comp_handlers = std::move(mover.session_comp_handlers);
-  if (has_socket()) {
-    return replace_shutdown_socket(std::move(mover.socket));
-  } else {
-    set_socket(std::move(mover.socket));
-    return seastar::now();
-  }
 }
 
 void FrameAssemblerV2::start_recording()
@@ -112,17 +89,13 @@ bool FrameAssemblerV2::has_socket() const
   return socket != nullptr;
 }
 
-bool FrameAssemblerV2::is_socket_valid() const
-{
-  return has_socket() && !socket->is_shutdown();
-}
-
-void FrameAssemblerV2::set_socket(SocketRef &&new_socket)
+void FrameAssemblerV2::set_socket(SocketRef &&_socket)
 {
   assert(!has_socket());
-  socket = new_socket.get();
-  conn.socket = std::move(new_socket);
-  assert(is_socket_valid());
+  ceph_assert_always(!conn.socket);
+  socket = _socket.get();
+  conn.socket = std::move(_socket);
+  assert(has_socket());
 }
 
 void FrameAssemblerV2::learn_socket_ephemeral_port_as_connector(uint16_t port)
@@ -133,26 +106,23 @@ void FrameAssemblerV2::learn_socket_ephemeral_port_as_connector(uint16_t port)
 
 void FrameAssemblerV2::shutdown_socket()
 {
-  assert(is_socket_valid());
-  socket->shutdown();
+  if (has_socket()) {
+    socket->shutdown();
+  }
 }
 
-seastar::future<> FrameAssemblerV2::replace_shutdown_socket(SocketRef &&new_socket)
+seastar::future<> FrameAssemblerV2::reset_and_close_socket(bool do_reset)
 {
-  assert(has_socket());
-  assert(socket->is_shutdown());
-  socket = nullptr;
-  auto old_socket = std::move(conn.socket);
-  set_socket(std::move(new_socket));
-  return old_socket->close(
-  ).then([sock = std::move(old_socket)] {});
-}
-
-seastar::future<> FrameAssemblerV2::close_shutdown_socket()
-{
-  assert(has_socket());
-  assert(socket->is_shutdown());
-  return socket->close();
+  if (!has_socket()) {
+    return seastar::now();
+  }
+  if (do_reset) {
+    socket = nullptr;
+    return conn.socket->close(
+    ).then([sock = std::move(conn.socket)] {});
+  } else {
+    return socket->close();
+  }
 }
 
 seastar::future<Socket::tmp_buf>
@@ -221,9 +191,6 @@ FrameAssemblerV2::read_main_preamble()
     try {
       rx_preamble.append(buffer::create(std::move(bl)));
       const Tag tag = rx_frame_asm.disassemble_preamble(rx_preamble);
-#ifdef UNIT_TESTS_BUILT
-      intercept_frame(tag, false);
-#endif
       return read_main_t{tag, &rx_frame_asm};
     } catch (FrameError& e) {
       logger().warn("{} read_main_preamble: {}", conn, e.what());
@@ -292,11 +259,6 @@ void FrameAssemblerV2::log_main_preamble(const ceph::bufferlist &bl)
   logger().trace("{} SEND({}) frame: tag={}, num_segments={}, crc={}",
                  conn, bl.length(), (int)main_preamble->tag,
                  (int)main_preamble->num_segments, main_preamble->crc);
-}
-
-FrameAssemblerV2Ref FrameAssemblerV2::create(SocketConnection &conn)
-{
-  return std::make_unique<FrameAssemblerV2>(conn);
 }
 
 } // namespace crimson::net
