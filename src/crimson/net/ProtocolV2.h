@@ -65,6 +65,37 @@ private:
     }
   }
 
+  void start_accept(SocketRef&& socket,
+                    const entity_addr_t& peer_addr) override;
+
+  void print_conn(std::ostream&) const final;
+
+ private:
+  void notify_out() override;
+
+  void notify_out_fault(const char *, std::exception_ptr) override;
+
+ private:
+  SocketMessenger &messenger;
+
+  bool has_socket = false;
+
+  // the socket exists and it is not shutdown
+  bool is_socket_valid = false;
+
+  AuthConnectionMetaRef auth_meta;
+
+  crimson::common::Gated gate;
+
+  bool closed = false;
+
+  // become valid only after closed == true
+  seastar::shared_future<> closed_clean_fut;
+
+#ifdef UNIT_TESTS_BUILT
+  bool closed_clean = false;
+
+#endif
   enum class state_t {
     NONE = 0,
     ACCEPTING,
@@ -94,9 +125,19 @@ private:
 
   void trigger_state(state_t state, IOHandler::io_state_t io_state, bool reentrant);
 
-  template <typename Func, typename T>
-  void gated_execute(const char *what, T &who, Func &&func) {
-    gate.dispatch_in_background(what, who, [this, &who, &func] {
+  uint64_t peer_supported_features = 0;
+
+  uint64_t client_cookie = 0;
+  uint64_t server_cookie = 0;
+  uint64_t global_seq = 0;
+  uint64_t peer_global_seq = 0;
+  uint64_t connect_seq = 0;
+
+  seastar::future<> execution_done = seastar::now();
+
+  template <typename Func>
+  void gated_execute(const char* what, Func&& func) {
+    gate.dispatch_in_background(what, *this, [this, &func] {
       if (!execution_done.available()) {
         // discard the unready future
         gate.dispatch_in_background(
@@ -203,8 +244,7 @@ private:
                          uint64_t new_msg_seq);
 
   // READY
-  seastar::future<> read_message(utime_t throttle_stamp, std::size_t msg_size);
-  void execute_ready(bool dispatch_connect);
+  void execute_ready();
 
   // STANDBY
   void execute_standby();

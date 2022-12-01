@@ -52,7 +52,7 @@ class Protocol {
       std::optional<utime_t> maybe_keepalive_ack,
       bool require_ack) = 0;
 
-  virtual void notify_out() = 0;
+  virtual void notify_out_fault(const char *where, std::exception_ptr) = 0;
 
 // the write state-machine
  public:
@@ -121,16 +121,7 @@ class Protocol {
     out_state_changed = seastar::shared_promise<>();
   }
 
-  seastar::future<> wait_out_exit_dispatching() {
-    if (out_exit_dispatching) {
-      return out_exit_dispatching->get_shared_future();
-    }
-    return seastar::now();
-  }
-
-  void notify_keepalive_ack(utime_t keepalive_ack);
-
-  void notify_ack();
+  seastar::future<> wait_io_exit_dispatching();
 
   void requeue_out_sent_up_to(seq_num_t seq);
 
@@ -146,22 +137,8 @@ class Protocol {
     return is_out_queued() || !out_sent_msgs.empty();
   }
 
-  void ack_out_sent(seq_num_t seq);
-
-  void set_last_keepalive(clock_t::time_point when) {
-    last_keepalive = when;
-  }
-
   seq_num_t get_in_seq() const {
     return in_seq;
-  }
-
-  void set_in_seq(seq_num_t _in_seq) {
-    in_seq = _in_seq;
-  }
-
-  seq_num_t increment_out_seq() {
-    return ++out_seq;
   }
 
   ChainedDispatchers& dispatchers;
@@ -189,6 +166,12 @@ class Protocol {
       bool require_ack);
 
   void notify_out_dispatch();
+
+  void ack_out_sent(seq_num_t seq);
+
+  seastar::future<> read_message(utime_t throttle_stamp, std::size_t msg_size);
+
+  void do_in_dispatch();
 
   crimson::common::Gated gate;
 
@@ -226,6 +209,8 @@ class Protocol {
   /*
    * in states for reading
    */
+
+  std::optional<seastar::shared_promise<>> in_exit_dispatching;
 
   /// the seq num of the last received message
   seq_num_t in_seq = 0;
