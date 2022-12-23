@@ -115,53 +115,73 @@ class to_ceph_volume(object):
                 raise ValueError('Number of data devices must match number of '
                                  'wal devices for raw mode osds')
 
-        for d in devices.keys():
-            data_devices: Optional[List[str]] = devices.get(d)
-            if not data_devices:
-                continue
+        # For this use case we don't apply any custom crush_device_classes
+        # Note that filestore is not supported anymore by the DriveGroupSpec
+        if self.spec.objectstore == 'filestore':
+            # for lvm batch we can just do all devices in one command
+            devs: List = sum(list(devices.values()), [])
 
-            if self.spec.method == 'raw':
-                assert self.spec.objectstore == 'bluestore'
-                # ceph-volume raw prepare only support 1:1 ratio of data to db/wal devices
-                # for raw prepare each data device needs its own prepare command
-                dev_counter = 0
-                # reversing the lists as we're assigning db_devices sequentially
-                db_devices.reverse()
-                wal_devices.reverse()
+            cmd = "lvm batch --no-auto"
 
-                while dev_counter < len(data_devices):
-                    cmd = "raw prepare --bluestore"
-                    cmd += " --data {}".format(data_devices[dev_counter])
+            cmd += " {}".format(" ".join(devs))
+
+            if self.spec.journal_size:
+                cmd += " --journal-size {}".format(self.spec.journal_size)
+
+            if journal_devices:
+                cmd += " --journal-devices {}".format(
+                        ' '.join(journal_devices))
+
+            cmd += " --filestore"
+            cmds.append(cmd)
+        else:
+            for d in devices.keys():
+                data_devices: Optional[List[str]] = devices.get(d)
+                if not data_devices:
+                    continue
+
+                if self.spec.method == 'raw':
+                    assert self.spec.objectstore == 'bluestore'
+                    # ceph-volume raw prepare only support 1:1 ratio of data to db/wal devices
+                    # for raw prepare each data device needs its own prepare command
+                    dev_counter = 0
+                    # reversing the lists as we're assigning db_devices sequentially
+                    db_devices.reverse()
+                    wal_devices.reverse()
+
+                    while dev_counter < len(data_devices):
+                        cmd = "raw prepare --bluestore"
+                        cmd += " --data {}".format(data_devices[dev_counter])
+                        if db_devices:
+                            cmd += " --block.db {}".format(db_devices.pop())
+                        if wal_devices:
+                            cmd += " --block.wal {}".format(wal_devices.pop())
+                        if d in self._supported_device_classes:
+                            cmd += " --crush-device-class {}".format(d)
+
+                        cmds.append(cmd)
+                        dev_counter += 1
+
+                elif self.spec.objectstore == 'bluestore':
+                    # for lvm batch we can just do all devices in one command
+
+                    cmd = "lvm batch --no-auto {}".format(" ".join(data_devices))
+
                     if db_devices:
-                        cmd += " --block.db {}".format(db_devices.pop())
+                        cmd += " --db-devices {}".format(" ".join(db_devices))
+
                     if wal_devices:
-                        cmd += " --block.wal {}".format(wal_devices.pop())
+                        cmd += " --wal-devices {}".format(" ".join(wal_devices))
+
+                    if self.spec.block_wal_size:
+                        cmd += " --block-wal-size {}".format(self.spec.block_wal_size)
+
+                    if self.spec.block_db_size:
+                        cmd += " --block-db-size {}".format(self.spec.block_db_size)
+
                     if d in self._supported_device_classes:
                         cmd += " --crush-device-class {}".format(d)
-
                     cmds.append(cmd)
-                    dev_counter += 1
-
-            elif self.spec.objectstore == 'bluestore':
-                # for lvm batch we can just do all devices in one command
-
-                cmd = "lvm batch --no-auto {}".format(" ".join(data_devices))
-
-                if db_devices:
-                    cmd += " --db-devices {}".format(" ".join(db_devices))
-
-                if wal_devices:
-                    cmd += " --wal-devices {}".format(" ".join(wal_devices))
-
-                if self.spec.block_wal_size:
-                    cmd += " --block-wal-size {}".format(self.spec.block_wal_size)
-
-                if self.spec.block_db_size:
-                    cmd += " --block-db-size {}".format(self.spec.block_db_size)
-
-                if d in self._supported_device_classes:
-                    cmd += " --crush-device-class {}".format(d)
-                cmds.append(cmd)
 
         for i in range(len(cmds)):
             if self.spec.encrypted:
