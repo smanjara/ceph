@@ -2080,21 +2080,8 @@ public:
   int operate(const DoutPrefixProvider *dpp) override {
     reenter(this) {
       yield {
-        //create watch object for sync lock bids
-        const auto& control_pool = sync_env->store->svc()->zone->get_zone_params().control_pool;
-        auto control_obj = rgw_raw_obj{control_pool, meta_sync_bids_oid};
-
-        auto bid_manager = rgw::sync_fairness::create_rados_bid_manager(
-            sync_env->store, control_obj, sync_status.sync_info.num_shards);
-        ret = bid_manager->start();
-        if (ret < 0) {
-          tn->log(0, SSTR("ERROR: failed to start bidding manager " << ret));
-          return ret;
-        }
-
         //cr for broadcasting sync lock notifications in the background
-        sync_env->bid_manager = bid_manager.get();
-        call(new RGWMetaSyncShardNotifyCR(sync_env, tn));
+        spawn(new RGWMetaSyncShardNotifyCR(sync_env, tn), false);
         if (retcode < 0) {
           tn->log(5, SSTR("ERROR: failed to notify bidding information" << retcode));
           continue;
@@ -2390,7 +2377,19 @@ int RGWRemoteMetaLog::run_sync(const DoutPrefixProvider *dpp, optional_yield y)
   if (num_shards != mdlog_info.num_shards) {
     ldpp_dout(dpp, -1) << "ERROR: can't sync, mismatch between num shards, master num_shards=" << mdlog_info.num_shards << " local num_shards=" << num_shards << dendl;
     return -EINVAL;
-  } 
+  }
+
++  // construct and start the bid manager for sync fairness
++  const auto& control_pool = store->svc()->zone->get_zone_params().control_pool;
++  auto control_obj = rgw_raw_obj{control_pool, meta_sync_bids_oid};
++
++  auto bid_manager = rgw::sync_fairness::create_rados_bid_manager(
++      store, control_obj, num_shards);
++  r = bid_manager->start();
++  if (r < 0) {
++    return r;
++  }
++  sync_env.bid_manager = bid_manager.get();
 
   RGWPeriodHistory::Cursor cursor;
   do {
