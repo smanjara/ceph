@@ -4444,36 +4444,58 @@ class RGWBucketFullSyncCR : public RGWCoroutine {
       rules = _rules;
     }
 
-    bool revalidate_marker(rgw_obj_key *marker) {
+    bool revalidate_marker(RGWDataSyncCtx *sc, rgw_obj_key *marker) {
+      ldout(sc->cct, 20) << "REVALIDATE_MARKER: first check: marker name: " << marker->name << dendl;
       if (cur_prefix &&
           boost::starts_with(marker->name, *cur_prefix)) {
+        ldout(sc->cct, 20) << "REVALIDATE_MARKER: cur_prefix is: " << *cur_prefix << dendl;
         return true;
       }
+
       if (!rules) {
+        ldout(sc->cct, 20) << "REVALIDATE_MARKER: no rules found on bucket" << dendl;
         return false;
       }
-      iter = rules->prefix_search(marker->name);
+
+      auto prefix_iter = rules->prefix_refs.begin();
+      for (; prefix_iter != rules->prefix_refs.end(); ++prefix_iter) {
+        ldout(sc->cct, 20) << "REVALIDATE_MARKER: rules prefix refs: " << prefix_iter->first << dendl;
+      }
+
+      iter = rules->prefix_search(sc->cct, marker->name);
       if (iter == rules->prefix_end()) {
+        ldout(sc->cct, 20) << "REVALIDATE_MARKER: iter not in prefix rules " << dendl;
         return false;
       }
+      ldout(sc->cct, 20) << "REVALIDATE_MARKER: second check: marker name = " << marker->name << "; iter = " << iter->first << dendl;
       cur_prefix = iter->first;
       marker->name = *cur_prefix;
       marker->instance.clear();
+      ldout(sc->cct, 20) << "REVALIDATE_MARKER: third check: marker name " << marker->name << dendl;
       return true;
     }
 
-    bool check_key_handled(const rgw_obj_key& key) {
+    bool check_key_handled(RGWDataSyncCtx *sc, const rgw_obj_key& key) {
       if (!rules) {
+        ldout(sc->cct, 20) << "CHECK_KEY_HANDLED: no rules found on bucket" << dendl;
         return false;
       }
       if (cur_prefix &&
           boost::starts_with(key.name, *cur_prefix)) {
+        ldout(sc->cct, 20) << "CHECK_KEY_HANDLED: cur_prefix is " << *cur_prefix << dendl;
         return true;
       }
-      iter = rules->prefix_search(key.name);
+
+      auto prefix_iter = rules->prefix_refs.begin();
+      for (; prefix_iter != rules->prefix_refs.end(); ++prefix_iter) {
+        ldout(sc->cct, 20) << "CHECK_KEY_HANDLED: rules prefix refs: " << prefix_iter->first << dendl;
+      }
+      iter = rules->prefix_search(sc->cct, key.name);
       if (iter == rules->prefix_end()) {
+        ldout(sc->cct, 20) << "CHECK_KEY_HANDLED: key not in prefix rules " << dendl;
         return false;
       }
+      ldout(sc->cct, 20) << "CHECK_KEY_HANDLED: second check: iter = " << iter->first << "; key = " << key.name << dendl;
       cur_prefix = iter->first;
       return boost::starts_with(key.name, iter->first);
     }
@@ -4522,7 +4544,7 @@ int RGWBucketFullSyncCR::operate(const DoutPrefixProvider *dpp)
       set_status("listing remote bucket");
       tn->log(20, "listing bucket for full sync");
 
-      if (!prefix_handler.revalidate_marker(&list_marker)) {
+      if (!prefix_handler.revalidate_marker(sc, &list_marker)) {
         set_status() << "finished iterating over all available prefixes: last marker=" << list_marker;
         tn->log(20, SSTR("finished iterating over all available prefixes: last marker=" << list_marker));
         break;
@@ -4554,7 +4576,7 @@ int RGWBucketFullSyncCR::operate(const DoutPrefixProvider *dpp)
             << bucket_shard_str{bs} << "/" << entries_iter->key));
         entry = &(*entries_iter);
         list_marker = entries_iter->key;
-        if (!prefix_handler.check_key_handled(entries_iter->key)) {
+        if (!prefix_handler.check_key_handled(sc, entries_iter->key)) {
           set_status() << "skipping entry due to policy rules: " << entries_iter->key;
           tn->log(20, SSTR("skipping entry due to policy rules: " << entries_iter->key));
           continue;
@@ -4768,11 +4790,11 @@ public:
     target_location_key = sync_pipe.info.dest_bucket.get_key();
   }
 
-  bool check_key_handled(const rgw_obj_key& key) {
+  bool check_key_handled(RGWDataSyncCtx *sc, const rgw_obj_key& key) {
     if (!rules) {
       return false;
     }
-    auto iter = rules->prefix_search(key.name);
+    auto iter = rules->prefix_search(sc->cct, key.name);
     if (iter == rules->prefix_end()) {
       return false;
     }
@@ -4892,7 +4914,7 @@ int RGWBucketShardIncrementalSyncCR::operate(const DoutPrefixProvider *dpp)
           continue;
         }
 
-        if (!check_key_handled(key)) {
+        if (!check_key_handled(sc, key)) {
           set_status() << "skipping entry due to policy rules: " << entry->object;
           tn->log(20, SSTR("skipping entry due to policy rules: " << entry->object));
           marker_tracker.try_update_high_marker(cur_id, 0, entry->timestamp);

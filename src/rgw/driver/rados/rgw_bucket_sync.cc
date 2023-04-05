@@ -449,20 +449,24 @@ bool RGWBucketSyncFlowManager::pipe_rules::find_obj_params(const rgw_obj_key& ke
  * return either the current prefix for s, or the next one if s is not within a prefix
  */
 
-RGWBucketSyncFlowManager::pipe_rules::prefix_map_t::const_iterator RGWBucketSyncFlowManager::pipe_rules::prefix_search(const std::string& s) const
+RGWBucketSyncFlowManager::pipe_rules::prefix_map_t::const_iterator RGWBucketSyncFlowManager::pipe_rules::prefix_search(CephContext* cct, const std::string& s) const
 {
+  ldout(cct, 20) << "PREFIX_SEARCH: running prefix_search" << dendl;
   if (prefix_refs.empty()) {
+    ldout(cct, 20) << "PREFIX_SEARCH: prefix_refs empty " << dendl;
     return prefix_refs.end();
   }
   auto next = prefix_refs.upper_bound(s);
   auto iter = next;
+
   if (iter != prefix_refs.begin()) {
     --iter;
   }
   if (!boost::starts_with(s, iter->first)) {
+    ldout(cct, 20) << "PREFIX_SEARCH: returning 'next' " << dendl;
     return next;
   }
-
+  ldout(cct, 20) << "PREFIX_SEARCH: returning 'iter' " << dendl;
   return iter;
 }
 

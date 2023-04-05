@@ -162,7 +162,7 @@ public:
     prefix_map_t::const_iterator prefix_begin() const {
       return prefix_refs.begin();
     }
-    prefix_map_t::const_iterator prefix_search(const std::string& s) const;
+    prefix_map_t::const_iterator prefix_search(CephContext* cct, const std::string& s) const;
     prefix_map_t::const_iterator prefix_end() const {
       return prefix_refs.end();
     }
