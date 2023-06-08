@@ -1761,6 +1761,8 @@ public:
         sync_marker.marker.clear();
       }
       mdlog_marker = sync_marker.marker;
+      ldpp_dout(sync_env->dpp, 10) << "before: mdlog_marker " << mdlog_marker
+            << "sync_marker " << sync_marker.marker << "max_marker " << max_marker << dendl;
       set_marker_tracker(new RGWMetaSyncShardMarkerTrack(sync_env,
                                                          sync_env->shard_obj_name(shard_id),
                                                          sync_marker, tn));
@@ -1773,6 +1775,9 @@ public:
        * period_marker: the last marker before the next period begins (optional)
        */
       marker = max_marker = sync_marker.marker;
+
+      ldpp_dout(sync_env->dpp, 10) << "after: mdlog_marker " << mdlog_marker
+            << "sync_marker " << sync_marker.marker << "max_marker " << max_marker << dendl;
       /* inc sync */
       do {
         if (!lease_cr->is_locked()) {
@@ -1788,15 +1793,17 @@ public:
         }
 
 #define INCREMENTAL_MAX_ENTRIES 100
-        ldpp_dout(sync_env->dpp, 20) << __func__ << ":" << __LINE__ << ": shard_id=" << shard_id << " mdlog_marker=" << mdlog_marker << " sync_marker.marker=" << sync_marker.marker << " period_marker=" << period_marker << " truncated=" << truncated << dendl;
+        ldpp_dout(sync_env->dpp, 20) << __func__ << ":" << __LINE__ << ": shard_id=" << shard_id << " mdlog_marker=" << mdlog_marker 
+            << "max_marker=" << max_marker << " sync_marker.marker=" << sync_marker.marker << " period_marker=" << period_marker << dendl;
         if (!period_marker.empty() && period_marker <= mdlog_marker) {
           tn->log(10, SSTR("finished syncing current period: mdlog_marker=" << mdlog_marker << " sync_marker=" << sync_marker.marker << " period_marker=" << period_marker));
           done_with_period = true;
           break;
         }
-	if (mdlog_marker <= max_marker || !truncated) {
+	if (mdlog_marker <= max_marker) {
 	  /* we're at the tip, try to bring more entries */
           ldpp_dout(sync_env->dpp, 20) << __func__ << ":" << __LINE__ << ": shard_id=" << shard_id << " syncing mdlog for shard_id=" << shard_id << dendl;
+          ldpp_dout(sync_env->dpp, 20) << " passing truncated " << truncated << dendl;
           yield call(new RGWCloneMetaLogCoroutine(sync_env, mdlog,
                                                   period, shard_id,
                                                   mdlog_marker, &mdlog_marker));
@@ -1808,7 +1815,6 @@ public:
           *reset_backoff = false; // back off and try again later
           return retcode;
         }
-        truncated = true;
         *reset_backoff = true; /* if we got to this point, all systems function */
 	if (mdlog_marker > max_marker) {
           tn->set_flag(RGW_SNS_FLAG_ACTIVE); /* actually have entries to sync */
@@ -2042,6 +2048,7 @@ public:
           for (const auto& m : sync_status.sync_markers) {
             uint32_t shard_id = m.first;
             auto& marker = m.second;
+            tn->log(1, SSTR("shard_id=" << shard_id << " sync marker=" << marker.marker));
 
             std::string period_marker;
             if (next) {
@@ -2058,7 +2065,7 @@ public:
             using ShardCR = RGWMetaSyncShardControlCR;
             auto cr = new ShardCR(sync_env, pool, period_id, realm_epoch,
                                   mdlog, shard_id, marker,
-                                  std::move(period_marker), tn);     
+                                  std::move(period_marker), tn);
             auto stack = spawn(cr, false);
             shard_crs[shard_id] = RefPair{cr, stack};
           }
@@ -2403,6 +2410,7 @@ int RGWCloneMetaLogCoroutine::operate(const DoutPrefixProvider *dpp)
         ldpp_dout(dpp, 20) << __func__ << ": shard_id=" << shard_id << ": storing mdlog entries" << dendl;
         return state_store_mdlog_entries();
       }
+      ldpp_dout(dpp, 20) << "truncated = " << truncated << dendl;
     } while (truncated);
     yield {
       ldpp_dout(dpp, 20) << __func__ << ": shard_id=" << shard_id << ": storing mdlog entries complete" << dendl;
@@ -2427,7 +2435,10 @@ int RGWCloneMetaLogCoroutine::state_read_shard_status()
   completion.reset(new RGWMetadataLogInfoCompletion(
     [this](int ret, const cls_log_header& header) {
       if (ret < 0) {
-        if (ret != -ENOENT) {
+        if (ret == -ENOENT) {
+          ldpp_dout(sync_env->dpp, 1) << "ERROR: mdlog object does not exist "
+                                      << cpp_strerror(ret) << dendl;
+        } else if (ret != -ENOENT) {
           ldpp_dout(sync_env->dpp, 1) << "ERROR: failed to read mdlog info with "
                                       << cpp_strerror(ret) << dendl;
         }

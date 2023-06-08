@@ -674,10 +674,10 @@ def test_versioned_object_incremental_sync():
     zonegroup = realm.master_zonegroup()
     zonegroup_conns = ZonegroupConns(zonegroup)
     buckets, zone_bucket = create_bucket_per_zone(zonegroup_conns)
-
     # enable versioning
     for _, bucket in zone_bucket:
         bucket.configure_versioning(True)
+
 
     zonegroup_meta_checkpoint(zonegroup)
 
