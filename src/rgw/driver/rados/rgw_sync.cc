@@ -1942,34 +1942,6 @@ public:
   }
 };
 
-class RGWMetaSyncShardNotifyCR : public RGWCoroutine {
-  RGWMetaSyncEnv *sync_env;
-  RGWSyncTraceNodeRef tn;
-
-public:
-  RGWMetaSyncShardNotifyCR(RGWMetaSyncEnv *_sync_env, RGWSyncTraceNodeRef& _tn)
-    : RGWCoroutine(_sync_env->cct),
-      sync_env(_sync_env), tn(_tn) {}
-
-  int operate(const DoutPrefixProvider* dpp) override
-  {
-    reenter(this) {
-      for (;;) {
-        set_status("sync lock notification");
-        yield call(sync_env->bid_manager->notify_cr());
-        if (retcode < 0) {
-          tn->log(5, SSTR("ERROR: failed to notify bidding information" << retcode));
-          return set_cr_error(retcode);
-        }
-
-        set_status("sleeping");
-        yield wait(utime_t(cct->_conf->rgw_sync_lease_period, 0));
-      }
-
-    }
-    return 0;
-  }
-};
 
 class RGWMetaSyncCR : public RGWCoroutine {
   RGWMetaSyncEnv *sync_env;
@@ -2005,7 +1977,7 @@ public:
     reenter(this) {
       yield {
         ldpp_dout(dpp, 10) << "broadcast sync lock notify" << dendl;
-        notify_stack.reset(spawn(new RGWMetaSyncShardNotifyCR(sync_env, tn), false));
+        notify_stack.reset(spawn(new RGWSyncShardNotifyCR(sync_env->cct, sync_env->bid_manager, tn), false));
       }
 
       // loop through one period at a time
@@ -2562,6 +2534,24 @@ int RGWCloneMetaLogCoroutine::state_store_mdlog_entries()
 int RGWCloneMetaLogCoroutine::state_store_mdlog_entries_complete()
 {
   return set_cr_done();
+}
+
+int RGWSyncShardNotifyCR::operate(const DoutPrefixProvider* dpp) {
+  reenter(this) {
+    for (;;) {
+      set_status("sync lock notification");
+      yield call(bid_manager->notify_cr());
+      if (retcode < 0) {
+        tn->log(5, SSTR("ERROR: failed to notify bidding information" << retcode));
+        return set_cr_error(retcode);
+      }
+
+      set_status("sleeping");
+      yield wait(utime_t(cct->_conf->rgw_sync_lease_period, 0));
+    }
+
+  }
+  return 0;
 }
 
 void rgw_meta_sync_info::decode_json(JSONObj *obj)

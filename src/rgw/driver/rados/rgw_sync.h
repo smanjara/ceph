@@ -533,6 +533,20 @@ class RGWShardCollectCR : public RGWCoroutine {
   int operate(const DoutPrefixProvider *dpp) override;
 };
 
+class RGWSyncShardNotifyCR : public RGWCoroutine {
+public:
+  CephContext *cct;
+  rgw::sync_fairness::BidManager* bid_manager;
+  RGWSyncTraceNodeRef tn;
+
+  RGWSyncShardNotifyCR(CephContext *cct, rgw::sync_fairness::BidManager* bid_manager, RGWSyncTraceNodeRef& tn)
+      : RGWCoroutine(cct),
+      bid_manager(bid_manager), tn(tn) {}
+
+  int operate(const DoutPrefixProvider* dpp) override;
+};
+
+
 // factory functions for meta sync coroutines needed in mdlog trimming
 
 RGWCoroutine* create_read_remote_mdlog_shard_info_cr(RGWMetaSyncEnv *env,
