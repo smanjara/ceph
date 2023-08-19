@@ -126,7 +126,6 @@ class Module(MgrModule):
         if format == 'json':
             json_report = ','.join([ret_sched.report_json() for ret_sched in ret_scheds])
             return 0, f'[{json_report}]', ''
-        self.log.info(errstr)
         return 0, '\n===\n'.join([ret_sched.report() for ret_sched in ret_scheds]), ''
 
     @CLIReadCommand('fs snap-schedule list')
@@ -138,11 +137,10 @@ class Module(MgrModule):
         '''
         Get current snapshot schedule for <path>
         '''
-        errstr = 'Success'
+        rc, fs, err = self._validate_fs(fs)
+        if rc < 0:
+            return rc, fs, err
         try:
-            rc, fs, err = self._validate_fs(fs)
-            if rc < 0:
-                return rc, fs, err
             scheds = self.client.list_snap_schedules(fs, path, recursive)
             self.log.debug(f'recursive is {recursive}')
         except CephfsConnectionException as e:
@@ -160,7 +158,6 @@ class Module(MgrModule):
             retention_list = [sched.retention for sched in scheds]
             out = {'path': abs_path, 'schedule': schedule_list, 'retention': retention_list}
             return 0, json.dumps(out), ''
-        self.log.info(errstr)
         return 0, '\n'.join([str(sched) for sched in scheds]), ''
 
     @CLIWriteCommand('fs snap-schedule add')
@@ -173,11 +170,10 @@ class Module(MgrModule):
         '''
         Set a snapshot schedule for <path>
         '''
-        errstr = 'Success'
+        rc, fs, err = self._validate_fs(fs)
+        if rc < 0:
+            return rc, fs, err
         try:
-            rc, fs, err = self._validate_fs(fs)
-            if rc < 0:
-                return rc, fs, err
             abs_path = path
             subvol = None
             self.client.store_snap_schedule(fs,
@@ -197,7 +193,6 @@ class Module(MgrModule):
             return e.to_tuple()
         except Exception as e:
             return -errno.EIO, '', str(e)
-        self.log.info(errstr)
         return 0, suc_msg, ''
 
     @CLIWriteCommand('fs snap-schedule remove')
@@ -210,11 +205,10 @@ class Module(MgrModule):
         '''
         Remove a snapshot schedule for <path>
         '''
-        errstr = 'Success'
+        rc, fs, err = self._validate_fs(fs)
+        if rc < 0:
+            return rc, fs, err
         try:
-            rc, fs, err = self._validate_fs(fs)
-            if rc < 0:
-                return rc, fs, err
             abs_path = path
             self.client.rm_snap_schedule(fs, abs_path, repeat, start)
         except ValueError as e:
@@ -223,7 +217,6 @@ class Module(MgrModule):
             return e.to_tuple()
         except Exception as e:
             return -errno.EIO, '', str(e)
-        self.log.info(errstr)
         return 0, 'Schedule removed for path {}'.format(abs_path), ''
 
     @CLIWriteCommand('fs snap-schedule retention add')
@@ -236,11 +229,10 @@ class Module(MgrModule):
         '''
         Set a retention specification for <path>
         '''
-        errstr = 'Success'
+        rc, fs, err = self._validate_fs(fs)
+        if rc < 0:
+            return rc, fs, err
         try:
-            rc, fs, err = self._validate_fs(fs)
-            if rc < 0:
-                return rc, fs, err
             abs_path = path
             self.client.add_retention_spec(fs, abs_path,
                                            retention_spec_or_period,
@@ -251,7 +243,6 @@ class Module(MgrModule):
             return e.to_tuple()
         except Exception as e:
             return -errno.EIO, '', str(e)
-        self.log.info(errstr)
         return 0, 'Retention added to path {}'.format(abs_path), ''
 
     @CLIWriteCommand('fs snap-schedule retention remove')
@@ -264,11 +255,10 @@ class Module(MgrModule):
         '''
         Remove a retention specification for <path>
         '''
-        errstr = 'Success'
+        rc, fs, err = self._validate_fs(fs)
+        if rc < 0:
+            return rc, fs, err
         try:
-            rc, fs, err = self._validate_fs(fs)
-            if rc < 0:
-                return rc, fs, err
             abs_path = path
             self.client.rm_retention_spec(fs, abs_path,
                                           retention_spec_or_period,
@@ -279,7 +269,6 @@ class Module(MgrModule):
             return e.to_tuple()
         except Exception as e:
             return -errno.EIO, '', str(e)
-        self.log.info(errstr)
         return 0, 'Retention removed from path {}'.format(abs_path), ''
 
     @CLIWriteCommand('fs snap-schedule activate')
@@ -292,11 +281,10 @@ class Module(MgrModule):
         '''
         Activate a snapshot schedule for <path>
         '''
-        errstr = 'Success'
+        rc, fs, err = self._validate_fs(fs)
+        if rc < 0:
+            return rc, fs, err
         try:
-            rc, fs, err = self._validate_fs(fs)
-            if rc < 0:
-                return rc, fs, err
             abs_path = path
             self.client.activate_snap_schedule(fs, abs_path, repeat, start)
         except ValueError as e:
@@ -305,7 +293,6 @@ class Module(MgrModule):
             return e.to_tuple()
         except Exception as e:
             return -errno.EIO, '', str(e)
-        self.log.info(errstr)
         return 0, 'Schedule activated for path {}'.format(abs_path), ''
 
     @CLIWriteCommand('fs snap-schedule deactivate')
@@ -318,11 +305,10 @@ class Module(MgrModule):
         '''
         Deactivate a snapshot schedule for <path>
         '''
-        errstr = 'Success'
+        rc, fs, err = self._validate_fs(fs)
+        if rc < 0:
+            return rc, fs, err
         try:
-            rc, fs, err = self._validate_fs(fs)
-            if rc < 0:
-                return rc, fs, err
             abs_path = path
             self.client.deactivate_snap_schedule(fs, abs_path, repeat, start)
         except ValueError as e:
@@ -331,5 +317,4 @@ class Module(MgrModule):
             return e.to_tuple()
         except Exception as e:
             return -errno.EIO, '', str(e)
-        self.log.info(errstr)
         return 0, 'Schedule deactivated for path {}'.format(abs_path), ''
