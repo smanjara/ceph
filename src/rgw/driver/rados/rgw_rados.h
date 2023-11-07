@@ -845,10 +845,11 @@ public:
         ceph::real_time mtime; /* for setting delete marker mtime */
         bool high_precision_time;
         rgw_zone_set *zones_trace;
+        bool null_verid;
 	bool abortmp;
 	uint64_t parts_accounted_size;
 
-        DeleteParams() : versioning_status(0), olh_epoch(0), bilog_flags(0), remove_objs(NULL), high_precision_time(false), zones_trace(nullptr), abortmp(false), parts_accounted_size(0) {}
+        DeleteParams() : versioning_status(0), olh_epoch(0), bilog_flags(0), remove_objs(NULL), high_precision_time(false), zones_trace(nullptr), null_verid(false), abortmp(false), parts_accounted_size(0) {}
       } params;
 
       struct DeleteResult {

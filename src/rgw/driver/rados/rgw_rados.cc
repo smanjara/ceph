@@ -844,6 +844,7 @@ public:
                          rgw_bucket_dir_entry_meta& dir_meta,
                          list<cls_rgw_obj_key> *remove_objs, bool log_op,
                          uint16_t bilog_op,
+                         bool null_verid,
                          rgw_zone_set *zones_trace,
                          complete_op_data **result);
 
@@ -940,6 +941,7 @@ void RGWIndexCompletionManager::create_completion(const rgw_obj& obj,
                                                   rgw_bucket_dir_entry_meta& dir_meta,
                                                   list<cls_rgw_obj_key> *remove_objs, bool log_op,
                                                   uint16_t bilog_op,
+                                                  bool null_verid,
                                                   rgw_zone_set *zones_trace,
                                                   complete_op_data **result)
 {
@@ -5578,10 +5580,9 @@ int RGWRados::Object::Delete::delete_obj(optional_yield y, const DoutPrefixProvi
   const rgw_obj& src_obj = target->get_obj();
   const string& instance = src_obj.key.instance;
   rgw_obj obj = target->get_obj();
-  bool null_verid = false;
 
   if (instance == "null") {
-    null_verid = true;
+    params.null_verid = true;
     obj.key.instance.clear();
   }
 
@@ -5741,7 +5742,7 @@ int RGWRados::Object::Delete::delete_obj(optional_yield y, const DoutPrefixProvi
       tombstone_entry entry{*state};
       obj_tombstone_cache->add(obj, entry);
     }
-    r = index_op.complete_del(dpp, poolid, ioctx.get_last_version(), state->mtime, params.remove_objs, y, null_verid);
+    r = index_op.complete_del(dpp, poolid, ioctx.get_last_version(), state->mtime, params.remove_objs, y, params.null_verid);
 
     int ret = target->complete_atomic_modification(dpp, y);
     if (ret < 0) {
@@ -9054,7 +9055,7 @@ int RGWRados::cls_obj_complete_op(BucketShard& bs, const rgw_obj& obj, RGWModify
                              svc.zone->need_to_log_data(), bilog_flags, null_verid, &zones_trace, obj.key.get_loc());
   complete_op_data *arg;
   index_completion_manager->create_completion(obj, op, tag, ver, key, dir_meta, remove_objs,
-                                              svc.zone->need_to_log_data(), bilog_flags, &zones_trace, &arg);
+                                              svc.zone->need_to_log_data(), bilog_flags, null_verid, &zones_trace, &arg);
   librados::AioCompletion *completion = arg->rados_completion;
   int ret = bs.bucket_obj.aio_operate(arg->rados_completion, &o);
   completion->release(); /* can't reference arg here, as it might have already been released */
