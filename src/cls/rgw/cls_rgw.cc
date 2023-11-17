@@ -984,7 +984,7 @@ static int complete_remove_obj(cls_method_context_t hctx,
     const std::string tag;
     ret = log_index_operation(hctx, key, CLS_RGW_OP_DEL, tag, entry.meta.mtime,
                               entry.ver, CLS_RGW_STATE_COMPLETE, header.ver,
-                              header.max_marker, 0, false, nullptr, nullptr, nullptr);
+                              header.max_marker, 0, true, nullptr, nullptr, nullptr);
     if (ret < 0) {
       return ret;
     }
@@ -1195,7 +1195,7 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
   if (log_op) {
     rc = log_index_operation(hctx, op.key, op.op, op.tag, entry.meta.mtime,
 			     entry.ver, CLS_RGW_STATE_COMPLETE, header.ver,
-			     header.max_marker, op.bilog_flags, op.null_verid, NULL, NULL,
+			     header.max_marker, op.bilog_flags, true, NULL, NULL,
 			     &op.zones_trace);
     if (rc < 0) {
       CLS_LOG_BITX(bitx_inst, 0,
@@ -2032,7 +2032,7 @@ static int rgw_bucket_unlink_instance(cls_method_context_t hctx, bufferlist *in,
   ret = log_index_operation(hctx, op.key, CLS_RGW_OP_UNLINK_INSTANCE, op.op_tag,
                             mtime, ver,
                             CLS_RGW_STATE_COMPLETE, header.ver, header.max_marker,
-                            op.bilog_flags | RGW_BILOG_FLAG_VERSIONED_OP, false, NULL, NULL, &op.zones_trace);
+                            op.bilog_flags | RGW_BILOG_FLAG_VERSIONED_OP, true, NULL, NULL, &op.zones_trace);
   if (ret < 0)
     return ret;
 

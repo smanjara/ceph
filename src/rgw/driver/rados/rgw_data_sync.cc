@@ -4491,7 +4491,7 @@ public:
               versioned = true;
             }
             if (null_verid) {
-              key.instance.clear();
+              key.instance = "null";
             }
             tn->log(10, SSTR("removing obj: " << sc->source_zone << "/" << bs.bucket << "/" << key << "[" << versioned_epoch.value_or(0) << "]"));
             call(data_sync_module->remove_object(dpp, sc, sync_pipe, key, timestamp, versioned, versioned_epoch.value_or(0), &zones_trace));
