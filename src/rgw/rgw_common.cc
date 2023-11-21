@@ -2257,7 +2257,7 @@ RGWBucketInfo::~RGWBucketInfo()
 }
 
 void RGWBucketInfo::encode(bufferlist& bl) const {
-  ENCODE_START(24, 4, bl);
+  ENCODE_START(23, 4, bl);
   encode(bucket, bl);
   encode(owner.id, bl);
   encode(flags, bl);
@@ -2295,7 +2295,7 @@ void RGWBucketInfo::encode(bufferlist& bl) const {
 }
 
 void RGWBucketInfo::decode(bufferlist::const_iterator& bl) {
-  DECODE_START_LEGACY_COMPAT_LEN_32(24, 4, 4, bl);
+  DECODE_START_LEGACY_COMPAT_LEN_32(23, 4, 4, bl);
   decode(bucket, bl);
   if (struct_v >= 2) {
     string s;
@@ -2508,7 +2508,6 @@ void RGWBucketInfo::dump(Formatter *f) const
   encode_json("mdsearch_config", mdsearch_config, f);
   encode_json("reshard_status", (int)reshard_status, f);
   encode_json("new_bucket_instance_id", new_bucket_instance_id, f);
-  encode_json("deleted", deleted, f);
   if (!empty_sync_policy()) {
     encode_json("sync_policy", *sync_policy, f);
   }
@@ -2549,7 +2548,6 @@ void RGWBucketInfo::decode_json(JSONObj *obj) {
   int rs;
   JSONDecoder::decode_json("reshard_status", rs, obj);
   reshard_status = (cls_rgw_reshard_status)rs;
-  JSONDecoder::decode_json("deleted", deleted, obj);
 
   rgw_sync_policy_info sp;
   JSONDecoder::decode_json("sync_policy", sp, obj);
