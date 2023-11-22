@@ -471,7 +471,7 @@ int RadosBucket::remove_bucket(const DoutPrefixProvider* dpp,
 
   // if we deleted children above we will force delete, as any that
   // remain is detrius from a prior bug
-  ret = store->getRados()->delete_bucket(info, ot, y, dpp, !delete_children);
+  ret = store->getRados()->delete_bucket(info, get_attrs(), ot, y, dpp, !delete_children);
   if (ret < 0) {
     ldpp_dout(dpp, -1) << "ERROR: could not remove bucket " <<
       info.bucket.name << dendl;
