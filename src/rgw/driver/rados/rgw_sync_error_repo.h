@@ -42,7 +42,7 @@ int write(librados::ObjectWriteOperation& op,
           const std::string& key,
           ceph::real_time timestamp);
 RGWCoroutine* write_cr(librados::Rados* rados,
-                       const rgw_raw_obj& obj,
+                       const rgw_raw_obj obj,
                        const std::string& key,
                        ceph::real_time timestamp);
 
@@ -51,7 +51,7 @@ int remove(librados::ObjectWriteOperation& op,
            const std::string& key,
            ceph::real_time timestamp);
 RGWCoroutine* remove_cr(librados::Rados* rados,
-                        const rgw_raw_obj& obj,
+                        const rgw_raw_obj obj,
                         const std::string& key,
                         ceph::real_time timestamp);
 

@@ -118,13 +118,13 @@ int remove(librados::ObjectWriteOperation& op,
 
 class RGWErrorRepoWriteCR : public RGWSimpleCoroutine {
   librados::Rados* rados;
-  const rgw_raw_obj& raw_obj;
+  const rgw_raw_obj raw_obj;
   std::string key;
   ceph::real_time timestamp;
 
   boost::intrusive_ptr<RGWAioCompletionNotifier> cn;
  public:
-  RGWErrorRepoWriteCR(librados::Rados* rados, const rgw_raw_obj& raw_obj,
+  RGWErrorRepoWriteCR(librados::Rados* rados, const rgw_raw_obj raw_obj,
                       const std::string& key, ceph::real_time timestamp)
     : RGWSimpleCoroutine(static_cast<CephContext*>(rados->cct())),
       raw_obj(raw_obj),
@@ -153,7 +153,7 @@ class RGWErrorRepoWriteCR : public RGWSimpleCoroutine {
 };
 
 RGWCoroutine* write_cr(librados::Rados* rados,
-                       const rgw_raw_obj& obj,
+                       const rgw_raw_obj obj,
                        const std::string& key,
                        ceph::real_time timestamp)
 {
@@ -163,13 +163,13 @@ RGWCoroutine* write_cr(librados::Rados* rados,
 
 class RGWErrorRepoRemoveCR : public RGWSimpleCoroutine {
   librados::Rados* rados;
-  const rgw_raw_obj& raw_obj;
+  const rgw_raw_obj raw_obj;
   std::string key;
   ceph::real_time timestamp;
 
   boost::intrusive_ptr<RGWAioCompletionNotifier> cn;
  public:
-  RGWErrorRepoRemoveCR(librados::Rados* rados, const rgw_raw_obj& raw_obj,
+  RGWErrorRepoRemoveCR(librados::Rados* rados, const rgw_raw_obj raw_obj,
                        const std::string& key, ceph::real_time timestamp)
     : RGWSimpleCoroutine(static_cast<CephContext*>(rados->cct())),
       raw_obj(raw_obj),
@@ -198,7 +198,7 @@ class RGWErrorRepoRemoveCR : public RGWSimpleCoroutine {
 };
 
 RGWCoroutine* remove_cr(librados::Rados* rados,
-                        const rgw_raw_obj& obj,
+                        const rgw_raw_obj obj,
                         const std::string& key,
                         ceph::real_time timestamp)
 {
