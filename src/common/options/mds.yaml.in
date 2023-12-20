@@ -686,7 +686,7 @@ options:
   level: advanced
   desc: interval between MDS balancer cycles
   fmt_desc: The frequency (in seconds) of workload exchanges between MDSs.
-  default: 10
+  default: 0
   services:
   - mds
 - name: mds_bal_fragment_interval
