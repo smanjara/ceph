@@ -172,6 +172,10 @@ def test_upgrade_state_null(cephadm_module: CephadmOrchestrator):
     assert CephadmUpgrade(cephadm_module).upgrade_state is None
 
 
+def test_upgrade_iscsi_removed_error_in_list():
+    assert 'UPGRADE_ISCSI_UNSUPPORTED' in CephadmUpgrade.UPGRADE_ERRORS
+
+
 @mock.patch("cephadm.serve.CephadmServe._run_cephadm", _run_cephadm('{}'))
 def test_not_enough_mgrs(cephadm_module: CephadmOrchestrator):
     with with_host(cephadm_module, 'host1'):

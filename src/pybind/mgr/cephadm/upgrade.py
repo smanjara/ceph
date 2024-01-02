@@ -120,7 +120,7 @@ class CephadmUpgrade:
         'UPGRADE_REDEPLOY_DAEMON',
         'UPGRADE_BAD_TARGET_VERSION',
         'UPGRADE_EXCEPTION',
-        'UPGRADE_OFFLINE_HOST'
+        'UPGRADE_OFFLINE_HOST',
         'UPGRADE_ISCSI_UNSUPPORTED'
     ]
 
