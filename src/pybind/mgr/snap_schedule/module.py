@@ -108,7 +108,6 @@ class Module(MgrModule):
     @CLIReadCommand('fs snap-schedule status')
     def snap_schedule_get(self,
                           path: str = '/',
-                          subvol: Optional[str] = None,
                           fs: Optional[str] = None,
                           subvol: Optional[str] = None,
                           group: Optional[str] = None,
@@ -137,7 +136,6 @@ class Module(MgrModule):
 
     @CLIReadCommand('fs snap-schedule list')
     def snap_schedule_list(self, path: str,
-                           subvol: Optional[str] = None,
                            recursive: bool = False,
                            fs: Optional[str] = None,
                            subvol: Optional[str] = None,
