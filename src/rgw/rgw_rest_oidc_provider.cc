@@ -131,6 +131,7 @@ int RGWCreateOIDCProvider::init_processing(optional_yield y)
 
 void RGWCreateOIDCProvider::execute(optional_yield y)
 {
+  RGWObjVersionTracker objv_tracker;
   constexpr bool exclusive = true;
   op_ret = driver->store_oidc_provider(this, y, info, exclusive);
   if (op_ret == 0) {
@@ -201,7 +202,9 @@ int RGWDeleteOIDCProvider::init_processing(optional_yield y)
 
 void RGWDeleteOIDCProvider::execute(optional_yield y)
 {
-  op_ret = driver->delete_oidc_provider(this, y, s->user->get_tenant(), url);
+  RGWOIDCProviderInfo info;
+  RGWObjVersionTracker objv_tracker;
+  op_ret = driver->delete_oidc_provider(this, y, s->user->get_tenant(), url, objv_tracker, info);
 
   if (op_ret < 0 && op_ret != -ENOENT && op_ret != -EINVAL) {
     op_ret = ERR_INTERNAL_ERROR;
@@ -248,7 +251,7 @@ void RGWGetOIDCProvider::execute(optional_yield y)
 {
   RGWOIDCProviderInfo info;
   op_ret = driver->load_oidc_provider(this, y, s->user->get_tenant(),
-                                      url, info);
+                                      url, nullptr, info);
 
   if (op_ret < 0 && op_ret != -ENOENT && op_ret != -EINVAL) {
     op_ret = ERR_INTERNAL_ERROR;

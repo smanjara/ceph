@@ -1448,6 +1448,7 @@ namespace rgw::sal {
                                   optional_yield y,
                                   std::string_view account,
                                   std::string_view url,
+                                  RGWObjVersionTracker* objv_tracker,
                                   RGWOIDCProviderInfo& info)
   {
     return -ENOTSUP;
@@ -1455,8 +1456,10 @@ namespace rgw::sal {
 
   int DBStore::delete_oidc_provider(const DoutPrefixProvider *dpp,
                                     optional_yield y,
-                                    std::string_view account,
-                                    std::string_view url)
+                                    std::string_view tenant,
+                                    std::string_view url,
+                                    RGWObjVersionTracker& objv_tracker,
+                                    RGWOIDCProviderInfo& info)
   {
     return -ENOTSUP;
   }
