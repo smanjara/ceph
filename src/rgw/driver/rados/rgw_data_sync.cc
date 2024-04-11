@@ -4514,6 +4514,7 @@ public:
             }
             if (null_verid) {
               key.instance = "null";
+              tn->log(10, SSTR("applying null: " << key));
             }
             tn->log(10, SSTR("removing obj: " << sc->source_zone << "/" << bs.bucket << "/" << key << "[" << versioned_epoch.value_or(0) << "]"));
             call(data_sync_module->remove_object(dpp, sc, sync_pipe, key, timestamp, versioned, versioned_epoch.value_or(0), &zones_trace));
@@ -5131,7 +5132,7 @@ int RGWBucketShardIncrementalSyncCR::operate(const DoutPrefixProvider *dpp)
               versioned_epoch = entry->ver.epoch;
             }
             tn->log(20, SSTR("entry->timestamp=" << entry->timestamp));
-            tn->log(20, SSTR("entry->is_null_verid=" << entry->is_null_verid()));
+            tn->log(20, SSTR("entry->null_verid=" << entry->null_verid));
             using SyncCR = RGWBucketSyncSingleEntryCR<string, rgw_obj_key>;
             spawn(new SyncCR(sc, sync_pipe, key,
                              entry->is_versioned(), entry->null_verid, versioned_epoch,

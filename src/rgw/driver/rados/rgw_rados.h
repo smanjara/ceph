@@ -1356,6 +1356,7 @@ public:
                                    const std::string& op_tag, const std::string& olh_tag,
                                    uint64_t olh_epoch, optional_yield y,
                                    rgw_zone_set *zones_trace = nullptr,
+                                   bool null_verid = false,
                                    bool log_op = true);
   int bucket_index_read_olh_log(const DoutPrefixProvider *dpp,
                                 RGWBucketInfo& bucket_info, RGWObjState& state,

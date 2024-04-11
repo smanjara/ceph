@@ -1182,9 +1182,12 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
   } // CLS_RGW_OP_ADD
 
   if (log_op) {
+    CLS_LOG_BITX(bitx_inst, 20,
+		 "INFO: %s: null_verid in cls %d",
+		   __func__, op.null_verid);
     rc = log_index_operation(hctx, op.key, op.op, op.tag, entry.meta.mtime,
 			     entry.ver, CLS_RGW_STATE_COMPLETE, header.ver,
-			     header.max_marker, op.bilog_flags, entry.null_verid, NULL, NULL,
+			     header.max_marker, op.bilog_flags, op.null_verid, NULL, NULL,
 			     &op.zones_trace);
     if (rc < 0) {
       CLS_LOG_BITX(bitx_inst, 0,
@@ -2017,6 +2020,7 @@ static int rgw_bucket_unlink_instance(cls_method_context_t hctx, bufferlist *in,
 
   real_time mtime = obj.mtime(); /* mtime has no real meaning in
                                   * instance removal context */
+  CLS_LOG(0, "null_verid=%d in cls bucket unlink", op.null_verid);
   ret = log_index_operation(hctx, op.key, CLS_RGW_OP_UNLINK_INSTANCE, op.op_tag,
                             mtime, ver,
                             CLS_RGW_STATE_COMPLETE, header.ver, header.max_marker,

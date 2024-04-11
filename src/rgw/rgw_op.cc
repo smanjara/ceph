@@ -5278,8 +5278,8 @@ void RGWDeleteObj::execute(optional_yield y)
       else {
         null_verid = 0;
       }
-      ldpp_dout(this, 0) << "null_verid at RGWDeleteObj::execute " << null_verid << "obj instance: " <<
-        s->object->get_instance() << dendl;
+      ldpp_dout(this, 0) << "null_verid at RGWDeleteObj::execute " << null_verid << " obj instance: " <<
+      s->object->get_instance() << dendl;
 
       op_ret = s->object->get_obj_state(this, &astate, s->yield, true);
       if (op_ret < 0) {

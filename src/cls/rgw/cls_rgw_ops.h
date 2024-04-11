@@ -96,7 +96,7 @@ struct rgw_cls_obj_complete_op
   std::list<cls_rgw_obj_key> remove_objs;
   rgw_zone_set zones_trace;
 
-  rgw_cls_obj_complete_op() : op(CLS_RGW_OP_ADD), log_op(false), bilog_flags(0) {}
+  rgw_cls_obj_complete_op() : op(CLS_RGW_OP_ADD), log_op(false), bilog_flags(0), null_verid(false) {}
 
   void encode(ceph::buffer::list &bl) const {
     ENCODE_START(10, 7, bl);
@@ -246,7 +246,7 @@ struct rgw_cls_unlink_instance_op {
   rgw_zone_set zones_trace;
   bool null_verid;
 
-  rgw_cls_unlink_instance_op() : olh_epoch(0), log_op(false), bilog_flags(0) {}
+  rgw_cls_unlink_instance_op() : olh_epoch(0), log_op(false), bilog_flags(0), null_verid(false) {}
 
   void encode(ceph::buffer::list& bl) const {
     ENCODE_START(4, 1, bl);

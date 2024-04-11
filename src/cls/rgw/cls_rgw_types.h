@@ -111,7 +111,6 @@ inline std::ostream& operator<<(std::ostream& out, RGWModifyOp op) {
 
 enum RGWBILogFlags {
   RGW_BILOG_FLAG_VERSIONED_OP = 0x1,
-  RGW_BILOG_NULL_VERSION = 0x2,
 };
 
 enum RGWCheckMTimeType {
@@ -613,7 +612,7 @@ struct rgw_bi_log_entry {
   rgw_zone_set zones_trace;
   bool null_verid;
 
-  rgw_bi_log_entry() : op(CLS_RGW_OP_UNKNOWN), state(CLS_RGW_STATE_PENDING_MODIFY), index_ver(0), bilog_flags(0) {}
+  rgw_bi_log_entry() : op(CLS_RGW_OP_UNKNOWN), state(CLS_RGW_STATE_PENDING_MODIFY), index_ver(0), bilog_flags(0), null_verid(false) {}
 
   void encode(ceph::buffer::list &bl) const {
     ENCODE_START(5, 1, bl);
@@ -671,11 +670,6 @@ struct rgw_bi_log_entry {
   bool is_versioned() {
     return ((bilog_flags & RGW_BILOG_FLAG_VERSIONED_OP) != 0);
   }
-
-  bool is_null_verid() {
-    return ((bilog_flags & RGW_BILOG_NULL_VERSION) != 0);
-  }
-
 };
 WRITE_CLASS_ENCODER(rgw_bi_log_entry)
 
