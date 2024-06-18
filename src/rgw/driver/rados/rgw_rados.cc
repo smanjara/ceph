@@ -5157,7 +5157,70 @@ int RGWRados::store_delete_bucket_info_flag(RGWBucketInfo& bucket_info, std::map
 
   return r;
 }
-  
+
+struct bucket_stat_result {
+  uint64_t size;
+  uint64_t count;
+
+  bucket_stat_result() : size(0), count(0) {}
+
+  void decode_json(JSONObj *obj) {
+    JSONDecoder::decode_json("X-RGW-Object-Count", count, obj);
+    JSONDecoder::decode_json("X-RGW-Bytes-Used", size, obj);
+  }
+};
+
+class RGWStatRemoteBucketCR: public RGWCoroutine {
+  const DoutPrefixProvider *dpp;
+  rgw::sal::RadosStore* const store;
+  const rgw_zone_id source_zone;
+  const rgw_bucket& bucket;
+  RGWHTTPManager* http;
+  std::vector<bucket_stat_result> peer_stat;
+
+public:
+  RGWStatRemoteBucketCR(const DoutPrefixProvider *dpp,
+				    rgw::sal::RadosStore* const store,
+            const rgw_zone_id source_zone,
+            const rgw_bucket& bucket,
+            RGWHTTPManager* http)
+      : RGWCoroutine(store->ctx()), dpp(dpp), store(store),
+      source_zone(source_zone), bucket(bucket), http(http) {}
+
+  int operate(const DoutPrefixProvider *dpp) override {
+    reenter(this) {
+      yield {
+        auto& zone_conn_map = store->svc.zone->get_zone_conn_map();
+        auto ziter = zone_conn_map.find(source_zone);
+        if (ziter == zone_conn_map.end()) {
+          ldpp_dout(dpp, 0) << "WARNING: no connection to zone " << source_id<< dendl;
+          return set_cr_error(-ECANCELED);
+        }
+        peer_stat.resize(svc.zone->get_zone_data_notify_to_map().size());
+        auto result = peer_stat.begin();
+        for (auto& c : svc.zone->get_zone_data_notify_to_map()) {
+          ldpp_dout(dpp, 20) << "query bucket from " << c.first << dendl;
+          RGWRESTConn *conn = c.second;
+          string p = string("/") + bucket.get_key(':', 0);
+          spawn(new RGWReadRESTResourceCR<bucket_stat_result>(store->ctx(), conn, &http, p, result));
+          ++result;
+        }
+      }
+
+      if (retcode < 0 && retcode != -ENOENT) {
+        return set_cr_error(retcode);
+      } else if (retcode == -ENOENT) {
+        ldpp_dout(dpp, 10) << "INFO: could not read bucket stat:" << bucket
+        << " from zone: " << dendl;
+        return set_cr_error(retcode);
+      }
+
+      return set_cr_done();
+    }
+    return 0;
+  }
+};
+
 /**
  * Delete a bucket.
  * bucket: the name of the bucket to delete
@@ -5179,6 +5242,37 @@ int RGWRados::delete_bucket(RGWBucketInfo& bucket_info, std::map<std::string, bu
     }
   }
 
+/*
+  if (svc.zone->is_syncing_bucket_meta(bucket)) {
+    std::vector<bucket_stat_result> peer_stat;
+    const rgw_zone_id source_zone = svc.zone->get_zone_params().get_id();
+    peer_stat.resize(svc.zone->get_zone_data_notify_to_map().size());
+    auto result = peer_stat.begin();
+    for (auto& c : svc.zone->get_zone_data_notify_to_map()) {
+      ldpp_dout(dpp, 20) << "query bucket from " << c.first << dendl;
+      RGWRESTConn *conn = c.second;
+      spawn(new RGWStatRemoteBucketCR(dpp, store, conn, c.first, source_zone, bucket, &*result), false);
+      ++result;
+    }
+  }
+*/
+
+  if (svc.zone->is_syncing_bucket_meta(bucket)) {
+    RGWCoroutinesManager crs(driver->ctx(), driver->getRados()->get_cr_registry());
+    RGWHTTPManager http(driver->ctx(), crs.get_completion_mgr());
+    int ret = http.start();
+    if (ret < 0) {
+      ldpp_dout(dpp, 0) << "failed in http_manager.start() ret=" << ret << dendl;
+      return ret;
+    }
+    const rgw_zone_id source_zone = svc.zone->get_zone_params().get_id();
+    crs.run(dpp, new RGWStatRemoteBucketCR(dpp, driver, source_zone, bucket, &http));
+    if (ret < 0) {
+      ldpp_dout(dpp, 0) << "failed to feth remote bucket stats " << cpp_strerror(ret) << dendl;
+      return -ret;
+    }
+  }
+  
   bool remove_ep = true;
 
   if (objv_tracker.read_version.empty()) {
