@@ -1708,3 +1708,34 @@ public:
   int operate(const DoutPrefixProvider* dpp) override;
 };
 
+struct bucket_stat_result {
+  uint64_t size;
+  uint64_t count;
+
+  bucket_stat_result() : size(0), count(0) {}
+
+  void decode_json(JSONObj *obj) {
+    JSONDecoder::decode_json("X-RGW-Object-Count", count, obj);
+    JSONDecoder::decode_json("X-RGW-Bytes-Used", size, obj);
+  }
+};
+
+class RGWStatRemoteBucketCR: public RGWCoroutine {
+  const DoutPrefixProvider *dpp;
+  rgw::sal::RadosStore* const store;
+  const rgw_zone_id source_zone;
+  const rgw_bucket& bucket;
+  RGWHTTPManager* http;
+  std::vector<bucket_stat_result>& peer_result;
+
+public:
+  RGWStatRemoteBucketCR(const DoutPrefixProvider *dpp,
+				    rgw::sal::RadosStore* const store,
+            const rgw_zone_id source_zone,
+            const rgw_bucket& bucket,
+            RGWHTTPManager* http, std::vector<bucket_stat_result>& peer_result)
+      : RGWCoroutine(store->ctx()), dpp(dpp), store(store),
+      source_zone(source_zone), bucket(bucket), http(http), peer_result(peer_result) {}
+
+  int operate(const DoutPrefixProvider *dpp) override;
+};

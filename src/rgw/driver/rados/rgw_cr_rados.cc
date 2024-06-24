@@ -1175,3 +1175,39 @@ int RGWDataPostNotifyCR::operate(const DoutPrefixProvider* dpp)
   }
   return 0;
 }
+
+int RGWStatRemoteBucketCR::operate(const DoutPrefixProvider *dpp) {
+    reenter(this) {
+    yield {
+      //auto& zone_conn_map = store->getRados()->svc.zone->get_zone_conn_map();
+      //auto ziter = zone_conn_map.find(source_zone);
+      //if (ziter == zone_conn_map.end()) {
+      //  ldpp_dout(dpp, 0) << "WARNING: no connection to zone " << source_zone<< dendl;
+      //  return set_cr_error(-ECANCELED);
+      //}
+      peer_result.resize(store->getRados()->svc.zone->get_zone_data_notify_to_map().size());
+      auto result = peer_result.begin();
+      for (auto& c : store->getRados()->svc.zone->get_zone_data_notify_to_map()) {
+        ldpp_dout(dpp, 20) << "query bucket from " << c.first << dendl;
+        RGWRESTConn *conn = c.second;
+
+        //rgw_http_param_pair pairs[] = { { "format" , "json" },
+        //  { NULL, NULL } };
+        const string p = string("/") + bucket.get_key(':', 0);
+        spawn(new RGWReadRESTResourceCR<bucket_stat_result>(store->ctx(), &*conn, &*http, p, nullptr, &*result), false);
+        ++result;
+      }
+    }
+
+    if (retcode < 0 && retcode != -ENOENT) {
+      return set_cr_error(retcode);
+    } else if (retcode == -ENOENT) {
+      ldpp_dout(dpp, 10) << "INFO: could not read bucket stat:" << bucket
+      << " from zone: " << dendl;
+      return set_cr_error(retcode);
+    }
+
+    return set_cr_done();
+  }
+  return 0;
+}
