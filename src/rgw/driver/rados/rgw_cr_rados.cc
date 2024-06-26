@@ -1187,60 +1187,11 @@ RGWStatRemoteBucketCR::RGWStatRemoteBucketCR(const DoutPrefixProvider *dpp,
             std::vector<bucket_unordered_list_result>& peer_result)
       : RGWCoroutine(store->ctx()), dpp(dpp), store(store),
       source_zone(source_zone), bucket(bucket), http(http),
-      zids(zids), peer_result(peer_result) {
-        source_policy = make_shared<rgw_bucket_get_sync_policy_result>();
-      }
+      zids(zids), peer_result(peer_result) {}
   
 int RGWStatRemoteBucketCR::operate(const DoutPrefixProvider *dpp) {
   reenter(this) {
     yield {
-<<<<<<< Updated upstream
-      rgw_bucket_get_sync_policy_params get_policy_params;
-     // std::shared_ptr<rgw_bucket_get_sync_policy_result> source_policy;
-     // source_policy = make_shared<rgw_bucket_get_sync_policy_result>();
-      std::string source_zone = store->getRados()->svc.zone->get_zone().id;
-      get_policy_params.zone = source_zone;
-      ldpp_dout(dpp, 0) << "source zone " << source_zone << dendl;
-      get_policy_params.bucket = bucket;
-      ldpp_dout(dpp, 0) << "source bucket " << bucket << dendl;
-      call(new RGWBucketGetSyncPolicyHandlerCR(store->svc()->async_processor,
-                                                    store,
-                                                    get_policy_params,
-                                                    source_policy,
-                                                    dpp));
-      if (retcode < 0) {
-        if (retcode != -ENOENT) {
-          ldpp_dout(dpp, 0) << "ERROR: failed to fetch policy handler for bucket=" << bucket << dendl;
-        }
-
-        return set_cr_error(retcode);
-      }
-
-      if (source_policy->policy_handler) {
-        ldpp_dout(dpp, 0) << "found source policy " << bucket << dendl;
-      } else {
-        ldpp_dout(dpp, 0) << "no source policy found " << bucket << dendl;
-        return set_cr_done();
-      }
-
-      auto& bucket_info = source_policy->policy_handler->get_bucket_info();
-      const auto& all_dests = source_policy->policy_handler->get_all_dests();
-
-      vector<rgw_zone_id> zids;
-      rgw_zone_id last_zid;
-      for (auto& diter : all_dests) {
-        const auto& zid = diter.first;
-        if (zid == last_zid) {
-          continue;
-        }
-        last_zid = zid;
-        zids.push_back(zid);
-      }
-
-      peer_result.resize(zids.size());
-
-=======
->>>>>>> Stashed changes
       auto result = peer_result.begin();
       for (auto& zid : zids) {
         auto& zone_conn_map = store->getRados()->svc.zone->get_zone_conn_map();

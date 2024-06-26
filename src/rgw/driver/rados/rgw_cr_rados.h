@@ -1802,7 +1802,6 @@ class RGWStatRemoteBucketCR: public RGWCoroutine {
   const rgw_bucket& bucket;
   RGWHTTPManager* http;
   std::vector<rgw_zone_id> zids;
-  std::shared_ptr<rgw_bucket_get_sync_policy_result> source_policy;
   vector<bucket_unordered_list_result>& peer_result;
 
 public:
