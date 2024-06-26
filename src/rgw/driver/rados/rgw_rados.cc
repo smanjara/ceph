@@ -5197,21 +5197,17 @@ int RGWRados::delete_bucket(RGWBucketInfo& bucket_info, std::map<std::string, bu
   if (svc.zone->is_syncing_bucket_meta(bucket)) {
     RGWCoroutinesManager crs(driver->ctx(), driver->getRados()->get_cr_registry());
     RGWHTTPManager http(driver->ctx(), crs.get_completion_mgr());
-    std::vector<bucket_stat_result> peer_stat;
+    std::vector<bucket_unordered_list_result> peer_stat;
     int ret = http.start();
     if (ret < 0) {
       ldpp_dout(dpp, 0) << "failed in http_manager.start() ret=" << ret << dendl;
       return ret;
     }
     const rgw_zone_id source_zone = svc.zone->get_zone_params().get_id();
-    crs.run(dpp, new RGWStatRemoteBucketCR(dpp, driver, source_zone, bucket, &http, peer_stat));
+    ret = crs.run(dpp, new RGWStatRemoteBucketCR(dpp, driver, source_zone, bucket, &http, peer_stat));
     if (ret < 0) {
       ldpp_dout(dpp, 0) << "failed to feth remote bucket stats " << cpp_strerror(ret) << dendl;
       return -ret;
-    }
-
-    for (auto& each: peer_stat) {
-      ldpp_dout(dpp, 0) << "object count " << each.count << dendl;
     }
   }
   

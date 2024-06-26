@@ -12,6 +12,8 @@
 #include "rgw_cr_rest.h"
 #include "rgw_rest_conn.h"
 #include "rgw_rados.h"
+#include "rgw_cr_tools.h"
+#include "rgw_data_sync.h"
 
 #include "services/svc_zone.h"
 #include "services/svc_zone_utils.h"
@@ -1176,25 +1178,86 @@ int RGWDataPostNotifyCR::operate(const DoutPrefixProvider* dpp)
   return 0;
 }
 
-int RGWStatRemoteBucketCR::operate(const DoutPrefixProvider *dpp) {
-    reenter(this) {
-    yield {
-      //auto& zone_conn_map = store->getRados()->svc.zone->get_zone_conn_map();
-      //auto ziter = zone_conn_map.find(source_zone);
-      //if (ziter == zone_conn_map.end()) {
-      //  ldpp_dout(dpp, 0) << "WARNING: no connection to zone " << source_zone<< dendl;
-      //  return set_cr_error(-ECANCELED);
-      //}
-      peer_result.resize(store->getRados()->svc.zone->get_zone_data_notify_to_map().size());
-      auto result = peer_result.begin();
-      for (auto& c : store->getRados()->svc.zone->get_zone_data_notify_to_map()) {
-        ldpp_dout(dpp, 20) << "query bucket from " << c.first << dendl;
-        RGWRESTConn *conn = c.second;
+class RGWStatRemoteBucketCR: public RGWCoroutine {
+  const DoutPrefixProvider *dpp;
+  rgw::sal::RadosStore* const store;
+  const rgw_zone_id source_zone;
+  const rgw_bucket& bucket;
+  RGWHTTPManager* http;
+  rgw_bucket_get_sync_policy_params get_policy_params;
+  std::shared_ptr<rgw_bucket_get_sync_policy_result> source_policy;
+  vector<bucket_unordered_list_result>& peer_result;
 
-        //rgw_http_param_pair pairs[] = { { "format" , "json" },
-        //  { NULL, NULL } };
-        const string p = string("/") + bucket.get_key(':', 0);
-        spawn(new RGWReadRESTResourceCR<bucket_stat_result>(store->ctx(), &*conn, &*http, p, nullptr, &*result), false);
+public:
+  RGWStatRemoteBucketCR(const DoutPrefixProvider *dpp,
+				    rgw::sal::RadosStore* const store,
+            const rgw_zone_id source_zone,
+            const rgw_bucket& bucket,
+            RGWHTTPManager* http, std::vector<bucket_unordered_list_result>& peer_result)
+      : RGWCoroutine(store->ctx()), dpp(dpp), store(store),
+      source_zone(source_zone), bucket(bucket), http(http), peer_result(peer_result) {
+        source_policy = make_shared<rgw_bucket_get_sync_policy_result>();
+      }
+
+  int operate(const DoutPrefixProvider *dpp) override;
+};
+  
+  
+int RGWStatRemoteBucketCR::operate(const DoutPrefixProvider *dpp) {
+  reenter(this) {
+    yield {
+      auto source_zone = store->getRados()->svc.zone->get_zone().id;
+      get_policy_params.zone = source_zone;
+      get_policy_params.bucket = bucket;
+      call(new RGWBucketGetSyncPolicyHandlerCR(store->svc()->async_processor,
+                                                    store,
+                                                    get_policy_params,
+                                                    source_policy,
+                                                    dpp));
+      if (retcode < 0) {
+        if (retcode != -ENOENT) {
+          ldpp_dout(dpp, 0) << "ERROR: failed to fetch policy handler for bucket=" << bucket << dendl;
+        }
+
+        return set_cr_error(retcode);
+      }
+
+      const auto& all_dests = source_policy->policy_handler->get_all_dests();
+
+      vector<rgw_zone_id> zids;
+      rgw_zone_id last_zid;
+      for (auto& diter : all_dests) {
+        const auto& zid = diter.first;
+        if (zid == last_zid) {
+          continue;
+        }
+        last_zid = zid;
+        zids.push_back(zid);
+      }
+
+      peer_result.resize(zids.size());
+
+      auto result = peer_result.begin();
+      for (auto& zid : zids) {
+        auto& zone_conn_map = store->getRados()->svc.zone->get_zone_conn_map();
+        auto ziter = zone_conn_map.find(zid);
+        if (ziter == zone_conn_map.end()) {
+          ldpp_dout(dpp, 0) << "WARNING: no connection to zone " << ziter->first << dendl;
+          continue;
+        }
+        ldpp_dout(dpp, 20) << "query bucket from: " << ziter->first << dendl;
+        RGWRESTConn *conn = ziter->second;
+
+        rgw_http_param_pair pairs[] = { { "versions" , NULL },
+					{ "format" , "json" },
+					{ "objs-container" , "true" },
+          { "max-keys", "1" },
+          { "allow-unordered", "true"},
+          { "key-marker" , NULL },
+					{ "version-id-marker" , NULL },
+	                                { NULL, NULL } };
+        string p = string("/") + bucket.get_key(':', 0);
+        spawn(new RGWReadRESTResourceCR<bucket_unordered_list_result>(store->ctx(), &*conn, &*http, p, pairs, &*result), false);
         ++result;
       }
     }
