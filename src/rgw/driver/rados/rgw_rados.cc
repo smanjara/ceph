@@ -5195,23 +5195,77 @@ int RGWRados::delete_bucket(RGWBucketInfo& bucket_info, std::map<std::string, bu
 */
 
   if (svc.zone->is_syncing_bucket_meta(bucket)) {
-    RGWCoroutinesManager crs(driver->ctx(), driver->getRados()->get_cr_registry());
-    RGWHTTPManager http(driver->ctx(), crs.get_completion_mgr());
-    std::vector<bucket_stat_result> peer_stat;
-    int ret = http.start();
-    if (ret < 0) {
-      ldpp_dout(dpp, 0) << "failed in http_manager.start() ret=" << ret << dendl;
-      return ret;
-    }
-    const rgw_zone_id source_zone = svc.zone->get_zone_params().get_id();
-    crs.run(dpp, new RGWStatRemoteBucketCR(dpp, driver, source_zone, bucket, &http, peer_stat));
-    if (ret < 0) {
-      ldpp_dout(dpp, 0) << "failed to feth remote bucket stats " << cpp_strerror(ret) << dendl;
-      return -ret;
-    }
+    const rgw_sync_policy_info& sync_policy = svc.zone->get_zonegroup().sync_policy;
+    if (!sync_policy.empty()) {
+<<<<<<< Updated upstream
+      RGWCoroutinesManager crs(driver->ctx(), driver->getRados()->get_cr_registry());
+      RGWHTTPManager http(driver->ctx(), crs.get_completion_mgr());
+      std::vector<bucket_unordered_list_result> peer_stat;
+      int ret = http.start();
+=======
+      const rgw_zone_id source_zone = svc.zone->get_zone_params().get_id();
+      RGWBucketSyncPolicyHandlerRef source_handler;
+      int ret = driver->get_sync_policy_handler(dpp, source_zone, bucket, &source_handler, y);
+      if (ret < 0) {
+        ldpp_dout(dpp, 10) << "could not get bucket sync policy handler (r=" << ret << ")" << dendl;
+        return ret;
+      }
 
-    for (auto& each: peer_stat) {
-      ldpp_dout(dpp, 0) << "object count " << each.count << dendl;
+      auto all_dests = source_handler->get_all_dests();
+
+      std::vector<rgw_zone_id> zids;
+      rgw_zone_id last_zid;
+      for (auto& diter : all_dests) {
+        const auto& zid = diter.first;
+        if (zid == last_zid) {
+          continue;
+        }
+        last_zid = zid;
+        zids.push_back(zid);
+      }
+
+      std::vector<bucket_unordered_list_result> peer_status;
+      peer_status.resize(zids.size());
+
+      RGWCoroutinesManager crs(driver->ctx(), driver->getRados()->get_cr_registry());
+      RGWHTTPManager http(driver->ctx(), crs.get_completion_mgr());
+      ret = http.start();
+>>>>>>> Stashed changes
+      if (ret < 0) {
+        ldpp_dout(dpp, 0) << "failed in http_manager.start() ret=" << ret << dendl;
+        return ret;
+      }
+<<<<<<< Updated upstream
+      const rgw_zone_id source_zone = svc.zone->get_zone_params().get_id();
+      ret = crs.run(dpp, new RGWStatRemoteBucketCR(dpp, driver, source_zone, bucket, &http, peer_stat));
+=======
+      ret = crs.run(dpp, new RGWStatRemoteBucketCR(dpp, driver, source_zone, bucket, &http, zids, peer_status));
+>>>>>>> Stashed changes
+      if (ret < 0) {
+        ldpp_dout(dpp, 0) << "failed to feth remote bucket stats " << cpp_strerror(ret) << dendl;
+        return -ret;
+      }
+
+<<<<<<< Updated upstream
+      for (const auto& list_result: peer_stat) {
+=======
+      for (const auto& list_result: peer_status) {
+>>>>>>> Stashed changes
+        auto entries_iter = list_result.entries.begin();
+        for (; entries_iter != list_result.entries.end(); ++entries_iter) {
+          std::string ns;
+          rgw_obj_key obj;
+
+          if (rgw_obj_key::oid_to_key_in_ns(entries_iter->key.name, &obj, ns)) {
+<<<<<<< Updated upstream
+            ldpp_dout(dpp, 0) << "cannot delete bucket. object exists in another zone" << dendl;
+=======
+            ldpp_dout(dpp, 0) << "cannot delete bucket. object exists in another zone" << obj.name << dendl;
+>>>>>>> Stashed changes
+            return -ENOTEMPTY;
+          }
+        }
+      }
     }
   }
   
