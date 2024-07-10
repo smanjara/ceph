@@ -4733,6 +4733,8 @@ int RGWRados::copy_obj(RGWObjectCtx& obj_ctx,
   map<string, bufferlist>::iterator lh = attrs.find(RGW_ATTR_OBJECT_LEGAL_HOLD);
   if (lh != attrs.end())
     src_attrs[RGW_ATTR_OBJECT_LEGAL_HOLD] = lh->second;
+  
+  src_attrs.erase(RGW_ATTR_OBJ_REPLICATION_TRACE);
 
   set_copy_attrs(src_attrs, attrs, attrs_mod);
   attrs.erase(RGW_ATTR_ID_TAG);
