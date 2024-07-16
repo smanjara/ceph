@@ -390,7 +390,7 @@ int AtomicObjectProcessor::complete(
 
   read_cloudtier_info_from_attrs(attrs, obj_op.meta.category, manifest);
 
-  r = obj_op.write_meta(actual_size, accounted_size, attrs, rctx,
+  r = obj_op.write_meta(dpp, actual_size, accounted_size, attrs, rctx,
                         writer.get_trace(), flags & rgw::sal::FLAG_LOG_OP);
   if (r < 0) {
     if (r == -ETIMEDOUT) {
@@ -527,7 +527,7 @@ int MultipartObjectProcessor::complete(
   obj_op.meta.zones_trace = zones_trace;
   obj_op.meta.modify_tail = true;
 
-  r = obj_op.write_meta(actual_size, accounted_size, attrs, rctx,
+  r = obj_op.write_meta(dpp, actual_size, accounted_size, attrs, rctx,
                         writer.get_trace(), flags & rgw::sal::FLAG_LOG_OP);
   if (r < 0)
     return r;
@@ -772,7 +772,7 @@ int AppendObjectProcessor::complete(
     etag_bl.append(final_etag_str, strlen(final_etag_str) + 1);
     attrs[RGW_ATTR_ETAG] = etag_bl;
   }
-  r = obj_op.write_meta(actual_size + cur_size,
+  r = obj_op.write_meta(dpp, actual_size + cur_size,
 			accounted_size + *cur_accounted_size,
 			attrs, rctx, writer.get_trace(),
 			flags & rgw::sal::FLAG_LOG_OP);

@@ -2682,7 +2682,7 @@ int RadosObject::write_cloud_tier(const DoutPrefixProvider* dpp,
   attrs.erase(RGW_ATTR_TAIL_TAG);
 
   const req_context rctx{dpp, y, nullptr};
-  return obj_op.write_meta(0, 0, attrs, rctx, head_obj->get_trace());
+  return obj_op.write_meta(dpp, 0, 0, attrs, rctx, head_obj->get_trace());
 }
 
 int RadosObject::get_max_chunk_size(const DoutPrefixProvider* dpp, rgw_placement_rule placement_rule, uint64_t* max_chunk_size, uint64_t* alignment)
@@ -3150,7 +3150,7 @@ int RadosMultipartUpload::init(const DoutPrefixProvider *dpp, optional_yield y, 
     encode(upload_info, bl);
     obj_op.meta.data = &bl;
 
-    ret = obj_op.write_meta(bl.length(), 0, attrs, rctx, get_trace(), false);
+    ret = obj_op.write_meta(dpp, bl.length(), 0, attrs, rctx, get_trace(), false);
   } while (ret == -EEXIST);
 
   return ret;
@@ -3451,7 +3451,7 @@ int RadosMultipartUpload::complete(const DoutPrefixProvider *dpp,
   obj_op.meta.olh_epoch = olh_epoch;
 
   const req_context rctx{dpp, y, nullptr};
-  ret = obj_op.write_meta(ofs, accounted_size, attrs, rctx, get_trace());
+  ret = obj_op.write_meta(dpp, ofs, accounted_size, attrs, rctx, get_trace());
   if (ret < 0)
     return ret;
 
