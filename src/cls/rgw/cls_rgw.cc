@@ -149,7 +149,8 @@ static void bi_log_index_key(cls_method_context_t hctx, string& key, string& id,
 static int log_index_operation(cls_method_context_t hctx, const cls_rgw_obj_key& obj_key,
                                RGWModifyOp op, const string& tag, real_time timestamp,
                                const rgw_bucket_entry_ver& ver, RGWPendingState state, uint64_t index_ver,
-                               string& max_marker, uint16_t bilog_flags, string *owner, string *owner_display_name, rgw_zone_set *zones_trace)
+                               string& max_marker, uint16_t bilog_flags, string *owner, string *owner_display_name,
+                               const rgw_zone_set *zones_trace)
 {
   bufferlist bl;
 
@@ -171,7 +172,7 @@ static int log_index_operation(cls_method_context_t hctx, const cls_rgw_obj_key&
     entry.owner_display_name = *owner_display_name;
   }
   if (zones_trace) {
-    entry.zones_trace = std::move(*zones_trace);
+    entry.zones_trace = *zones_trace;
   }
 
   string key;
@@ -1155,7 +1156,7 @@ int rgw_bucket_complete_op(cls_method_context_t hctx, bufferlist *in, bufferlist
     // unaccount overwritten entry
     unaccount_entry(header, entry);
 
-    rgw_bucket_dir_entry_meta& meta = op.meta;
+    const rgw_bucket_dir_entry_meta& meta = op.meta;
     rgw_bucket_category_stats& stats = header.stats[meta.category];
     entry.meta = meta;
     entry.key = op.key;
