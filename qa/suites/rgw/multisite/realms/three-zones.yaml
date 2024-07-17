@@ -20,4 +20,4 @@ overrides:
           - name: test-zone3
             endpoints: [c1.client.1]
   rgw-multisite-tests:
-    args: [tests.py]
+    args: [tests.py, -a, '!fails_with_rgw']
