@@ -112,10 +112,29 @@ struct BucketTrimStatus {
   static const std::string oid;
 };
 
-} // namespace rgw
-
 WRITE_CLASS_ENCODER(rgw::BucketTrimStatus);
+
+struct DeletedBucketList {
+  std::vector<rgw_bucket> entries;
+
+  void encode(bufferlist& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(entries, bl);
+    ENCODE_FINISH(bl);
+  }
+  void decode(bufferlist::const_iterator& p) {
+    DECODE_START(1, p);
+    decode(entries, p);
+    DECODE_FINISH(p);
+  }
+
+  static const std::string oid;
+};
+
+WRITE_CLASS_ENCODER(rgw::DeletedBucketList);
+} // namespace rgw
 
 int bilog_trim(const DoutPrefixProvider* p, rgw::sal::RadosStore* store,
 	       RGWBucketInfo& bucket_info, uint64_t gen, int shard_id,
 	       std::string_view start_marker, std::string_view end_marker);
+
