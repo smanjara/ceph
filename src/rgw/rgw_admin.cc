@@ -178,6 +178,7 @@ void usage()
   cout << "  bucket sync disable              disable bucket sync\n";
   cout << "  bucket sync enable               enable bucket sync\n";
   cout << "  bucket radoslist                 list rados objects backing bucket's objects\n";
+  cout << "  bucket list-deleted              list buckets that have orphaned objects associated\n";
   cout << "  bi get                           retrieve bucket index object entries\n";
   cout << "  bi put                           store bucket index object entries\n";
   cout << "  bi list                          list raw bucket index entries\n";
@@ -699,6 +700,7 @@ enum class OPT {
   BUCKET_RESHARD,
   BUCKET_CHOWN,
   BUCKET_RADOS_LIST,
+  BUCKET_LIST_DELETED,
   BUCKET_SHARD_OBJECTS,
   BUCKET_OBJECT_SHARD,
   BUCKET_RESYNC_ENCRYPTED_MULTIPART,
@@ -933,6 +935,7 @@ static SimpleCmd::Commands all_cmds = {
   { "bucket chown", OPT::BUCKET_CHOWN },
   { "bucket radoslist", OPT::BUCKET_RADOS_LIST },
   { "bucket rados list", OPT::BUCKET_RADOS_LIST },
+  { "bucket list-deleted", OPT::BUCKET_LIST_DELETED },
   { "bucket shard objects", OPT::BUCKET_SHARD_OBJECTS },
   { "bucket shard object", OPT::BUCKET_SHARD_OBJECTS },
   { "bucket object shard", OPT::BUCKET_OBJECT_SHARD },
@@ -7356,6 +7359,61 @@ int main(int argc, const char **argv)
 	"BE USED IN DELETING ORPHANS" << std::endl;
       std::cerr << "************************************"
 	"************************************" << std::endl;
+      return -ret;
+    }
+  }
+
+  if (opt_cmd == OPT::BUCKET_LIST_DELETED) {
+
+    rgw::sal::Bucket::ListParams params;
+    rgw::sal::Bucket::ListResults list_results;
+    params.list_versions = true;
+    params.allow_unordered = true;
+    rgw::DeletedBucketList results;
+
+    // read the deleted_buckets object and list the bucket entries.
+    // if there are no objects remove the bucket entry.
+    // else output the the bucket entry. update the object.
+    int ret = read_deleted_buckets_obj(dpp(), static_cast<rgw::sal::RadosStore*>(driver), results, null_yield);
+    if (ret < 0) {
+      cerr << "ERROR: read_deleted_buckets_obj() returned: " << cpp_strerror(-ret) << std::endl;
+      return -ret;
+    }
+
+    formatter->open_array_section("entries");
+    for (auto& each: results.entries) {
+      std::unique_ptr<rgw::sal::Bucket> bucket;
+      ret = driver->load_bucket(dpp(), each, &bucket, null_yield);
+      if (ret < 0) {
+        cerr << "could not get bucket info for bucket=" << each << " r=" << ret << std::endl;
+        return ret;
+      }
+      ret = bucket->list(dpp(), params, 1000, list_results, null_yield);
+      if (ret < 0) {
+        cerr << "ERROR: failed to list objects in the bucket=" << each << std::endl;
+        return ret;
+      }
+      if (list_results.objs.empty()) { // delete the bucket entry
+        for(auto iter = results.entries.begin();
+          iter != results.entries.end(); iter++) {
+          if (*iter == each) {
+            results.entries.erase(iter);
+          }
+        }
+      } else { // output the list
+        for (const auto& entry : results.entries) {
+          // encode_json('entry', entry.get_key(), formatter.get());
+          encode_json("entry", entry.name, formatter.get());
+        }
+      }
+    }
+
+    formatter->flush(cout);
+    formatter->close_section();
+
+    ret = write_deleted_buckets_obj(dpp(), static_cast<rgw::sal::RadosStore*>(driver), results, null_yield);
+    if (ret < 0) {
+      cerr << "ERROR: write_deleted_buckets_obj() returned: " << cpp_strerror(-ret) << std::endl;
       return -ret;
     }
   }

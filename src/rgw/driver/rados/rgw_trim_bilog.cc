@@ -913,9 +913,9 @@ int BucketTrimInstanceCR::operate(const DoutPrefixProvider *dpp)
       return set_cr_error(retcode);
     }
 
-    // append the bucket to 'deleted_buckets' if bucket list found objects
-    if (!list_results.objs.empty()) {
-      deleted_buckets.entries.push_back(clean_info->first.bucket);
+    // if there are no objects found, cleanup up the bucket instance
+    // otherwise add the bucket to deleted_buckets list
+    if (list_results.objs.empty()) {
       yield call(new RGWRemoveBucketInstanceInfoCR(
       store->svc()->async_processor,
       store, clean_info->first.bucket,
@@ -924,8 +924,10 @@ int BucketTrimInstanceCR::operate(const DoutPrefixProvider *dpp)
         ldpp_dout(dpp, 0) << "failed to remove instance bucket info: "
                           << cpp_strerror(retcode) << dendl;
         return set_cr_error(retcode);
-      }
-      // store the updated object
+        }
+      } else {
+      // update and store the object
+      deleted_buckets.entries.push_back(clean_info->first.bucket);
       using WriteCR = RGWSimpleRadosWriteCR<DeletedBucketList>;
       yield call(new WriteCR(dpp, store,
           rgw_raw_obj(store->svc()->zone->get_zone_params().log_pool, DeletedBucketList::oid),
@@ -1689,4 +1691,43 @@ int bilog_trim(const DoutPrefixProvider* p, rgw::sal::RadosStore* store,
 		    << "ERROR: bilog_rados->log_trim returned r=" << r << dendl;
   }
   return r;
+}
+
+int read_deleted_buckets_obj(const DoutPrefixProvider* dpp, rgw::sal::RadosStore* store,
+                             rgw::DeletedBucketList results, optional_yield y)
+{
+  auto& pool = store->svc()->zone->get_zone_params().log_pool;
+  auto& oid = DeletedBucketList::oid;
+  bufferlist bl;
+  int ret = rgw_get_system_obj(store->svc()->sysobj, pool, oid, bl, nullptr, nullptr, null_yield, dpp);
+  if (ret < 0) {
+    return ret;
+  }
+
+  try {
+    using ceph::decode;
+    auto iter = bl.cbegin();
+    decode(results.entries, iter);
+  } catch (buffer::error& err) {
+    ldpp_dout(dpp, 0) << "ERROR: failed to decode deleted_bucket object from pool: " << pool.name << dendl;
+    return -EIO;
+  }
+  return 0;
+}
+
+int write_deleted_buckets_obj(const DoutPrefixProvider* dpp, rgw::sal::RadosStore* store,
+                             rgw::DeletedBucketList results, optional_yield y)
+{
+  auto& pool = store->svc()->zone->get_zone_params().log_pool;
+  auto& oid = DeletedBucketList::oid;
+  bufferlist bl;
+  encode(results.entries, bl);
+
+  int ret = rgw_put_system_obj(dpp, store->svc()->sysobj, pool, oid, bl, false, nullptr,
+      ceph::real_time{}, null_yield);
+  if (ret < 0) {
+    return ret;
+  }
+
+  return 0;
 }
