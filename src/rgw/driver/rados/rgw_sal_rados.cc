@@ -575,6 +575,7 @@ int RadosBucket::load_bucket(const DoutPrefixProvider* dpp, optional_yield y)
   RGWSI_MetaBackend_CtxParams bectx_params = RGWSI_MetaBackend_CtxParams_SObj();
   RGWObjVersionTracker ep_ot;
   if (info.bucket.bucket_id.empty()) {
+    ldpp_dout(dpp, -1) << "no bucket instance " << dendl;
     ret = store->ctl()->bucket->read_bucket_info(info.bucket, &info, y, dpp,
 				      RGWBucketCtl::BucketInstance::GetParams()
 				      .set_mtime(&mtime)
@@ -582,6 +583,7 @@ int RadosBucket::load_bucket(const DoutPrefixProvider* dpp, optional_yield y)
                                       .set_bectx_params(bectx_params),
 				      &ep_ot);
   } else {
+    ldpp_dout(dpp, -1) << "reading bucket instance " << dendl;
     ret  = store->ctl()->bucket->read_bucket_instance_info(info.bucket, &info, y, dpp,
 				      RGWBucketCtl::BucketInstance::GetParams()
 				      .set_mtime(&mtime)

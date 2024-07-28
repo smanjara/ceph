@@ -522,9 +522,9 @@ class AsyncListBucket : public RGWAsyncRadosRequest {
   CephContext *const cct;
   rgw::sal::RadosStore* const store;
   RGWAsyncRadosProcessor *const async_rados;
-  rgw_bucket b;
+  std::string b;
   rgw::sal::Bucket::ListParams params;
-  rgw::sal::Bucket::ListResults list_results;
+  rgw_bucket bucket;
 
   int _send_request(const DoutPrefixProvider *dpp) override;
  public:
@@ -533,17 +533,19 @@ class AsyncListBucket : public RGWAsyncRadosRequest {
                   RGWAioCompletionNotifier *cn,
                   rgw::sal::RadosStore* const store,
                   RGWAsyncRadosProcessor *const async_rados,
-                  rgw_bucket b,
-                  rgw::sal::Bucket::ListParams params,
-                  rgw::sal::Bucket::ListResults list_results)
+                  std::string b,
+                  rgw::sal::Bucket::ListParams params)
     : RGWAsyncRadosRequest(caller, cn), cct(cct), store(store), async_rados(async_rados),
-      b(b), params(params), list_results(list_results){}
+      b(b), params(params) {}
+  
+  rgw::sal::Bucket::ListResults list_results;
 };
 
 int AsyncListBucket::_send_request(const DoutPrefixProvider *dpp) {
 
-  std::unique_ptr<rgw::sal::Bucket> bucket;
-  int r = store->load_bucket(dpp, b, &bucket, null_yield);
+  rgw_bucket_parse_bucket_key(cct, b, &bucket, nullptr);
+  std::unique_ptr<rgw::sal::Bucket> sal_bucket;
+  int r = store->load_bucket(dpp, bucket, &sal_bucket, null_yield);
   if (r < 0) {
     ldpp_dout(dpp, 0) << "could not get bucket info for bucket=" << b << " r=" << r << dendl;
     return r;
@@ -551,7 +553,7 @@ int AsyncListBucket::_send_request(const DoutPrefixProvider *dpp) {
 
   params.list_versions = true;
   params.allow_unordered = true;
-  int ret = bucket->list(dpp, params, 1000, list_results, null_yield);
+  int ret = sal_bucket->list(dpp, params, 1000, list_results, null_yield);
   if (ret < 0) {
     ldpp_dout(dpp, -1) << "ERROR failed to list objects in the bucket" << dendl;
     return ret;
@@ -559,19 +561,20 @@ int AsyncListBucket::_send_request(const DoutPrefixProvider *dpp) {
   return 0;
 }
 class ListBucketCR : public RGWSimpleCoroutine {
-  RGWAsyncRadosRequest *req{nullptr};
+  AsyncListBucket *req{nullptr};
   CephContext *cct;
   rgw::sal::RadosStore* const store;
-  rgw_bucket bucket;
+  std::string b;
   rgw::sal::Bucket::ListResults list_results;
   rgw::sal::Bucket::ListParams params;
+
  public:
   ListBucketCR(CephContext *cct,
               rgw::sal::RadosStore* const store,
-              rgw_bucket bucket,
+              std::string b,
               rgw::sal::Bucket::ListResults list_results)
     : RGWSimpleCoroutine(cct), store(store),
-      bucket(bucket), list_results(list_results) {}
+      b(b), list_results(list_results) {}
 
   ~ListBucketCR() override {
     request_cleanup();
@@ -581,11 +584,12 @@ class ListBucketCR : public RGWSimpleCoroutine {
   int send_request(const DoutPrefixProvider *dpp) override {
     req = new AsyncListBucket(cct, this, stack->create_completion_notifier(),
                               store, store->svc()->async_processor,
-                              bucket, params, list_results);
+                              b, params);
     store->svc()->async_processor->queue(req);
     return 0;
   }
   int request_complete() override {
+    list_results = std::move(req->list_results);
     return req->get_ret_status();
   }
   void request_cleanup() override {
@@ -851,6 +855,13 @@ int BucketTrimInstanceCR::operate(const DoutPrefixProvider *dpp)
 	return set_cr_error(-EINVAL);
       }
 
+      yield call(new ListBucketCR(cct, store, bucket_instance, list_results));
+      if (retcode < 0) {
+        ldpp_dout(dpp, 10) << "failed to list bucket: " << bucket_instance
+          << cpp_strerror(retcode) << dendl;
+        return set_cr_error(retcode);
+      }
+
       yield call(new BucketCleanIndexCollectCR(dpp, store, clean_info->first,
 					       clean_info->second.layout.in_index));
       if (retcode < 0) {
@@ -905,16 +916,20 @@ int BucketTrimInstanceCR::operate(const DoutPrefixProvider *dpp)
           << cpp_strerror(retcode) << dendl;
       return set_cr_error(retcode);
     }
-
-    yield call(new ListBucketCR(cct, store, clean_info->first.bucket, list_results));
+  /*
+    yield call(new ListBucketCR(cct, store, bucket_instance, list_results));
     if (retcode < 0) {
-      ldpp_dout(dpp, 10) << "failed to list bucket: " << clean_info->first.bucket.name
+      ldpp_dout(dpp, 10) << "failed to list bucket: " << bucket_instance
         << cpp_strerror(retcode) << dendl;
       return set_cr_error(retcode);
     }
+  */
 
     // if there are no objects found, cleanup up the bucket instance
     // otherwise add the bucket to deleted_buckets list
+    for (auto each: list_results.objs) {
+      ldpp_dout(dpp, 10) << "dir entry:" << each.key.name << dendl;
+    }
     if (list_results.objs.empty()) {
       yield call(new RGWRemoveBucketInstanceInfoCR(
       store->svc()->async_processor,
