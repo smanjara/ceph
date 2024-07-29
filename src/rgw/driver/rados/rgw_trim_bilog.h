@@ -115,7 +115,7 @@ struct BucketTrimStatus {
 WRITE_CLASS_ENCODER(rgw::BucketTrimStatus);
 
 struct DeletedBucketList {
-  std::vector<rgw_bucket> entries;
+  std::vector<std::string> entries;
 
   void encode(bufferlist& bl) const {
     ENCODE_START(1, 1, bl);
@@ -139,7 +139,7 @@ int bilog_trim(const DoutPrefixProvider* p, rgw::sal::RadosStore* store,
 	       std::string_view start_marker, std::string_view end_marker);
 
 int read_deleted_buckets_obj(const DoutPrefixProvider* dpp, rgw::sal::RadosStore* store,
-                             rgw::DeletedBucketList results, optional_yield y);
+                             rgw::DeletedBucketList* results, optional_yield y);
 
 int write_deleted_buckets_obj(const DoutPrefixProvider* dpp, rgw::sal::RadosStore* store,
                              rgw::DeletedBucketList results, optional_yield y);

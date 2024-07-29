@@ -565,14 +565,14 @@ class ListBucketCR : public RGWSimpleCoroutine {
   CephContext *cct;
   rgw::sal::RadosStore* const store;
   std::string b;
-  rgw::sal::Bucket::ListResults list_results;
+  rgw::sal::Bucket::ListResults *list_results;
   rgw::sal::Bucket::ListParams params;
 
  public:
   ListBucketCR(CephContext *cct,
               rgw::sal::RadosStore* const store,
               std::string b,
-              rgw::sal::Bucket::ListResults list_results)
+              rgw::sal::Bucket::ListResults *list_results)
     : RGWSimpleCoroutine(cct), store(store),
       b(b), list_results(list_results) {}
 
@@ -589,7 +589,7 @@ class ListBucketCR : public RGWSimpleCoroutine {
     return 0;
   }
   int request_complete() override {
-    list_results = std::move(req->list_results);
+    *list_results = std::move(req->list_results);
     return req->get_ret_status();
   }
   void request_cleanup() override {
@@ -855,11 +855,13 @@ int BucketTrimInstanceCR::operate(const DoutPrefixProvider *dpp)
 	return set_cr_error(-EINVAL);
       }
 
-      yield call(new ListBucketCR(cct, store, bucket_instance, list_results));
-      if (retcode < 0) {
-        ldpp_dout(dpp, 10) << "failed to list bucket: " << bucket_instance
-          << cpp_strerror(retcode) << dendl;
-        return set_cr_error(retcode);
+      if (clean_info->first.layout.logs.front().layout.type == rgw::BucketLogType::Deleted) {
+        yield call(new ListBucketCR(cct, store, bucket_instance, &list_results));
+        if (retcode < 0) {
+          ldpp_dout(dpp, 10) << "failed to list bucket: " << bucket_instance
+            << cpp_strerror(retcode) << dendl;
+          return set_cr_error(retcode);
+        }
       }
 
       yield call(new BucketCleanIndexCollectCR(dpp, store, clean_info->first,
@@ -916,20 +918,9 @@ int BucketTrimInstanceCR::operate(const DoutPrefixProvider *dpp)
           << cpp_strerror(retcode) << dendl;
       return set_cr_error(retcode);
     }
-  /*
-    yield call(new ListBucketCR(cct, store, bucket_instance, list_results));
-    if (retcode < 0) {
-      ldpp_dout(dpp, 10) << "failed to list bucket: " << bucket_instance
-        << cpp_strerror(retcode) << dendl;
-      return set_cr_error(retcode);
-    }
-  */
 
     // if there are no objects found, cleanup up the bucket instance
     // otherwise add the bucket to deleted_buckets list
-    for (auto each: list_results.objs) {
-      ldpp_dout(dpp, 10) << "dir entry:" << each.key.name << dendl;
-    }
     if (list_results.objs.empty()) {
       yield call(new RGWRemoveBucketInstanceInfoCR(
       store->svc()->async_processor,
@@ -940,9 +931,10 @@ int BucketTrimInstanceCR::operate(const DoutPrefixProvider *dpp)
                           << cpp_strerror(retcode) << dendl;
         return set_cr_error(retcode);
         }
-      } else {
+    } else {
       // update and store the object
-      deleted_buckets.entries.push_back(clean_info->first.bucket);
+      deleted_buckets.entries.push_back(bucket_instance);
+      ldpp_dout(dpp, 10) << "added bucket:" << bucket_instance << " to deleted_buckets list: " << dendl;
       using WriteCR = RGWSimpleRadosWriteCR<DeletedBucketList>;
       yield call(new WriteCR(dpp, store,
           rgw_raw_obj(store->svc()->zone->get_zone_params().log_pool, DeletedBucketList::oid),
@@ -950,7 +942,6 @@ int BucketTrimInstanceCR::operate(const DoutPrefixProvider *dpp)
       if (retcode < 0) {
         ldpp_dout(dpp, 10) << "failed writing to 'deleted_buckets' object "
             << cpp_strerror(retcode) << dendl;
-        return set_cr_error(retcode);
       }
     }
   }
@@ -1003,6 +994,7 @@ int BucketTrimInstanceCR::operate(const DoutPrefixProvider *dpp)
   }
   return 0;
 }
+
 
 /// trim each bucket instance while limiting the number of concurrent operations
 
@@ -1338,75 +1330,6 @@ int BucketTrimCR::operate(const DoutPrefixProvider *dpp)
       }
     }
 
-/*
-    // check for orphaned objects in buckets. if there are objects add the bucket to the omap list
-    // "deleted_buckets" object.
-
-    using ReadCR = RGWSimpleRadosReadCR<DeletedBucketList>;
-    yield call(new ReadCR(dpp, store,
-              rgw_raw_obj(store->svc()->zone->get_zone_params().log_pool, DeletedBucketList::oid),
-              &deleted_buckets, true, &objv_tracker));
-    if (retcode < 0) {
-      ldpp_dout(dpp, 10) << "failed to read deleted_buckets object: "
-          << cpp_strerror(retcode) << dendl;
-      return set_cr_error(retcode);
-    }
-
-    yield {
-      // read the entries in deleted_buckets during every trim and
-      // remove buckets that don't have associated objects anymore. admin
-      // might have deleted them?
-      for (auto& each: deleted_buckets.entries) {
-        call(new ListBucketCR(cct, store, each, list_results));
-        if (retcode < 0) {
-          ldpp_dout(dpp, 10) << "failed to list bucket: " << each
-            << cpp_strerror(retcode) << dendl;
-          return set_cr_error(retcode);
-        }
-        if (list_results.objs.empty()) {
-          for(auto iter = deleted_buckets.entries.begin();
-              iter != deleted_buckets.entries.end(); iter++) {
-            if (*iter == each) {
-              deleted_buckets.entries.erase(iter);
-            }
-          }
-        }
-      }
-      // add new buckets
-      for (auto& entry: buckets) {
-        // bucket already exists in the list
-        if (std::find(deleted_buckets.entries.begin(), deleted_buckets.entries.end(), entry)
-            != deleted_buckets.entries.end()) {
-          break;
-        } else { // else list the bucket equivalent to "bucket list --bucket-id"
-          call(new ListBucketCR(cct, store, entry, list_results));
-          if (retcode < 0) {
-            ldpp_dout(dpp, 10) << "failed to list bucket: " << entry
-              << cpp_strerror(retcode) << dendl;
-            return set_cr_error(retcode);
-          }
-
-          // append the bucket to 'deleted_buckets' if bucket list found objects
-          if (!list_results.objs.empty()) {
-            deleted_buckets.entries.push_back(entry);
-          }
-        }
-      }
-
-      // store the updated object
-      using WriteCR = RGWSimpleRadosWriteCR<DeletedBucketList>;
-      call(new WriteCR(dpp, store,
-          rgw_raw_obj(store->svc()->zone->get_zone_params().log_pool, DeletedBucketList::oid),
-          deleted_buckets, &objv_tracker));
-      if (retcode < 0) {
-        ldpp_dout(dpp, 10) << "failed writing to 'deleted_buckets' object "
-            << cpp_strerror(retcode) << dendl;
-        return set_cr_error(retcode);
-      }
-    }
-
-*/
-
     // trim bucket instances with limited concurrency
     set_status("trimming buckets");
     ldpp_dout(dpp, 4) << "collected " << buckets.size() << " buckets for trim" << dendl;
@@ -1709,7 +1632,7 @@ int bilog_trim(const DoutPrefixProvider* p, rgw::sal::RadosStore* store,
 }
 
 int read_deleted_buckets_obj(const DoutPrefixProvider* dpp, rgw::sal::RadosStore* store,
-                             rgw::DeletedBucketList results, optional_yield y)
+                             rgw::DeletedBucketList* results, optional_yield y)
 {
   auto& pool = store->svc()->zone->get_zone_params().log_pool;
   auto& oid = DeletedBucketList::oid;
@@ -1720,13 +1643,13 @@ int read_deleted_buckets_obj(const DoutPrefixProvider* dpp, rgw::sal::RadosStore
   }
 
   try {
-    using ceph::decode;
     auto iter = bl.cbegin();
-    decode(results.entries, iter);
+    decode(*results, iter);
   } catch (buffer::error& err) {
     ldpp_dout(dpp, 0) << "ERROR: failed to decode deleted_bucket object from pool: " << pool.name << dendl;
     return -EIO;
   }
+
   return 0;
 }
 
@@ -1736,7 +1659,7 @@ int write_deleted_buckets_obj(const DoutPrefixProvider* dpp, rgw::sal::RadosStor
   auto& pool = store->svc()->zone->get_zone_params().log_pool;
   auto& oid = DeletedBucketList::oid;
   bufferlist bl;
-  encode(results.entries, bl);
+  encode(results, bl);
 
   int ret = rgw_put_system_obj(dpp, store->svc()->sysobj, pool, oid, bl, false, nullptr,
       ceph::real_time{}, null_yield);

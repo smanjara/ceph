@@ -7374,7 +7374,7 @@ int main(int argc, const char **argv)
     // read the deleted_buckets object and list the bucket entries.
     // if there are no objects remove the bucket entry.
     // else output the the bucket entry. update the object.
-    int ret = read_deleted_buckets_obj(dpp(), static_cast<rgw::sal::RadosStore*>(driver), results, null_yield);
+    int ret = read_deleted_buckets_obj(dpp(), static_cast<rgw::sal::RadosStore*>(driver), &results, null_yield);
     if (ret < 0) {
       cerr << "ERROR: read_deleted_buckets_obj() returned: " << cpp_strerror(-ret) << std::endl;
       return -ret;
@@ -7382,38 +7382,38 @@ int main(int argc, const char **argv)
 
     formatter->open_array_section("entries");
     for (auto& each: results.entries) {
+      /*
+      rgw_bucket b;
       std::unique_ptr<rgw::sal::Bucket> bucket;
-      ret = driver->load_bucket(dpp(), each, &bucket, null_yield);
+      rgw_bucket_parse_bucket_key(driver->ctx(), each, &b, nullptr);
+      ret = driver->load_bucket(dpp(), b, &bucket, null_yield);
       if (ret < 0) {
-        cerr << "could not get bucket info for bucket=" << each << " r=" << ret << std::endl;
-        return ret;
+        ldpp_dout(dpp(), 10) << "could not get bucket info for bucket=" << each << " r=" << ret << dendl;
       }
       ret = bucket->list(dpp(), params, 1000, list_results, null_yield);
       if (ret < 0) {
-        cerr << "ERROR: failed to list objects in the bucket=" << each << std::endl;
-        return ret;
+        ldpp_dout(dpp(), 10) << "failed to list objects in the bucket=" << each << dendl;
       }
-      if (list_results.objs.empty()) { // delete the bucket entry
+      if (list_results.objs.empty()) { // delete the bucket entry if list is empty
         for(auto iter = results.entries.begin();
           iter != results.entries.end(); iter++) {
-          if (*iter == each) {
+          if (iter == each) {
             results.entries.erase(iter);
           }
         }
       } else { // output the list
-        for (const auto& entry : results.entries) {
-          // encode_json('entry', entry.get_key(), formatter.get());
-          encode_json("entry", entry.name, formatter.get());
-        }
+      */
+      encode_json("entry", each, formatter.get());
+      formatter->flush(cout);
       }
-    }
 
-    formatter->flush(cout);
+//    formatter->flush(cout);
     formatter->close_section();
+    formatter->flush(cout);
 
     ret = write_deleted_buckets_obj(dpp(), static_cast<rgw::sal::RadosStore*>(driver), results, null_yield);
     if (ret < 0) {
-      cerr << "ERROR: write_deleted_buckets_obj() returned: " << cpp_strerror(-ret) << std::endl;
+      ldpp_dout(dpp(), 10) << "ERROR: write_deleted_buckets_obj() returned: " << cpp_strerror(-ret) << dendl;
       return -ret;
     }
   }
