@@ -178,6 +178,7 @@ void usage()
   cout << "  bucket sync disable              disable bucket sync\n";
   cout << "  bucket sync enable               enable bucket sync\n";
   cout << "  bucket radoslist                 list rados objects backing bucket's objects\n";
+  cout << "  bucket list-deleted              list buckets that have orphaned objects associated\n";
   cout << "  bi get                           retrieve bucket index object entries\n";
   cout << "  bi put                           store bucket index object entries\n";
   cout << "  bi list                          list raw bucket index entries\n";
@@ -699,6 +700,7 @@ enum class OPT {
   BUCKET_RESHARD,
   BUCKET_CHOWN,
   BUCKET_RADOS_LIST,
+  BUCKET_LIST_DELETED,
   BUCKET_SHARD_OBJECTS,
   BUCKET_OBJECT_SHARD,
   BUCKET_RESYNC_ENCRYPTED_MULTIPART,
@@ -933,6 +935,7 @@ static SimpleCmd::Commands all_cmds = {
   { "bucket chown", OPT::BUCKET_CHOWN },
   { "bucket radoslist", OPT::BUCKET_RADOS_LIST },
   { "bucket rados list", OPT::BUCKET_RADOS_LIST },
+  { "bucket list-deleted", OPT::BUCKET_LIST_DELETED },
   { "bucket shard objects", OPT::BUCKET_SHARD_OBJECTS },
   { "bucket shard object", OPT::BUCKET_SHARD_OBJECTS },
   { "bucket object shard", OPT::BUCKET_OBJECT_SHARD },
@@ -7358,6 +7361,26 @@ int main(int argc, const char **argv)
 	"************************************" << std::endl;
       return -ret;
     }
+  }
+
+  if (opt_cmd == OPT::BUCKET_LIST_DELETED) {
+
+    std::set<std::string> bucket_entries;
+
+    int ret = list_deleted_buckets(dpp, static_cast<rgw::sal::RadosStore*>(driver), bucket_entries, null_yield);
+    if (ret < 0) {
+      cerr << "ERROR: list_deleted_buckets() returned: " << cpp_strerror(-ret) << std::endl;
+      return -ret;
+    }
+
+    formatter->open_array_section("entries");
+    for (auto& each: bucket_entries) {
+      encode_json("entry", each, formatter.get());
+      formatter->flush(cout);
+      }
+
+    formatter->close_section();
+    formatter->flush(cout);
   }
 
   if (opt_cmd == OPT::BUCKET_LAYOUT) {
