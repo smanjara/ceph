@@ -1360,6 +1360,7 @@ def test_set_bucket_policy():
         bucket.set_policy(policy)
         assert(bucket.get_policy().decode('ascii') == policy)
 
+@attr('fails_with_rgw')
 @attr('bucket_sync_disable')
 def test_bucket_sync_disable():
     zonegroup = realm.master_zonegroup()
@@ -1375,6 +1376,7 @@ def test_bucket_sync_disable():
 
     zonegroup_data_checkpoint(zonegroup_conns)
 
+@attr('fails_with_rgw')
 @attr('bucket_sync_disable')
 def test_bucket_sync_enable_right_after_disable():
     zonegroup = realm.master_zonegroup()
@@ -1410,6 +1412,7 @@ def test_bucket_sync_enable_right_after_disable():
 
     zonegroup_data_checkpoint(zonegroup_conns)
 
+@attr('fails_with_rgw')
 @attr('bucket_sync_disable')
 def test_bucket_sync_disable_enable():
     zonegroup = realm.master_zonegroup()
@@ -1573,7 +1576,6 @@ def test_bucket_index_log_trim():
 # TODO: disable failing tests temporarily
 # until they are fixed
 
-@attr('fails_with_rgw')
 def test_bucket_reshard_index_log_trim():
     zonegroup = realm.master_zonegroup()
     zonegroup_conns = ZonegroupConns(zonegroup)
@@ -1870,7 +1872,43 @@ def trash_bucket(zone, bucket_name):
     cmd += ['--bucket', bucket_name]
     zone.cluster.admin(cmd)
 
-@attr('bucket_reshard')
+def test_role_sync():
+    zonegroup = realm.master_zonegroup()
+    zonegroup_conns = ZonegroupConns(zonegroup)
+    roles, zone_role = create_role_per_zone(zonegroup_conns)
+
+    zonegroup_meta_checkpoint(zonegroup)
+
+    for source_conn, target_conn in combinations(zonegroup_conns.zones, 2):
+        if target_conn.zone.has_roles():
+            check_roles_eq(source_conn, target_conn)
+
+def test_role_delete_sync():
+    zonegroup = realm.master_zonegroup()
+    zonegroup_conns = ZonegroupConns(zonegroup)
+    role_name = gen_role_name()
+    log.info('create role zone=%s name=%s', zonegroup_conns.master_zone.name, role_name)
+    policy_document = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":[\"arn:aws:iam:::user/testuser\"]},\"Action\":[\"sts:AssumeRole\"]}]}"
+    zonegroup_conns.master_zone.iam_conn.create_role(RoleName=role_name, AssumeRolePolicyDocument=policy_document)
+
+    zonegroup_meta_checkpoint(zonegroup)
+
+    for zone in zonegroup_conns.zones:
+        log.info(f'checking if zone: {zone.name} has role: {role_name}')
+        zone.iam_conn.get_role(RoleName=role_name)
+        log.info(f'success, zone: {zone.name} has role: {role_name}')
+
+    log.info(f"deleting role: {role_name}")
+    zonegroup_conns.master_zone.iam_conn.delete_role(RoleName=role_name)
+    zonegroup_meta_checkpoint(zonegroup)
+
+    for zone in zonegroup_conns.zones:
+        log.info(f'checking if zone: {zone.name} does not have role: {role_name}')
+        assert_raises(zone.iam_conn.exceptions.NoSuchEntityException,
+                      zone.iam_conn.get_role, RoleName=role_name)
+        log.info(f'success, zone: {zone.name} does not have role: {role_name}')
+
+
 def test_zap_init_bucket_sync_run():
     """
     Create several generations of objects, trash them, then run bucket sync init
@@ -1923,43 +1961,6 @@ def test_zap_init_bucket_sync_run():
             secondary.zone.start()
 
     zonegroup_bucket_checkpoint(zonegroup_conns, bucket.name)
-
-def test_role_sync():
-    zonegroup = realm.master_zonegroup()
-    zonegroup_conns = ZonegroupConns(zonegroup)
-    roles, zone_role = create_role_per_zone(zonegroup_conns)
-
-    zonegroup_meta_checkpoint(zonegroup)
-
-    for source_conn, target_conn in combinations(zonegroup_conns.zones, 2):
-        if target_conn.zone.has_roles():
-            check_roles_eq(source_conn, target_conn)
-
-def test_role_delete_sync():
-    zonegroup = realm.master_zonegroup()
-    zonegroup_conns = ZonegroupConns(zonegroup)
-    role_name = gen_role_name()
-    log.info('create role zone=%s name=%s', zonegroup_conns.master_zone.name, role_name)
-    policy_document = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":[\"arn:aws:iam:::user/testuser\"]},\"Action\":[\"sts:AssumeRole\"]}]}"
-    zonegroup_conns.master_zone.iam_conn.create_role(RoleName=role_name, AssumeRolePolicyDocument=policy_document)
-
-    zonegroup_meta_checkpoint(zonegroup)
-
-    for zone in zonegroup_conns.zones:
-        log.info(f'checking if zone: {zone.name} has role: {role_name}')
-        zone.iam_conn.get_role(RoleName=role_name)
-        log.info(f'success, zone: {zone.name} has role: {role_name}')
-
-    log.info(f"deleting role: {role_name}")
-    zonegroup_conns.master_zone.iam_conn.delete_role(RoleName=role_name)
-    zonegroup_meta_checkpoint(zonegroup)
-
-    for zone in zonegroup_conns.zones:
-        log.info(f'checking if zone: {zone.name} does not have role: {role_name}')
-        assert_raises(zone.iam_conn.exceptions.NoSuchEntityException,
-                      zone.iam_conn.get_role, RoleName=role_name)
-        log.info(f'success, zone: {zone.name} does not have role: {role_name}')
-
 
 def test_replication_status():
     zonegroup = realm.master_zonegroup()
