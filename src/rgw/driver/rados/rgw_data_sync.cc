@@ -1702,8 +1702,13 @@ public:
                       lease_cr, bucket_shard_cache, nullptr, error_repo, tn, false);
           tn->log(10, SSTR("full sync: syncing shard_id " << sid << " of gen " << each->gen));
           if (first_shard) {
-            yield call(shard_cr);
+            tn->log(10, SSTR("syncing first shard " << sid << " of gen " << each->gen));
             first_shard = false;
+            yield call(shard_cr);
+            if (retcode < 0) {
+              drain_all();
+              return set_cr_error(retcode);
+            }
           } else {
             yield_spawn_window(shard_cr, sc->lcc.adj_concurrency(cct->_conf->rgw_data_sync_spawn_window),
                               [&](uint64_t stack_id, int ret) {
@@ -1723,10 +1728,13 @@ public:
               });
       }
 
-      yield call(marker_tracker->finish(key));
-      if (retcode < 0) {
-          return set_cr_error(retcode);
-        }
+      tn->log(10, SSTR("calling marker tracker finish on: " << key));
+      if (!key.empty()) {
+        yield call(marker_tracker->finish(key));
+        if (retcode < 0) {
+            return set_cr_error(retcode);
+          }
+      }
 
       return set_cr_done();
     }
