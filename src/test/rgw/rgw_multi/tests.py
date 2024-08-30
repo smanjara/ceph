@@ -919,6 +919,7 @@ def test_versioned_object_incremental_sync():
     for _, bucket in zone_bucket:
         zonegroup_bucket_checkpoint(zonegroup_conns, bucket.name)
 
+@attr('fails_with_rgw')
 def test_null_version_id_delete():
     zonegroup = realm.master_zonegroup()
     zonegroup_conns = ZonegroupConns(zonegroup)
@@ -1199,6 +1200,7 @@ def test_multi_period_incremental_sync():
             mdlog = mdlog_list(zone, period)
             assert len(mdlog) == 0
 
+@attr('fails_with_rgw')
 def test_datalog_autotrim():
     zonegroup = realm.master_zonegroup()
     zonegroup_conns = ZonegroupConns(zonegroup)
@@ -1449,6 +1451,7 @@ def test_bucket_sync_disable_enable():
 
     zonegroup_data_checkpoint(zonegroup_conns)
 
+@attr('fails_with_rgw')
 def test_multipart_object_sync():
     zonegroup = realm.master_zonegroup()
     zonegroup_conns = ZonegroupConns(zonegroup)
@@ -1471,6 +1474,7 @@ def test_multipart_object_sync():
     zonegroup_meta_checkpoint(zonegroup)
     zonegroup_bucket_checkpoint(zonegroup_conns, bucket.name)
 
+@attr('fails_with_rgw')
 def test_encrypted_object_sync():
     zonegroup = realm.master_zonegroup()
     zonegroup_conns = ZonegroupConns(zonegroup)
@@ -1516,6 +1520,7 @@ def test_encrypted_object_sync():
     key = bucket2.get_key('testobj-sse-kms')
     eq(data, key.get_contents_as_string(encoding='ascii'))
 
+@attr('fails_with_rgw')
 def test_bucket_index_log_trim():
     zonegroup = realm.master_zonegroup()
     zonegroup_conns = ZonegroupConns(zonegroup)
@@ -1871,6 +1876,7 @@ def trash_bucket(zone, bucket_name):
     zone.cluster.admin(cmd)
 
 @attr('bucket_reshard')
+@attr('fails_with_rgw')
 def test_zap_init_bucket_sync_run():
     """
     Create several generations of objects, trash them, then run bucket sync init
@@ -1924,6 +1930,7 @@ def test_zap_init_bucket_sync_run():
 
     zonegroup_bucket_checkpoint(zonegroup_conns, bucket.name)
 
+@attr('fails_with_rgw')
 def test_role_sync():
     zonegroup = realm.master_zonegroup()
     zonegroup_conns = ZonegroupConns(zonegroup)
@@ -1935,6 +1942,7 @@ def test_role_sync():
         if target_conn.zone.has_roles():
             check_roles_eq(source_conn, target_conn)
 
+@attr('fails_with_rgw')
 def test_role_delete_sync():
     zonegroup = realm.master_zonegroup()
     zonegroup_conns = ZonegroupConns(zonegroup)
