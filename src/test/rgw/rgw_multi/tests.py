@@ -1573,7 +1573,6 @@ def test_bucket_index_log_trim():
 # TODO: disable failing tests temporarily
 # until they are fixed
 
-@attr('fails_with_rgw')
 def test_bucket_reshard_index_log_trim():
     zonegroup = realm.master_zonegroup()
     zonegroup_conns = ZonegroupConns(zonegroup)
@@ -2370,7 +2369,6 @@ def check_objects_not_exist(bucket, obj_arr):
     for objname in obj_arr:
         check_object_not_exists(bucket, objname)
 
-@attr('fails_with_rgw')
 @attr('sync_policy')
 def test_sync_policy_config_zonegroup():
     """
@@ -2442,7 +2440,6 @@ def test_sync_policy_config_zonegroup():
 
     return
 
-@attr('fails_with_rgw')
 @attr('sync_policy')
 def test_sync_flow_symmetrical_zonegroup_all():
     """
@@ -2500,7 +2497,6 @@ def test_sync_flow_symmetrical_zonegroup_all():
     remove_sync_policy_group(c1, "sync-group")
     return
 
-@attr('fails_with_rgw')
 @attr('sync_policy')
 def test_sync_flow_symmetrical_zonegroup_select():
     """
@@ -2569,7 +2565,6 @@ def test_sync_flow_symmetrical_zonegroup_select():
     remove_sync_policy_group(c1, "sync-group")
     return
 
-@attr('fails_with_rgw')
 @attr('sync_policy')
 def test_sync_flow_directional_zonegroup_select():
     """
@@ -2687,7 +2682,6 @@ def test_sync_flow_directional_zonegroup_select():
     remove_sync_policy_group(c1, "sync-group")
     return
 
-@attr('fails_with_rgw')
 @attr('sync_policy')
 def test_sync_single_bucket():
     """
@@ -2800,7 +2794,6 @@ def test_sync_single_bucket():
     remove_sync_policy_group(c1, "sync-group")
     return
 
-@attr('fails_with_rgw')
 @attr('sync_policy')
 def test_sync_different_buckets():
     """
@@ -2950,7 +2943,6 @@ def test_sync_different_buckets():
     remove_sync_policy_group(c1, "sync-group")
     return
 
-@attr('fails_with_rgw')
 @attr('sync_policy')
 def test_sync_multiple_buckets_to_single():
     """
@@ -3072,7 +3064,6 @@ def test_sync_multiple_buckets_to_single():
     remove_sync_policy_group(c1, "sync-group")
     return
 
-@attr('fails_with_rgw')
 @attr('sync_policy')
 def test_sync_single_bucket_to_multiple():
     """
