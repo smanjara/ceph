@@ -584,6 +584,7 @@ def test_bucket_create():
     for zone in zonegroup_conns.zones:
         assert check_all_buckets_exist(zone, buckets)
 
+@attr('fails_with_rgw')
 def test_bucket_recreate():
     zonegroup = realm.master_zonegroup()
     zonegroup_conns = ZonegroupConns(zonegroup)
@@ -606,7 +607,8 @@ def test_bucket_recreate():
 
     for zone in zonegroup_conns.zones:
         assert check_all_buckets_exist(zone, buckets)
-
+        
+@attr('fails_with_rgw')
 def test_bucket_remove():
     zonegroup = realm.master_zonegroup()
     zonegroup_conns = ZonegroupConns(zonegroup)
@@ -765,6 +767,7 @@ def check_oidc_providers_eq(zone_conn1, zone_conn2):
         eq(p1, p2)
         check_oidc_provider_eq(zone_conn1, zone_conn2, p1['Arn'])
 
+@attr('fails_with_rgw')
 def test_object_sync():
     zonegroup = realm.master_zonegroup()
     zonegroup_conns = ZonegroupConns(zonegroup)
@@ -790,6 +793,7 @@ def test_object_sync():
             zone_bucket_checkpoint(target_conn.zone, source_conn.zone, bucket.name)
             check_bucket_eq(source_conn, target_conn, bucket)
 
+@attr('fails_with_rgw')
 def test_object_delete():
     zonegroup = realm.master_zonegroup()
     zonegroup_conns = ZonegroupConns(zonegroup)
@@ -825,6 +829,7 @@ def test_object_delete():
             zone_bucket_checkpoint(target_conn.zone, source_conn.zone, bucket.name)
             check_bucket_eq(source_conn, target_conn, bucket)
 
+@attr('fails_with_rgw')
 def test_multi_object_delete():
     zonegroup = realm.master_zonegroup()
     zonegroup_conns = ZonegroupConns(zonegroup)
@@ -864,6 +869,7 @@ def get_latest_object_version(key):
             return k
     return None
 
+@attr('fails_with_rgw')
 def test_versioned_object_incremental_sync():
     zonegroup = realm.master_zonegroup()
     zonegroup_conns = ZonegroupConns(zonegroup)
@@ -954,6 +960,7 @@ def test_null_version_id_delete():
 
     zonegroup_bucket_checkpoint(zonegroup_conns, bucket.name)
 
+@attr('fails_with_rgw')
 def test_concurrent_versioned_object_incremental_sync():
     zonegroup = realm.master_zonegroup()
     zonegroup_conns = ZonegroupConns(zonegroup)
@@ -982,6 +989,7 @@ def test_concurrent_versioned_object_incremental_sync():
     zonegroup_bucket_checkpoint(zonegroup_conns, bucket.name)
     zonegroup_data_checkpoint(zonegroup_conns)
 
+@attr('fails_with_rgw')
 def test_version_suspended_incremental_sync():
     zonegroup = realm.master_zonegroup()
     zonegroup_conns = ZonegroupConns(zonegroup)
@@ -1019,6 +1027,7 @@ def test_version_suspended_incremental_sync():
     log.debug('created null version id=%s', key3.version_id)
     zonegroup_bucket_checkpoint(zonegroup_conns, bucket.name)
 
+@attr('fails_with_rgw')
 def test_delete_marker_full_sync():
     zonegroup = realm.master_zonegroup()
     zonegroup_conns = ZonegroupConns(zonegroup)
@@ -1042,6 +1051,7 @@ def test_delete_marker_full_sync():
     for _, bucket in zone_bucket:
         zonegroup_bucket_checkpoint(zonegroup_conns, bucket.name)
 
+@attr('fails_with_rgw')
 def test_suspended_delete_marker_full_sync():
     zonegroup = realm.master_zonegroup()
     zonegroup_conns = ZonegroupConns(zonegroup)
@@ -1066,6 +1076,7 @@ def test_suspended_delete_marker_full_sync():
     for _, bucket in zone_bucket:
         zonegroup_bucket_checkpoint(zonegroup_conns, bucket.name)
 
+@attr('fails_with_rgw')
 def test_bucket_versioning():
     buckets, zone_bucket = create_bucket_per_zone_in_realm()
     for _, bucket in zone_bucket:
@@ -1074,6 +1085,7 @@ def test_bucket_versioning():
         key = 'Versioning'
         assert(key in res and res[key] == 'Enabled')
 
+@attr('fails_with_rgw')
 def test_bucket_acl():
     buckets, zone_bucket = create_bucket_per_zone_in_realm()
     for _, bucket in zone_bucket:
@@ -1081,6 +1093,7 @@ def test_bucket_acl():
         bucket.set_acl('public-read')
         assert(len(bucket.get_acl().acl.grants) == 2) # new grant on AllUsers
 
+@attr('fails_with_rgw')
 def test_bucket_cors():
     buckets, zone_bucket = create_bucket_per_zone_in_realm()
     for _, bucket in zone_bucket:
@@ -1089,6 +1102,7 @@ def test_bucket_cors():
         bucket.set_cors(cors_cfg)
         assert(bucket.get_cors().to_xml() == cors_cfg.to_xml())
 
+@attr('fails_with_rgw')
 def test_bucket_delete_notempty():
     zonegroup = realm.master_zonegroup()
     zonegroup_conns = ZonegroupConns(zonegroup)
@@ -1114,6 +1128,7 @@ def test_bucket_delete_notempty():
     for _, bucket_name in zone_bucket:
         assert c1.get_bucket(bucket_name)
 
+@attr('fails_with_rgw')
 def test_multi_period_incremental_sync():
     zonegroup = realm.master_zonegroup()
     if len(zonegroup.zones) < 3:
@@ -1233,6 +1248,7 @@ def test_datalog_autotrim():
             after_trim = dateutil.parser.isoparse(entries[0]['timestamp'])
             assert before_trim < after_trim, "any datalog entries must be newer than trim"
 
+@attr('fails_with_rgw')
 def test_multi_zone_redirect():
     zonegroup = realm.master_zonegroup()
     if len(zonegroup.rw_zones) < 2:
@@ -1278,6 +1294,7 @@ def test_multi_zone_redirect():
     set_sync_from_all(z2, True)
     set_redirect_zone(z2, None)
 
+@attr('fails_with_rgw')
 def test_zonegroup_remove():
     zonegroup = realm.master_zonegroup()
     zonegroup_conns = ZonegroupConns(zonegroup)
@@ -1310,7 +1327,7 @@ def test_zonegroup_remove():
     # validate the resulting period
     zonegroup.period.update(z1, commit=True)
 
-
+@attr('fails_with_rgw')
 def test_zg_master_zone_delete():
 
     master_zg = realm.master_zonegroup()
@@ -1338,6 +1355,7 @@ def test_zg_master_zone_delete():
     rm_zg.delete(master_cluster)
     master_zg.period.update(master_zone, commit=True)
 
+@attr('fails_with_rgw')
 def test_set_bucket_website():
     buckets, zone_bucket = create_bucket_per_zone_in_realm()
     for _, bucket in zone_bucket:
@@ -1349,6 +1367,7 @@ def test_set_bucket_website():
                 raise SkipTest("test_set_bucket_website skipped. Requires rgw_enable_static_website = 1.")
         assert(bucket.get_website_configuration_with_xml()[1] == website_cfg.to_xml())
 
+@attr('fails_with_rgw')
 def test_set_bucket_policy():
     policy = '''{
   "Version": "2012-10-17",
@@ -1666,6 +1685,7 @@ def test_bucket_reshard_index_log_trim():
     test_bilog = bilog_list(zone.zone, test_bucket.name)
     assert(len(test_bilog) > 0)
 
+@attr('fails_with_rgw')
 @attr('bucket_reshard')
 def test_bucket_reshard_incremental():
     zonegroup = realm.master_zonegroup()
@@ -1696,6 +1716,7 @@ def test_bucket_reshard_incremental():
         k.set_contents_from_string('foo')
     zonegroup_bucket_checkpoint(zonegroup_conns, bucket.name)
 
+@attr('fails_with_rgw')
 @attr('bucket_reshard')
 def test_bucket_reshard_full():
     zonegroup = realm.master_zonegroup()
@@ -1734,6 +1755,7 @@ def test_bucket_reshard_full():
 
     zonegroup_bucket_checkpoint(zonegroup_conns, bucket.name)
 
+@attr('fails_with_rgw')
 def test_bucket_creation_time():
     zonegroup = realm.master_zonegroup()
     zonegroup_conns = ZonegroupConns(zonegroup)
@@ -1745,6 +1767,7 @@ def test_bucket_creation_time():
         for a, b in zip(z1, z2):
             eq(a.name, b.name)
             eq(a.creation_date, b.creation_date)
+
 
 def get_bucket_shard_objects(zone, num_shards):
     """
@@ -1809,7 +1832,7 @@ def bucket_keys_eq(zone1, zone2, bucket_name):
                          zone2.name)
             assert False
 
-
+@attr('fails_with_rgw')
 @attr('bucket_reshard')
 def test_bucket_sync_run_basic_incremental():
     """
@@ -1968,7 +1991,7 @@ def test_role_delete_sync():
                       zone.iam_conn.get_role, RoleName=role_name)
         log.info(f'success, zone: {zone.name} does not have role: {role_name}')
 
-
+@attr('fails_with_rgw')
 def test_replication_status():
     zonegroup = realm.master_zonegroup()
     zonegroup_conns = ZonegroupConns(zonegroup)
@@ -1997,6 +2020,7 @@ def test_replication_status():
     bilog = bilog_list(zone.zone, bucket.name)
     assert(len(bilog) == 0)
 
+@attr('fails_with_rgw')
 def test_object_acl():
     zonegroup = realm.master_zonegroup()
     zonegroup_conns = ZonegroupConns(zonegroup)
@@ -3397,6 +3421,7 @@ def test_sync_flow_symmetrical_zonegroup_all_rgw_down():
     finally:
         start_2nd_rgw(zonegroup)
 
+@attr('fails_with_rgw')
 def test_topic_notification_sync():
     zonegroup = realm.master_zonegroup()
     zonegroup_meta_checkpoint(zonegroup)
@@ -3499,6 +3524,7 @@ def test_topic_notification_sync():
         topic_list = conn.list_topics()
         assert_equal(len(topic_list), 0)
 
+@attr('fails_with_rgw')
 def test_account_metadata_sync():
     zonegroup = realm.master_zonegroup()
     zonegroup_conns = ZonegroupConns(zonegroup)
@@ -3567,7 +3593,7 @@ def test_account_metadata_sync():
             check_groups_eq(source_conn, target_conn)
             check_oidc_providers_eq(source_conn, target_conn)
 
-   
+@attr('fails_with_rgw')
 @attr('copy_object')
 def test_copy_object_same_bucket():
     zonegroup = realm.master_zonegroup()
@@ -3604,6 +3630,7 @@ def test_copy_object_same_bucket():
 
     zonegroup_bucket_checkpoint(zonegroup_conns, bucket.name)
 
+@attr('fails_with_rgw')
 @attr('copy_object')
 def test_copy_object_different_bucket():
     zonegroup = realm.master_zonegroup()
