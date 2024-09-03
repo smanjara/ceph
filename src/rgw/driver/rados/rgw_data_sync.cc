@@ -1883,7 +1883,12 @@ public:
       } while (omapvals->more);
       omapvals.reset();
 
-      drain_all();
+      drain_all_cb([&](uint64_t stack_id, int ret) {
+              if (ret < 0) {
+                retcode = ret;
+              }
+              return retcode;
+            });
 
       tn->unset_flag(RGW_SNS_FLAG_ACTIVE);
 
