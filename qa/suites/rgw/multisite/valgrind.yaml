@@ -12,8 +12,8 @@ overrides:
         osd fast shutdown: false
   rgw:
     c1.client.0:
-      valgrind: [--tool=memcheck, --track-origins=yes, --leak-check=full, --max-threads=1024] # http://tracker.ceph.com/issues/25214
+      valgrind: [--tool=memcheck, --track-origins=yes, --leak-check=full, --gen-suppressions=all, --max-threads=1024] # http://tracker.ceph.com/issues/25214
     c1.client.1:
-      valgrind: [--tool=memcheck, --track-origins=yes, --leak-check=full, --max-threads=1024]
+      valgrind: [--tool=memcheck, --track-origins=yes, --leak-check=full, --gen-suppressions=all, --max-threads=1024]
     c2.client.0:
-      valgrind: [--tool=memcheck, --track-origins=yes, --leak-check=full, --max-threads=1024]
+      valgrind: [--tool=memcheck, --track-origins=yes, --leak-check=full, --gen-suppressions=all, --max-threads=1024]

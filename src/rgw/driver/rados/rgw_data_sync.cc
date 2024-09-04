@@ -1509,6 +1509,7 @@ public:
         sync_status = retcode;
       }
       if (sync_status < 0) {
+        drain_all();
         return set_cr_error(sync_status);
       }
       return set_cr_done();
