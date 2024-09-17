@@ -179,7 +179,8 @@ auto create_bucket_metadata_handler(librados::Rados& rados,
 auto create_bucket_instance_metadata_handler(rgw::sal::Driver* driver,
                                              RGWSI_Zone* svc_zone,
                                              RGWSI_Bucket* svc_bucket,
-                                             RGWSI_BucketIndex* svc_bi)
+                                             RGWSI_BucketIndex* svc_bi,
+                                             RGWDataChangesLog *svc_datalog)
     -> std::unique_ptr<RGWMetadataHandler>;
 
 // archive bucket entrypoint metadata handler factory
@@ -192,7 +193,8 @@ auto create_archive_bucket_metadata_handler(librados::Rados& rados,
 auto create_archive_bucket_instance_metadata_handler(rgw::sal::Driver* driver,
                                                      RGWSI_Zone* svc_zone,
                                                      RGWSI_Bucket* svc_bucket,
-                                                     RGWSI_BucketIndex* svc_bi)
+                                                     RGWSI_BucketIndex* svc_bi,
+                                                     RGWDataChangesLog *svc_datalog)
     -> std::unique_ptr<RGWMetadataHandler>;
 
 
