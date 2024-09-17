@@ -2847,7 +2847,7 @@ int RGWBucketInstanceMetadataHandler::put_prepare(
       ldpp_dout(dpp, 10) << "store log layout type: " <<  bci.info.layout.logs.back().layout.type << dendl;
       for (int i = 0; i < shards_num; ++i) {
         ldpp_dout(dpp, 10) << "adding to data_log shard_id: " << i << " of gen:" << index_log.gen << dendl;
-        ret = bihandler->svc.datalog_rados->add_entry(dpp, bci.info, index_log, i,
+        ret = svc.datalog_rados->add_entry(dpp, bci.info, index_log, i,
                                                     null_yield);
         if (ret < 0) {
           ldpp_dout(dpp, 1) << "WARNING: failed writing data log for bucket="
@@ -2935,23 +2935,7 @@ int RGWBucketInstanceMetadataHandler::put_post(
 int RGWBucketInstanceMetadataHandler::remove(std::string& entry, RGWObjVersionTracker& objv_tracker,
                                              optional_yield y, const DoutPrefixProvider *dpp)
 {
-  RGWBucketCompleteInfo bci;
-  int ret = svc_bucket->read_bucket_instance_info(entry, &bci.info, nullptr,
-                                                  &bci.attrs, y, dpp);
-  if (ret == -ENOENT) {
-    return 0;
-  }
-  if (ret < 0) {
-    return ret;
-  }
-
-  ret = svc_bucket->remove_bucket_instance_info(
-      entry, bci.info, &bci.info.objv_tracker, y, dpp);
-  if (ret < 0)
-    return ret;
-  std::ignore = update_bucket_topic_mappings(dpp, &bci, /*current_bci=*/nullptr,
-                                             driver);
-  return 0;
+  return 0; // skip bucket instance removal. bilog trimming handles it on each zone.
 }
 
 int RGWBucketInstanceMetadataHandler::mutate(const std::string& entry, const ceph::real_time& mtime,
@@ -3022,6 +3006,7 @@ RGWBucketCtl::RGWBucketCtl(RGWSI_Zone *zone_svc,
   svc.bucket_sync = bucket_sync_svc;
   svc.bi = bi_svc;
   svc.user = user_svc;
+  svc.datalog_rados = datalog_svc;
 }
 
 void RGWBucketCtl::init(RGWUserCtl *user_ctl,
