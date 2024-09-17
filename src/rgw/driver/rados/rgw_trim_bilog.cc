@@ -670,7 +670,8 @@ class BucketTrimInstanceCR : public RGWCoroutine {
       return 0;
 
 
-    if (pbucket_info->layout.logs.front().gen < totrim.gen) {
+    if (pbucket_info->layout.logs.front().gen < totrim.gen ||
+        pbucket_info->layout.logs.back().layout.type == rgw::BucketLogType::Deleted) {
       clean_info = {*pbucket_info, {}};
       auto log = clean_info->first.layout.logs.cbegin();
       clean_info->second = *log;
