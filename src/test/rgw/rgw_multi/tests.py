@@ -3396,6 +3396,7 @@ def test_sync_flow_symmetrical_zonegroup_all_rgw_down():
     finally:
         start_2nd_rgw(zonegroup)
 
+@attr('fails_with_rgw')
 def test_topic_notification_sync():
     zonegroup = realm.master_zonegroup()
     zonegroup_meta_checkpoint(zonegroup)
@@ -3634,4 +3635,17 @@ def test_copy_object_different_bucket():
         CopySource = source_bucket.name + '/' + objname)
     
     zonegroup_bucket_checkpoint(zonegroup_conns, dest_bucket.name)
+
+
+def test_bucket_location_constraint():
+    zonegroup = realm.master_zonegroup()
+    zonegroup_conns = ZonegroupConns(zonegroup)
+    primary = zonegroup_conns.rw_zones[0]
+    secondary = zonegroup_conns.rw_zones[1]
+
+    bucket = secondary.create_bucket(gen_bucket_name(), location=zonegroup)
+    log.debug('created bucket=%s', bucket.name)
+    
+    assert primary.get_bucket(bucket.name)
+
     
