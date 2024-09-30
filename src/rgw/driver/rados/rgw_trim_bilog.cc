@@ -670,14 +670,13 @@ class BucketTrimInstanceCR : public RGWCoroutine {
     if (clean_info)
       return 0;
 
-
-    if (pbucket_info->layout.logs.front().gen < totrim.gen ||
-        pbucket_info->layout.logs.back().layout.type == rgw::BucketLogType::Deleted) {
+    bool deleted_type = (pbucket_info->layout.logs.back().layout.type == rgw::BucketLogType::Deleted);
+    if (pbucket_info->layout.logs.front().gen < totrim.gen || deleted_type) {
       clean_info = {*pbucket_info, {}};
       auto log = clean_info->first.layout.logs.cbegin();
       clean_info->second = *log;
 
-      if (clean_info->first.layout.logs.size() == 1) {
+      if (clean_info->first.layout.logs.size() == 1 && !deleted_type) {
 	ldpp_dout(dpp, -1)
 	  << "Critical error! Attempt to remove only log generation! "
 	  << "log.gen=" << log->gen << ", totrim.gen=" << totrim.gen
