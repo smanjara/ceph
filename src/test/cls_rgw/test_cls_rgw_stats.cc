@@ -90,7 +90,7 @@ int index_prepare(librados::IoCtx& ioctx, const std::string& oid,
   constexpr bool log_op = false;
   constexpr int flags = 0;
   rgw_zone_set zones;
-  cls_rgw_bucket_prepare_op(op, type, tag, key, loc, log_op, flags, zones);
+  cls_rgw_bucket_prepare_op(op, type, tag, key, loc, flags, zones);
   return ioctx.operate(oid, &op);
 }
 
