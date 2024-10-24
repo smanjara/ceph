@@ -19,6 +19,17 @@ class FakeCache:
         if service_type == 'ceph-exporter':
             return [FakeDaemonDescription('1.2.3.4', [9926], 'node0'),
                     FakeDaemonDescription('1.2.3.5', [9926], 'node1')]
+        if service_type == 'nvmeof':
+            return [FakeDaemonDescription('1.2.3.4', [10008], 'node0'),
+                    FakeDaemonDescription('1.2.3.5', [10008], 'node1')]
+
+        if service_type == 'nfs':
+            return [FakeDaemonDescription('1.2.3.4', [9587], 'node0'),
+                    FakeDaemonDescription('1.2.3.5', [9587], 'node1')]
+
+        if service_type == 'smb':
+            return [FakeDaemonDescription('1.2.3.4', [9922], 'node0'),
+                    FakeDaemonDescription('1.2.3.5', [9922], 'node1')]
 
         return [FakeDaemonDescription('1.2.3.4', [9100], 'node0'),
                 FakeDaemonDescription('1.2.3.5', [9200], 'node1')]
@@ -66,15 +77,18 @@ class FakeMgr:
         self.cache = FakeCache()
         self.spec_store = FakeSpecStore(self)
 
+    def get_mgr_id(self):
+        return 'mgr-1'
+
     def list_servers(self):
 
         servers = [
             {'hostname': 'node0',
              'ceph_version': '16.2',
-             'services': [{'type': 'mgr'}, {'type': 'mon'}]},
+             'services': [{'type': 'mgr', 'id': 'mgr-1'}, {'type': 'mon'}]},
             {'hostname': 'node1',
              'ceph_version': '16.2',
-             'services': [{'type': 'mgr'}, {'type': 'mon'}]}
+             'services': [{'type': 'mgr', 'id': 'mgr-2'}, {'type': 'mon'}]}
         ]
 
         return servers
@@ -106,7 +120,7 @@ class TestServiceDiscovery:
             assert 'targets' in entry
 
         # check content
-        assert cfg[0]['targets'] == ['node0:9283', 'node1:9283']
+        assert cfg[0]['targets'] == ['node0:9283']
 
     def test_get_sd_config_node_exporter(self):
         mgr = FakeMgr()
@@ -167,6 +181,48 @@ class TestServiceDiscovery:
 
         # check content
         assert cfg[0]['targets'] == ['1.2.3.4:9926']
+
+    def test_get_sd_config_nvmeof(self):
+        mgr = FakeMgr()
+        root = Root(mgr, 5000, '0.0.0.0')
+        cfg = root.get_sd_config('nvmeof')
+
+        # check response structure
+        assert cfg
+        for entry in cfg:
+            assert 'labels' in entry
+            assert 'targets' in entry
+
+        # check content
+        assert cfg[0]['targets'] == ['1.2.3.4:10008']
+
+    def test_get_sd_config_nfs(self):
+        mgr = FakeMgr()
+        root = Root(mgr, 5000, '0.0.0.0')
+        cfg = root.get_sd_config('nfs')
+
+        # check response structure
+        assert cfg
+        for entry in cfg:
+            assert 'labels' in entry
+            assert 'targets' in entry
+
+        # check content
+        assert cfg[0]['targets'] == ['1.2.3.4:9587']
+
+    def test_get_sd_config_smb(self):
+        mgr = FakeMgr()
+        root = Root(mgr, 5000, '0.0.0.0')
+        cfg = root.get_sd_config('smb')
+
+        # check response structure
+        assert cfg
+        for entry in cfg:
+            assert 'labels' in entry
+            assert 'targets' in entry
+
+        # check content
+        assert cfg[0]['targets'] == ['1.2.3.4:9922']
 
     def test_get_sd_config_invalid_service(self):
         mgr = FakeMgr()

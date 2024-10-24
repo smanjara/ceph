@@ -6,7 +6,8 @@ import logging
 import requests
 
 from .helper import (DashboardTestCase, JLeaf, JList, JObj,
-                     module_options_object_schema, module_options_schema)
+                     module_options_object_schema, module_options_schema,
+                     retry)
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +15,7 @@ logger = logging.getLogger(__name__)
 class MgrModuleTestCase(DashboardTestCase):
     MGRS_REQUIRED = 1
 
+    @retry(on_exception=RuntimeError, tries=2, delay=0.5, logger=logger)
     def wait_until_rest_api_accessible(self):
         """
         Wait until the REST API is accessible.
@@ -89,6 +91,7 @@ class MgrModuleTest(MgrModuleTestCase):
                     'interval': int,
                     'last_opt_revision': int,
                     'leaderboard': bool,
+                    'leaderboard_description': str,
                     'organization': str,
                     'proxy': str,
                     'url': str
@@ -110,6 +113,8 @@ class MgrModuleTest(MgrModuleTestCase):
             'interval': module_options_object_schema,
             'last_opt_revision': module_options_object_schema,
             'leaderboard': module_options_object_schema,
+            'leaderboard_description': module_options_object_schema,
+            'sqlite3_killpoint': module_options_object_schema,
             'log_level': module_options_object_schema,
             'log_to_cluster': module_options_object_schema,
             'log_to_cluster_level': module_options_object_schema,

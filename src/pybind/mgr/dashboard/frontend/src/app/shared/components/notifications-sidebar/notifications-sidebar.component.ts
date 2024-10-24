@@ -147,14 +147,14 @@ export class NotificationsSidebarComponent implements OnInit, OnDestroy {
   }
 
   _handleTasks(executingTasks: ExecutingTask[]) {
-    for (const excutingTask of executingTasks) {
-      excutingTask.description = this.taskMessageService.getRunningTitle(excutingTask);
+    for (const executingTask of executingTasks) {
+      executingTask.description = this.taskMessageService.getRunningTitle(executingTask);
     }
     this.executingTasks = executingTasks;
   }
 
   private triggerPrometheusAlerts() {
-    this.prometheusAlertService.refresh();
+    this.prometheusAlertService.refresh(true);
     this.prometheusNotificationService.refresh();
   }
 

@@ -1,10 +1,10 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab ft=cpp
 
-#ifndef RGW_LIB_H
-#define RGW_LIB_H
+#pragma once
 
 #include <mutex>
+#include <optional>
 #include "rgw_common.h"
 #include "rgw_client_io.h"
 #include "rgw_rest.h"
@@ -126,7 +126,7 @@ namespace rgw {
   public:
     CephContext* cct;
 
-    /* unambiguiously return req_state */
+    /* unambiguously return req_state */
     inline req_state* get_state() { return this->RGWRequest::s; }
 
     RGWLibRequest(CephContext* _cct, std::unique_ptr<rgw::sal::User> _user)
@@ -208,5 +208,3 @@ namespace rgw {
   }; /* RGWLibContinuedReq */
 
 } /* namespace rgw */
-
-#endif /* RGW_LIB_H */

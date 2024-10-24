@@ -45,11 +45,10 @@ int Dumper::init(mds_role_t role_, const std::string &type)
     return r;
   }
 
-  auto fs =  fsmap->get_filesystem(role.fscid);
-  ceph_assert(fs != nullptr);
+  auto& fs =  fsmap->get_filesystem(role.fscid);
 
   if (type == "mdlog") {
-    JournalPointer jp(role.rank, fs->mds_map.get_metadata_pool());
+    JournalPointer jp(role.rank, fs.get_mds_map().get_metadata_pool());
     int jp_load_result = jp.load(objecter);
     if (jp_load_result != 0) {
       std::cerr << "Error loading journal: " << cpp_strerror(jp_load_result) << std::endl;
@@ -88,10 +87,9 @@ int Dumper::dump(const char *dump_file)
 {
   int r = 0;
 
-  auto fs =  fsmap->get_filesystem(role.fscid);
-  ceph_assert(fs != nullptr);
+  auto& fs = fsmap->get_filesystem(role.fscid);
 
-  Journaler journaler("dumper", ino, fs->mds_map.get_metadata_pool(),
+  Journaler journaler("dumper", ino, fs.get_mds_map().get_metadata_pool(),
                       CEPH_FS_ONDISK_MAGIC, objecter, 0, 0,
                       &finisher);
   r = recover_journal(&journaler);
@@ -114,6 +112,7 @@ int Dumper::dump(const char *dump_file)
     fsid.print(fsid_str);
     char buf[HEADER_LEN];
     memset(buf, 0, sizeof(buf));
+    auto&& last_committed = journaler.get_last_committed();
     snprintf(buf, HEADER_LEN, "Ceph mds%d journal dump\n start offset %llu (0x%llx)\n\
        length %llu (0x%llx)\n    write_pos %llu (0x%llx)\n    format %llu\n\
        trimmed_pos %llu (0x%llx)\n    stripe_unit %lu (0x%lx)\n    stripe_count %lu (0x%lx)\n\
@@ -121,12 +120,12 @@ int Dumper::dump(const char *dump_file)
 	    role.rank, 
 	    (unsigned long long)start, (unsigned long long)start,
 	    (unsigned long long)len, (unsigned long long)len,
-	    (unsigned long long)journaler.last_committed.write_pos, (unsigned long long)journaler.last_committed.write_pos,
-	    (unsigned long long)journaler.last_committed.stream_format,
-	    (unsigned long long)journaler.last_committed.trimmed_pos, (unsigned long long)journaler.last_committed.trimmed_pos,
-            (unsigned long)journaler.last_committed.layout.stripe_unit, (unsigned long)journaler.last_committed.layout.stripe_unit,
-            (unsigned long)journaler.last_committed.layout.stripe_count, (unsigned long)journaler.last_committed.layout.stripe_count,
-            (unsigned long)journaler.last_committed.layout.object_size, (unsigned long)journaler.last_committed.layout.object_size,
+	    (unsigned long long)last_committed.write_pos, (unsigned long long)last_committed.write_pos,
+	    (unsigned long long)last_committed.stream_format,
+	    (unsigned long long)last_committed.trimmed_pos, (unsigned long long)last_committed.trimmed_pos,
+            (unsigned long)last_committed.layout.stripe_unit, (unsigned long)last_committed.layout.stripe_unit,
+            (unsigned long)last_committed.layout.stripe_count, (unsigned long)last_committed.layout.stripe_count,
+            (unsigned long)last_committed.layout.object_size, (unsigned long)last_committed.layout.object_size,
 	    fsid_str,
 	    4);
     r = safe_write(fd, buf, sizeof(buf));
@@ -158,8 +157,8 @@ int Dumper::dump(const char *dump_file)
 
       C_SaferCond cond;
       lock.lock();
-      filer.read(ino, &journaler.get_layout(), CEPH_NOSNAP,
-                 pos, read_size, &bl, 0, &cond);
+      auto&& layout = journaler.get_layout();
+      filer.read(ino, &layout, CEPH_NOSNAP, pos, read_size, &bl, 0, &cond);
       lock.unlock();
       r = cond.wait();
       if (r < 0) {
@@ -202,12 +201,11 @@ int Dumper::undump(const char *dump_file, bool force)
 {
   cout << "undump " << dump_file << std::endl;
   
-  auto fs =  fsmap->get_filesystem(role.fscid);
-  ceph_assert(fs != nullptr);
+  auto& fs = fsmap->get_filesystem(role.fscid);
 
   int r = 0;
   // try get layout info from cluster
-  Journaler journaler("umdumper", ino, fs->mds_map.get_metadata_pool(),
+  Journaler journaler("umdumper", ino, fs.get_mds_map().get_metadata_pool(),
                       CEPH_FS_ONDISK_MAGIC, objecter, 0, 0,
                       &finisher);
   int recovered = recover_journal(&journaler);
@@ -267,9 +265,10 @@ int Dumper::undump(const char *dump_file, bool force)
   }
 
   if (recovered == 0) {
-    stripe_unit = journaler.last_committed.layout.stripe_unit;
-    stripe_count = journaler.last_committed.layout.stripe_count;
-    object_size = journaler.last_committed.layout.object_size;
+    auto&& last_committed = journaler.get_last_committed();
+    stripe_unit = last_committed.layout.stripe_unit;
+    stripe_count = last_committed.layout.stripe_count;
+    object_size = last_committed.layout.object_size;
   } else {
     // try to get layout from dump file header, if failed set layout to default
     if (strstr(buf, "stripe_unit")) {
@@ -330,13 +329,13 @@ int Dumper::undump(const char *dump_file, bool force)
   h.layout.stripe_unit = stripe_unit;
   h.layout.stripe_count = stripe_count;
   h.layout.object_size = object_size;
-  h.layout.pool_id = fs->mds_map.get_metadata_pool();
+  h.layout.pool_id = fs.get_mds_map().get_metadata_pool();
   
   bufferlist hbl;
   encode(h, hbl);
 
   object_t oid = file_object_t(ino, 0);
-  object_locator_t oloc(fs->mds_map.get_metadata_pool());
+  object_locator_t oloc(fs.get_mds_map().get_metadata_pool());
   SnapContext snapc;
 
   cout << "writing header " << oid << std::endl;

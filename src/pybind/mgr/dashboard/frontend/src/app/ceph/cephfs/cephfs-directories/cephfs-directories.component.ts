@@ -8,7 +8,6 @@ import {
   TreeNode,
   TREE_ACTIONS
 } from '@circlon/angular-tree-component';
-import { NgbModalRef } from '@ng-bootstrap/ng-bootstrap';
 import _ from 'lodash';
 import moment from 'moment';
 
@@ -17,6 +16,7 @@ import { ConfirmationModalComponent } from '~/app/shared/components/confirmation
 import { CriticalConfirmationModalComponent } from '~/app/shared/components/critical-confirmation-modal/critical-confirmation-modal.component';
 import { FormModalComponent } from '~/app/shared/components/form-modal/form-modal.component';
 import { ActionLabelsI18n } from '~/app/shared/constants/app.constants';
+import { CellTemplate } from '~/app/shared/enum/cell-template.enum';
 import { Icons } from '~/app/shared/enum/icons.enum';
 import { NotificationType } from '~/app/shared/enum/notification-type.enum';
 import { CdValidators } from '~/app/shared/forms/cd-validators';
@@ -33,7 +33,7 @@ import { Permission } from '~/app/shared/models/permissions';
 import { CdDatePipe } from '~/app/shared/pipes/cd-date.pipe';
 import { DimlessBinaryPipe } from '~/app/shared/pipes/dimless-binary.pipe';
 import { AuthStorageService } from '~/app/shared/services/auth-storage.service';
-import { ModalService } from '~/app/shared/services/modal.service';
+import { ModalCdsService } from '~/app/shared/services/modal-cds.service';
 import { NotificationService } from '~/app/shared/services/notification.service';
 
 class QuotaSetting {
@@ -65,7 +65,6 @@ export class CephfsDirectoriesComponent implements OnInit, OnChanges {
   @Input()
   id: number;
 
-  private modalRef: NgbModalRef;
   private dirs: CephfsDir[];
   private nodeIds: { [path: string]: CephfsDir };
   private requestedPaths: string[];
@@ -107,7 +106,7 @@ export class CephfsDirectoriesComponent implements OnInit, OnChanges {
 
   constructor(
     private authStorageService: AuthStorageService,
-    private modalService: ModalService,
+    private modalService: ModalCdsService,
     private cephfsService: CephfsService,
     private cdDatePipe: CdDatePipe,
     private actionLabels: ActionLabelsI18n,
@@ -200,8 +199,8 @@ export class CephfsDirectoriesComponent implements OnInit, OnChanges {
         {
           prop: 'path',
           name: $localize`Path`,
-          isHidden: true,
-          flexGrow: 2
+          flexGrow: 1.5,
+          cellTransformation: CellTemplate.path
         },
         {
           prop: 'created',
@@ -237,7 +236,7 @@ export class CephfsDirectoriesComponent implements OnInit, OnChanges {
 
   private disableCreateSnapshot(): string | boolean {
     const folders = this.selectedDir.path.split('/').slice(1);
-    // With deph of 4 or more we have the subvolume files/folders for which we cannot create
+    // With depth of 4 or more we have the subvolume files/folders for which we cannot create
     // a snapshot. Somehow, you can create a snapshot of the subvolume but not its files.
     if (folders.length >= 4 && folders[0] === 'volumes') {
       return $localize`Cannot create snapshots for files/folders in the subvolume ${folders[2]}`;
@@ -288,6 +287,10 @@ export class CephfsDirectoriesComponent implements OnInit, OnChanges {
         this.updateTree();
         resolve(this.getChildren(path));
         this.setLoadingIndicator(path, false);
+
+        if (path === '/' && this.treeComponent.treeModel.activeNodes?.length === 0) {
+          this.selectNode(this.getNode('/'));
+        }
       });
     });
   }
@@ -312,6 +315,13 @@ export class CephfsDirectoriesComponent implements OnInit, OnChanges {
     this.nodeIds[dir.path] = dir;
     if (!subTree) {
       this.getSubTree(dir.parent);
+    }
+
+    if (dir.path === '/volumes') {
+      const innerNode = this.treeComponent.treeModel.getNodeById('/volumes');
+      if (innerNode) {
+        innerNode.expand();
+      }
     }
     return {
       name: dir.name,
@@ -525,14 +535,14 @@ export class CephfsDirectoriesComponent implements OnInit, OnChanges {
           : $localize`which isn't used because of the inheritance of ${quotaValue}`
         : $localize`in order to have no quota on the directory`;
 
-    this.modalRef = this.modalService.show(ConfirmationModalComponent, {
+    this.modalService.show(ConfirmationModalComponent, {
       titleText: this.getModalQuotaTitle(this.actionLabels.UNSET, path),
       buttonText: this.actionLabels.UNSET,
       description: $localize`${this.actionLabels.UNSET} ${this.getQuotaValueFromPathMsg(
         dirValue,
         path
       )} ${conclusion}.`,
-      onSubmit: () => this.updateQuota({ [key]: 0 }, () => this.modalRef.close())
+      onSubmit: () => this.updateQuota({ [key]: 0 }, () => this.modalService.dismissAll())
     });
   }
 
@@ -640,7 +650,7 @@ export class CephfsDirectoriesComponent implements OnInit, OnChanges {
     }
     const node = this.getNode(parent);
     if (!node) {
-      // Node will not be found for new sub sub directories - this is the intended behaviour
+      // Node will not be found for new sub directories - this is the intended behaviour
       return;
     }
     const children = this.getChildren(parent);
@@ -679,7 +689,7 @@ export class CephfsDirectoriesComponent implements OnInit, OnChanges {
   }
 
   deleteSnapshotModal() {
-    this.modalRef = this.modalService.show(CriticalConfirmationModalComponent, {
+    this.modalService.show(CriticalConfirmationModalComponent, {
       itemDescription: $localize`CephFs Snapshot`,
       itemNames: this.snapshot.selection.selected.map((snapshot: CephfsSnapshot) => snapshot.name),
       submitAction: () => this.deleteSnapshot()
@@ -697,7 +707,7 @@ export class CephfsDirectoriesComponent implements OnInit, OnChanges {
         );
       });
     });
-    this.modalRef.close();
+    this.modalService.dismissAll();
     this.forceDirRefresh();
   }
 

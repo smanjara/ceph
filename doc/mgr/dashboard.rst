@@ -6,33 +6,29 @@ Ceph Dashboard
 Overview
 --------
 
-The Ceph Dashboard is a built-in web-based Ceph management and monitoring
-application through which you can inspect and administer various aspects
-and resources within the cluster. It is implemented as a :ref:`ceph-manager-daemon` module.
+The Ceph Dashboard is a web-based Ceph management-and-monitoring tool that can
+be used to inspect and administer resources in the cluster. It is implemented
+as a :ref:`ceph-manager-daemon` module.
 
-The original Ceph Dashboard that was shipped with Ceph Luminous started
-out as a simple read-only view into run-time information and performance
-data of Ceph clusters. It used a very simple architecture to achieve the
-original goal. However, there was growing demand for richer web-based
-management capabilities, to make it easier to administer Ceph for users that
-prefer a WebUI over the CLI.
+The original Ceph Dashboard shipped with Ceph Luminous and was a simple
+read-only view into the run-time information and performance data of Ceph
+clusters. It had a simple architecture. However, demand grew for richer,
+web-based management capabilities for users who prefer a WebUI over the CLI.
 
-The new :term:`Ceph Dashboard` module adds web-based monitoring and
-administration to the Ceph Manager. The architecture and functionality of this new
-module are derived from
-and inspired by the `openATTIC Ceph management and monitoring tool
-<https://openattic.org/>`_. Development is actively driven by the
-openATTIC team at `SUSE <https://www.suse.com/>`_, with support from
-companies including `Red Hat <https://redhat.com/>`_ and members of the Ceph
-community.
+The :term:`Ceph Dashboard` module adds web-based monitoring and administration
+to the Ceph Manager. The architecture and functionality of this new module are
+derived from the `openATTIC Ceph management and monitoring tool
+<https://openattic.org/>`_. Development was originally driven by the openATTIC
+team at `SUSE <https://www.suse.com/>`_, with support from members of the Ceph
+community and from companies including `Red Hat <https://redhat.com/>`_.
 
-The dashboard module's backend code uses the CherryPy framework and implements
-a custom REST API. The WebUI implementation is based on
-Angular/TypeScript and includes both functionality from the original dashboard
-and new features originally developed for the standalone version
-of openATTIC. The Ceph Dashboard module is implemented as an
-application that provides a graphical representation of information and statistics
-through a web server hosted by ``ceph-mgr``.
+The dashboard module's backend code uses the CherryPy framework, and implements
+a custom REST API. The WebUI implementation is based on Angular/TypeScript and
+includes both functionality from the original dashboard and new features
+originally developed for the standalone version of openATTIC. The Ceph
+Dashboard module is implemented as an application that provides a graphical
+representation of information and statistics through a web server hosted by
+``ceph-mgr``.
 
 Feature Overview
 ^^^^^^^^^^^^^^^^
@@ -127,62 +123,67 @@ The Ceph Dashboard offers the following monitoring and management capabilities:
 Overview of the Dashboard Landing Page
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Displays overall cluster status, performance, and capacity metrics. Shows instant
-feedback for changes in the cluster and provides easy access to subpages of the
-dashboard.
+The landing page of Ceph Dashboard serves as the home page and features metrics
+such as the overall cluster status, performance, and capacity. It provides real-time
+updates on any changes in the cluster and allows quick access to other sections of the dashboard.
+
+.. image:: dashboard-landing-page.png
+
+
+.. note::
+  You can change the landing page to the previous version from:
+  ``Cluster >> Manager Modules >> Dashboard >> Edit``.
+  Editing the ``FEATURE_TOGGLE_DASHBOARD`` option will change the landing page, from one view to another.
+
+  Note that the previous version of the landing page will be disabled in future releases.
+
+.. _dashboard-landing-page-details:
+
+Details
+"""""""
+Provides an overview of the cluster configuration, displaying various critical aspects of the cluster.
+
+.. image:: details-card.png
 
 .. _dashboard-landing-page-status:
 
 Status
 """"""
+Provides a visual indication of cluster health, and displays cluster alerts grouped by severity.
 
-* **Cluster Status**: Displays overall cluster health. In case of any error it
-  displays a short description of the error and provides a link to the logs.
-* **Hosts**: Displays the total number of hosts associated to the cluster and
-  links to a subpage that lists and describes each.
-* **Monitors**: Displays mons and their quorum status and
-  open sessions.  Links to a subpage that lists and describes each.
-* **OSDs**: Displays object storage daemons (ceph-osds) and
-  the numbers of OSDs running (up), in service
-  (in), and out of the cluster (out). Provides links to
-  subpages providing a list of all OSDs and related management actions.
-* **Managers**: Displays active and standby Ceph Manager
-  daemons (ceph-mgr).
-* **Object Gateway**: Displays active object gateways (RGWs) and
-  provides links to subpages that list all object gateway daemons.
-* **Metadata Servers**: Displays active and standby CephFS metadata
-  service daemons (ceph-mds).
-* **iSCSI Gateways**: Display iSCSI gateways available,
-  active (up), and inactive (down). Provides a link to a subpage
-  showing a list of all iSCSI Gateways.
+.. image:: status-card-open.png
 
 .. _dashboard-landing-page-capacity:
 
 Capacity
 """"""""
+* **Used**: Displays the used capacity out of the total physical capacity provided by storage nodes (OSDs)
+* **Warning**: Displays the `nearfull` threshold of the OSDs
+* **Danger**: Displays the `full` threshold of the OSDs
 
-* **Raw Capacity**: Displays the capacity used out of the total
-  physical capacity provided by storage nodes (OSDs).
-* **Objects**: Displays the number and status of RADOS objects
-  including the percentages of healthy, misplaced, degraded, and unfound
-  objects.
-* **PG Status**: Displays the total number of placement groups and
-  their status, including the percentage clean, working,
-  warning, and unknown.
-* **Pools**: Displays pools and links to a subpage listing details.
-* **PGs per OSD**: Displays the number of placement groups assigned to
-  object storage daemons.
+.. image:: capacity-card.png
+
+.. _dashboard-landing-page-inventory:
+
+Inventory
+"""""""""
+An inventory for all assets within the cluster.
+Provides direct access to subpages of the dashboard from each item of this card.
+
+.. image:: inventory-card.png
 
 .. _dashboard-landing-page-performance:
 
-Performance
-"""""""""""
+Cluster Utilization
+"""""""""""""""""""
+* **Used Capacity**: Total capacity used of the cluster. The maximum value of the chart is the maximum capacity of the cluster.
+* **IOPS (Input/Output Operations Per Second)**: Number of read and write operations.
+* **Latency**: Amount of time that it takes to process a read or a write request.
+* **Client Throughput**: Amount of data that clients read or write to the cluster.
+* **Recovery Throughput**: Amount of recovery data that clients read or write to the cluster.
 
-* **Client READ/Write**: Displays an overview of
-  client input and output operations.
-* **Client Throughput**: Displays the data transfer rates to and from Ceph clients.
-* **Recovery throughput**: Displays rate of cluster healing and balancing operations.
-* **Scrubbing**: Displays light and deep scrub status.
+
+.. image:: cluster-utilization-card.png
 
 Supported Browsers
 ^^^^^^^^^^^^^^^^^^
@@ -1238,19 +1239,37 @@ code of standby dashboards. To do so you need to run the command:
 Resolve IP address to hostname before redirect
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The redirect from a standby to the active dashboard is done via the IP
-address. This is done because resolving IP addresses to hostnames can be error
-prone in containerized environments. It is also the reason why the option is
+Redirection from a standby dashboard to the active dashboard is done via the
+manager's IP address, not via the manager's hostname. In virtualized
+environments, IP-address-based redirection reduces the incidence of error as
+compared to hostname-based resolution.  Because of the increased risk of error
+due to hostname-based resolution, the option for hostname resolution is
 disabled by default.
+
 However, in some situations it might be helpful to redirect via the hostname.
-For example if the configured TLS certificate matches only the hostnames. To
-activate the redirection via the hostname run the following command::
+For example, if the configured TLS certificate matches only the hostnames and
+not the IP addresses of those hosts, hostname redirection would be preferable.
 
-  $ ceph config set mgr mgr/dashboard/redirect_resolve_ip_addr True
+To activate redirection from standby dashboards to active dashboards via the
+manager's hostname, run the following command:
 
-You can disable it again by::
+.. prompt:: bash $
 
-  $ ceph config set mgr mgr/dashboard/redirect_resolve_ip_addr False
+   ceph config set mgr mgr/dashboard/redirect_resolve_ip_addr True
+
+Disable hostname redirection by running the following command:
+
+.. prompt:: bash #
+
+   ceph config set mgr mgr/dashboard/redirect_resolve_ip_addr False
+
+.. warning::
+
+   If you attempt to activate redirection by using the command above and you
+   get the error message ``EINVAL: unrecognized config option
+   'mgr/dashboard/redirect_resolve_ip_addr'``, then you might be running a
+   release of Ceph prior to version 17.2.6. This feature was introduced in
+   17.2.6, in this commit: https://github.com/ceph/ceph/pull/48219.
 
 HAProxy example configuration
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -1422,9 +1441,9 @@ commands:
 
         /var/log/ceph/$cluster-$name.log
 
-#. Ensure the SSL/TSL support is configured properly:
+#. Ensure the SSL/TLS support is configured properly:
 
-   * Check if the SSL/TSL support is enabled:
+   * Check if the SSL/TLS support is enabled:
 
      .. prompt:: bash $
 

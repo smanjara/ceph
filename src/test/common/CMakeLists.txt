@@ -75,17 +75,6 @@ add_executable(unittest_prioritized_queue
 target_link_libraries(unittest_prioritized_queue ceph-common)
 add_ceph_unittest(unittest_prioritized_queue)
 
-if(NOT WIN32)
-# unittest_mclock_priority_queue
-add_executable(unittest_mclock_priority_queue
-  test_mclock_priority_queue.cc
-  )
-add_ceph_unittest(unittest_mclock_priority_queue)
-target_link_libraries(unittest_mclock_priority_queue
-  ceph-common
-  dmclock::dmclock)
-endif(NOT WIN32)
-
 # unittest_str_map
 add_executable(unittest_str_map
   test_str_map.cc
@@ -294,6 +283,18 @@ add_executable(unittest_perf_histogram
 add_ceph_unittest(unittest_perf_histogram)
 target_link_libraries(unittest_perf_histogram ceph-common)
 
+# unittest_memory
+add_executable(unittest_memory
+  test_memory.cc
+  )
+add_ceph_unittest(unittest_memory)
+target_link_libraries(unittest_memory ceph-common)
+
+# unittest_perf_cache_key
+add_executable(unittest_perf_counters_key test_perf_counters_key.cc)
+add_ceph_unittest(unittest_perf_counters_key)
+target_link_libraries(unittest_perf_counters_key ceph-common)
+
 # unittest_global_doublefree
 if(WITH_CEPHFS)
   add_executable(unittest_global_doublefree
@@ -311,12 +312,20 @@ target_link_libraries(unittest_dns_resolve global)
 add_ceph_unittest(unittest_dns_resolve)
 endif()
 
+add_executable(unittest_dout_fmt test_dout_fmt.cc $<TARGET_OBJECTS:unit-main>)
+target_link_libraries(unittest_dout_fmt global)
+add_ceph_unittest(unittest_dout_fmt)
+
+# We're getting an ICE when trying to compile this test using mingw-gcc and
+# recent Boost versions. Note that mingw-llvm works fine.
+if (NOT WIN32 OR (NOT(CMAKE_CXX_COMPILER_ID STREQUAL GNU)))
 add_executable(unittest_back_trace
   test_back_trace.cc)
 set_source_files_properties(test_back_trace.cc PROPERTIES
   COMPILE_FLAGS -fno-inline)
 add_ceph_unittest(unittest_back_trace)
 target_link_libraries(unittest_back_trace ceph-common)
+endif()
 
 add_executable(unittest_hostname
     test_hostname.cc)
@@ -352,9 +361,36 @@ add_executable(unittest_async_completion test_async_completion.cc)
 add_ceph_unittest(unittest_async_completion)
 target_link_libraries(unittest_async_completion ceph-common Boost::system)
 
+
+add_executable(unittest_async_max_concurrent_for_each test_async_max_concurrent_for_each.cc)
+add_ceph_unittest(unittest_async_max_concurrent_for_each)
+target_link_libraries(unittest_async_max_concurrent_for_each ceph-common Boost::system Boost::context)
+
+if(NOT WIN32)
+add_executable(unittest_async_co_spawn_group test_async_co_spawn_group.cc)
+add_ceph_unittest(unittest_async_co_spawn_group)
+target_link_libraries(unittest_async_co_spawn_group ceph-common Boost::system)
+
+add_executable(unittest_async_co_throttle test_async_co_throttle.cc)
+add_ceph_unittest(unittest_async_co_throttle)
+target_link_libraries(unittest_async_co_throttle ceph-common Boost::system)
+endif(NOT WIN32)
+
 add_executable(unittest_async_shared_mutex test_async_shared_mutex.cc)
 add_ceph_unittest(unittest_async_shared_mutex)
 target_link_libraries(unittest_async_shared_mutex ceph-common Boost::system)
+
+add_executable(unittest_async_spawn_throttle test_async_spawn_throttle.cc)
+add_ceph_unittest(unittest_async_spawn_throttle)
+target_link_libraries(unittest_async_spawn_throttle ceph-common Boost::system Boost::context)
+
+add_executable(unittest_async_yield_waiter test_async_yield_waiter.cc)
+add_ceph_unittest(unittest_async_yield_waiter)
+target_link_libraries(unittest_async_yield_waiter ceph-common Boost::system Boost::context)
+
+add_executable(unittest_async_parallel_for_each test_async_parallel_for_each.cc)
+add_ceph_unittest(unittest_async_parallel_for_each)
+target_link_libraries(unittest_async_parallel_for_each ceph-common Boost::system)
 
 add_executable(unittest_cdc test_cdc.cc
   $<TARGET_OBJECTS:unit-main>)
@@ -363,6 +399,7 @@ add_ceph_unittest(unittest_cdc)
 
 add_executable(unittest_ceph_timer test_ceph_timer.cc)
 add_ceph_unittest(unittest_ceph_timer)
+target_link_libraries(unittest_ceph_timer global ceph-common)
 
 add_executable(unittest_option test_option.cc)
 target_link_libraries(unittest_option ceph-common GTest::Main)
@@ -379,6 +416,10 @@ target_link_libraries(unittest_blocked_completion Boost::system GTest::GTest)
 
 add_executable(unittest_allocate_unique test_allocate_unique.cc)
 add_ceph_unittest(unittest_allocate_unique)
+
+add_executable(unittest_versioned_variant test_versioned_variant.cc)
+add_ceph_unittest(unittest_versioned_variant)
+target_link_libraries(unittest_versioned_variant common)
 
 if(WITH_SYSTEMD)
   add_executable(unittest_journald_logger test_journald_logger.cc)

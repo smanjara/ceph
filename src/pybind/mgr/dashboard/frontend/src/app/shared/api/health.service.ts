@@ -14,4 +14,20 @@ export class HealthService {
   getMinimalHealth() {
     return this.http.get('api/health/minimal');
   }
+
+  getClusterCapacity() {
+    return this.http.get('api/health/get_cluster_capacity');
+  }
+
+  getClusterFsid() {
+    return this.http.get('api/health/get_cluster_fsid');
+  }
+
+  getOrchestratorName() {
+    return this.http.get('api/health/get_orchestrator_name');
+  }
+
+  getTelemetryStatus() {
+    return this.http.get('api/health/get_telemetry_status');
+  }
 }

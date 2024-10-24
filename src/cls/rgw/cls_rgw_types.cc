@@ -56,6 +56,20 @@ void rgw_zone_set_entry::decode_json(JSONObj *obj) {
   JSONDecoder::decode_json("entry", s, obj);
   from_str(s);
 }
+void rgw_zone_set::dump(Formatter *f) const
+{
+  encode_json("entries", entries, f);
+}
+
+void rgw_zone_set::generate_test_instances(list<rgw_zone_set*>& o)
+{
+  o.push_back(new rgw_zone_set);
+  o.push_back(new rgw_zone_set);
+  std::optional<string> loc_key = "loc_key";
+  o.back()->insert("zone1", loc_key);
+  o.back()->insert("zone2", loc_key);
+  o.back()->insert("zone3", loc_key);
+}
 
 void rgw_zone_set::insert(const string& zone, std::optional<string> location_key)
 {
@@ -298,6 +312,13 @@ static void dump_bi_entry(bufferlist bl, BIIndexType index_type, Formatter *form
         encode_json("entry", entry, formatter);
       }
       break;
+    case BIIndexType::ReshardDeleted:
+      {
+        rgw_bucket_deleted_entry entry;
+        decode(entry, iter);
+        encode_json("entry", entry, formatter);
+      }
+      break;
     default:
       break;
   }
@@ -313,6 +334,8 @@ void rgw_cls_bi_entry::decode_json(JSONObj *obj, cls_rgw_obj_key *effective_key)
     type = BIIndexType::Instance;
   } else if (s == "olh") {
     type = BIIndexType::OLH;
+  } else if (s == "resharddeleted") {
+    type = BIIndexType::ReshardDeleted;
   } else {
     type = BIIndexType::Invalid;
   }
@@ -341,6 +364,17 @@ void rgw_cls_bi_entry::decode_json(JSONObj *obj, cls_rgw_obj_key *effective_key)
         }
       }
       break;
+      case BIIndexType::ReshardDeleted:
+      {
+        rgw_bucket_deleted_entry entry;
+        JSONDecoder::decode_json("entry", entry, obj);
+        encode(entry, data);
+
+        if (effective_key) {
+          *effective_key = entry.key;
+        }
+      }
+      break;
     default:
       break;
   }
@@ -359,6 +393,9 @@ void rgw_cls_bi_entry::dump(Formatter *f) const
   case BIIndexType::OLH:
     type_str = "olh";
     break;
+  case BIIndexType::ReshardDeleted:
+    type_str = "resharddeleted";
+    break;
   default:
     type_str = "invalid";
   }
@@ -369,41 +406,39 @@ void rgw_cls_bi_entry::dump(Formatter *f) const
 
 bool rgw_cls_bi_entry::get_info(cls_rgw_obj_key *key,
                                 RGWObjCategory *category,
-                                rgw_bucket_category_stats *accounted_stats)
+                                rgw_bucket_category_stats *accounted_stats) const
 {
-  bool account = false;
-  auto iter = data.cbegin();
   using ceph::decode;
-  switch (type) {
-    case BIIndexType::Plain:
-        account = true;
-        // NO BREAK; falls through to case InstanceIdx:
-    case BIIndexType::Instance:
-      {
-        rgw_bucket_dir_entry entry;
-        decode(entry, iter);
-        account = (account && entry.exists);
-        *key = entry.key;
-        *category = entry.meta.category;
-        accounted_stats->num_entries++;
-        accounted_stats->total_size += entry.meta.accounted_size;
-        accounted_stats->total_size_rounded += cls_rgw_get_rounded_size(entry.meta.accounted_size);
-        accounted_stats->actual_size += entry.meta.size;
-      }
-      break;
-    case BIIndexType::OLH:
-      {
-        rgw_bucket_olh_entry entry;
-        decode(entry, iter);
-        *key = entry.key;
-      }
-      break;
-    default:
-      break;
+  auto iter = data.cbegin();
+  if (type == BIIndexType::OLH) {
+    rgw_bucket_olh_entry entry;
+    decode(entry, iter);
+    *key = std::move(entry.key);
+    return false;
+  }
+  if (type == BIIndexType::ReshardDeleted) {
+    rgw_bucket_deleted_entry entry;
+    decode(entry, iter);
+    *key = std::move(entry.key);
+    return false;
   }
 
-  return account;
+  rgw_bucket_dir_entry entry;
+  decode(entry, iter);
+  *key = entry.key;
+  *category = entry.meta.category;
+  accounted_stats->num_entries++;
+  accounted_stats->total_size += entry.meta.accounted_size;
+  accounted_stats->total_size_rounded += cls_rgw_get_rounded_size(entry.meta.accounted_size);
+  accounted_stats->actual_size += entry.meta.size;
+  if (type == BIIndexType::Plain) {
+    return entry.exists && entry.flags == 0;
+  } else if (type == BIIndexType::Instance) {
+    return entry.exists;
+  }
+  return false;
 }
+
 void rgw_cls_bi_entry::generate_test_instances(list<rgw_cls_bi_entry*>& o)
 {
   using ceph::encode;
@@ -457,6 +492,25 @@ void rgw_bucket_olh_entry::generate_test_instances(list<rgw_bucket_olh_entry*>& 
   entry->pending_removal = true;
   o.push_back(entry);
   o.push_back(new rgw_bucket_olh_entry);
+}
+
+void rgw_bucket_deleted_entry::dump(Formatter *f) const
+{
+  encode_json("key", key, f);
+}
+
+void rgw_bucket_deleted_entry::decode_json(JSONObj *obj)
+{
+  JSONDecoder::decode_json("key", key, obj);
+}
+
+void rgw_bucket_deleted_entry::generate_test_instances(list<rgw_bucket_deleted_entry*>& o)
+{
+  rgw_bucket_deleted_entry *entry = new rgw_bucket_deleted_entry;
+  entry->key.name = "key.name";
+  entry->key.instance = "key.instance";
+  o.push_back(entry);
+  o.push_back(new rgw_bucket_deleted_entry);
 }
 
 void rgw_bucket_olh_log_entry::generate_test_instances(list<rgw_bucket_olh_log_entry*>& o)
@@ -513,6 +567,7 @@ void rgw_bucket_olh_log_entry::decode_json(JSONObj *obj)
   JSONDecoder::decode_json("key", key, obj);
   JSONDecoder::decode_json("delete_marker", delete_marker, obj);
 }
+
 void rgw_bi_log_entry::decode_json(JSONObj *obj)
 {
   JSONDecoder::decode_json("op_id", id, obj);
@@ -642,6 +697,7 @@ void rgw_bucket_dir_header::dump(Formatter *f) const
   }
   f->close_section();
   ::encode_json("new_instance", new_instance, f);
+  f->dump_int("reshardlog_entries", reshardlog_entries);
 }
 
 void rgw_bucket_dir::generate_test_instances(list<rgw_bucket_dir*>& o)
@@ -685,6 +741,21 @@ void rgw_bucket_dir::dump(Formatter *f) const
     f->close_section();
   }
   f->close_section();
+}
+
+void rgw_s3select_usage_data::generate_test_instances(list<rgw_s3select_usage_data*>& o)
+{
+  rgw_s3select_usage_data *s = new rgw_s3select_usage_data;
+  s->bytes_processed = 1024;
+  s->bytes_returned = 512;
+  o.push_back(s);
+  o.push_back(new rgw_s3select_usage_data);
+}
+
+void rgw_s3select_usage_data::dump(Formatter *f) const
+{
+  f->dump_unsigned("bytes_processed", bytes_processed);
+  f->dump_unsigned("bytes_returned", bytes_returned);
 }
 
 void rgw_usage_data::generate_test_instances(list<rgw_usage_data*>& o)
@@ -767,12 +838,18 @@ void rgw_usage_log_entry::dump(Formatter *f) const
     }
   }
   f->close_section();
+
+  f->open_object_section("s3select");
+  f->dump_unsigned("bytes_processed", s3select_usage.bytes_processed);
+  f->dump_unsigned("bytes_returned", s3select_usage.bytes_returned);
+  f->close_section();
 }
 
 void rgw_usage_log_entry::generate_test_instances(list<rgw_usage_log_entry *> &o)
 {
   rgw_usage_log_entry *entry = new rgw_usage_log_entry;
   rgw_usage_data usage_data{1024, 2048};
+  rgw_s3select_usage_data s3select_usage_data{8192, 4096};
   entry->owner = rgw_user("owner");
   entry->payer = rgw_user("payer");
   entry->bucket = "bucket";
@@ -782,8 +859,22 @@ void rgw_usage_log_entry::generate_test_instances(list<rgw_usage_log_entry *> &o
   entry->total_usage.ops = usage_data.ops;
   entry->total_usage.successful_ops = usage_data.successful_ops;
   entry->usage_map["get_obj"] = usage_data;
+  entry->s3select_usage = s3select_usage_data;
   o.push_back(entry);
   o.push_back(new rgw_usage_log_entry);
+}
+
+std::string to_string(cls_rgw_reshard_initiator i) {
+  switch (i) {
+  case cls_rgw_reshard_initiator::Unknown:
+    return "unknown";
+  case cls_rgw_reshard_initiator::Admin:
+    return "administrator";
+  case cls_rgw_reshard_initiator::Dynamic:
+    return "dynamic resharding";
+  default:
+    return "error";
+  }
 }
 
 void cls_rgw_reshard_entry::generate_key(const string& tenant, const string& bucket_name, string *key)
@@ -799,12 +890,13 @@ void cls_rgw_reshard_entry::get_key(string *key) const
 void cls_rgw_reshard_entry::dump(Formatter *f) const
 {
   utime_t ut(time);
-  encode_json("time",ut, f);
+  encode_json("time", ut, f);
   encode_json("tenant", tenant, f);
   encode_json("bucket_name", bucket_name, f);
   encode_json("bucket_id", bucket_id, f);
   encode_json("old_num_shards", old_num_shards, f);
   encode_json("tentative_new_num_shards", new_num_shards, f);
+  encode_json("initiator", to_string(initiator), f);
 }
 
 void cls_rgw_reshard_entry::generate_test_instances(list<cls_rgw_reshard_entry*>& ls)
@@ -863,6 +955,9 @@ std::ostream& operator<<(std::ostream& out, cls_rgw_reshard_status status) {
   switch (status) {
   case cls_rgw_reshard_status::NOT_RESHARDING:
     out << "NOT_RESHARDING";
+    break;
+  case cls_rgw_reshard_status::IN_LOGRECORD:
+    out << "IN_LOGRECORD";
     break;
   case cls_rgw_reshard_status::IN_PROGRESS:
     out << "IN_PROGRESS";

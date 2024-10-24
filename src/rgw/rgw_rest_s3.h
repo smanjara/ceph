@@ -9,7 +9,7 @@
 #include <string_view>
 
 #include <boost/container/static_vector.hpp>
-#include <boost/crc.hpp> 
+#include <boost/crc.hpp>
 
 #include "common/sstring.hh"
 #include "rgw_op.h"
@@ -42,6 +42,7 @@ protected:
   // Serving a custom error page from an object is really a 200 response with
   // just the status line altered.
   int custom_http_ret = 0;
+  bool checksum_mode{false};
   std::map<std::string, std::string> crypt_http_responses;
   int override_range_hdr(const rgw::auth::StrategyRegistry& auth_registry, optional_yield y);
 public:
@@ -135,7 +136,7 @@ public:
     return 0;
   }
   void send_response_begin(bool has_buckets) override;
-  void send_response_data(rgw::sal::BucketList& buckets) override;
+  void send_response_data(std::span<const RGWBucketEnt> buckets) override;
   void send_response_end() override;
 };
 
@@ -302,6 +303,12 @@ class RGWPostObj_ObjStore_S3 : public RGWPostObj_ObjStore {
   std::string get_current_filename() const override;
   std::string get_current_content_type() const override;
 
+  inline void put_prop(const std::string_view k, const std::string_view v) {
+    /* assume the caller will mangle the key name, if required */
+    auto& map = const_cast<env_map_t&>(s->info.env->get_map());
+    map.insert(env_map_t::value_type(k, v));
+  }
+
 public:
   RGWPostObj_ObjStore_S3() {}
   ~RGWPostObj_ObjStore_S3() override {}
@@ -318,6 +325,16 @@ public:
   int get_data(ceph::bufferlist& bl, bool& again) override;
   int get_encrypt_filter(std::unique_ptr<rgw::sal::DataProcessor> *filter,
                          rgw::sal::DataProcessor *cb) override;
+};
+
+class RGWRestoreObj_ObjStore_S3 : public RGWRestoreObj_ObjStore {
+
+public:
+  RGWRestoreObj_ObjStore_S3() {}
+  ~RGWRestoreObj_ObjStore_S3() override {}
+
+  int get_params(optional_yield y) override;
+  void send_response() override;
 };
 
 class RGWDeleteObj_ObjStore_S3 : public RGWDeleteObj_ObjStore {
@@ -355,7 +372,8 @@ public:
   RGWPutACLs_ObjStore_S3() {}
   ~RGWPutACLs_ObjStore_S3() override {}
 
-  int get_policy_from_state(rgw::sal::Driver* driver, req_state *s, std::stringstream& ss) override;
+  int get_policy_from_state(const ACLOwner& owner,
+                            RGWAccessControlPolicy& p) override;
   void send_response() override;
   int get_params(optional_yield y) override;
 };
@@ -517,8 +535,8 @@ public:
   void send_status() override;
   void begin_response() override;
   void send_partial_response(const rgw_obj_key& key, bool delete_marker,
-                             const std::string& marker_version_id, int ret,
-                             boost::asio::deadline_timer *formatter_flush_cond) override;
+                             const std::string& marker_version_id,
+                             int ret) override;
   void end_response() override;
 };
 
@@ -668,19 +686,14 @@ public:
 
 class RGWHandler_REST_Service_S3 : public RGWHandler_REST_S3 {
 protected:
-  const bool isSTSEnabled;
-  const bool isIAMEnabled;
-  const bool isPSEnabled;
   bool is_usage_op() const {
     return s->info.args.exists("usage");
   }
   RGWOp *op_get() override;
   RGWOp *op_head() override;
-  RGWOp *op_post() override;
 public:
-   RGWHandler_REST_Service_S3(const rgw::auth::StrategyRegistry& auth_registry,
-                              bool _isSTSEnabled, bool _isIAMEnabled, bool _isPSEnabled) :
-      RGWHandler_REST_S3(auth_registry), isSTSEnabled(_isSTSEnabled), isIAMEnabled(_isIAMEnabled), isPSEnabled(_isPSEnabled) {}
+   RGWHandler_REST_Service_S3(const rgw::auth::StrategyRegistry& auth_registry) :
+      RGWHandler_REST_S3(auth_registry) {}
   ~RGWHandler_REST_Service_S3() override = default;
 };
 
@@ -887,7 +900,7 @@ inline int valid_s3_bucket_name(const std::string& name, bool relaxed=false)
       continue;
 
     if (c == '.') {
-      if (!relaxed && s && *s) {
+      if (!relaxed) {
 	// name cannot have consecutive periods or dashes
 	// adjacent to periods
 	// ensure s is neither the first nor the last character
@@ -1174,7 +1187,7 @@ class STSEngine : public AWSEngine {
   int get_session_token(const DoutPrefixProvider* dpp, const std::string_view& session_token,
                         STS::SessionToken& token) const;
 
-  result_t authenticate(const DoutPrefixProvider* dpp, 
+  result_t authenticate(const DoutPrefixProvider* dpp,
                         const std::string_view& access_key_id,
                         const std::string_view& signature,
                         const std::string_view& session_token,

@@ -24,12 +24,14 @@ see :ref:`nfs-ganesha-config`.
 NFS Cluster management
 ======================
 
+.. _nfs-module-cluster-create:
+
 Create NFS Ganesha Cluster
 --------------------------
 
 .. code:: bash
 
-    $ ceph nfs cluster create <cluster_id> [<placement>] [--port <port>] [--ingress --virtual-ip <ip>]
+    $ ceph nfs cluster create <cluster_id> [<placement>] [--ingress] [--virtual_ip <value>] [--ingress-mode {default|keepalive-only|haproxy-standard|haproxy-protocol}] [--port <int>]
 
 This creates a common recovery pool for all NFS Ganesha daemons, new user based on
 ``cluster_id``, and a common NFS Ganesha config RADOS object.
@@ -105,10 +107,29 @@ of the details of NFS redirecting traffic on the virtual IP to the
 appropriate backend NFS servers, and redeploying NFS servers when they
 fail.
 
-Enabling ingress via the ``ceph nfs cluster create`` command deploys a
-simple ingress configuration with the most common configuration
-options.  Ingress can also be added to an existing NFS service (e.g.,
-one created without the ``--ingress`` flag), and the basic NFS service can
+An optional ``--ingress-mode`` parameter can be provided to choose
+how the *ingress* service is configured:
+
+- Setting ``--ingress-mode keepalive-only`` deploys a simplified *ingress*
+  service that provides a virtual IP with the nfs server directly binding to
+  that virtual IP and leaves out any sort of load balancing or traffic
+  redirection. This setup will restrict users to deploying only 1 nfs daemon
+  as multiple cannot bind to the same port on the virtual IP.
+- Setting ``--ingress-mode haproxy-standard`` deploys a full *ingress* service
+  to provide load balancing and high-availability using HAProxy and keepalived.
+  Client IP addresses are not visible to the back-end NFS server and IP level
+  restrictions on NFS exports will not function.
+- Setting ``--ingress-mode haproxy-protocol`` deploys a full *ingress* service
+  to provide load balancing and high-availability using HAProxy and keepalived.
+  Client IP addresses are visible to the back-end NFS server and IP level
+  restrictions on NFS exports are usable. This mode requires NFS Ganesha version
+  5.0 or later.
+- Setting ``--ingress-mode default`` is equivalent to not providing any other
+  ingress mode by name. When no other ingress mode is specified by name
+  the default ingress mode used is ``haproxy-standard``.
+
+Ingress can be added to an existing NFS service (e.g., one initially created
+without the ``--ingress`` flag), and the basic NFS service can
 also be modified after the fact to include non-default options, by modifying
 the services directly.  For more information, see :ref:`cephadm-ha-nfs`.
 
@@ -262,7 +283,7 @@ Create CephFS Export
 
 .. code:: bash
 
-    $ ceph nfs export create cephfs --cluster-id <cluster_id> --pseudo-path <pseudo_path> --fsname <fsname> [--readonly] [--path=/path/in/cephfs] [--client_addr <value>...] [--squash <value>] [--sectype <value>...]
+    $ ceph nfs export create cephfs --cluster-id <cluster_id> --pseudo-path <pseudo_path> --fsname <fsname> [--readonly] [--path=/path/in/cephfs] [--client_addr <value>...] [--squash <value>] [--sectype <value>...] [--cmount_path <value>]
 
 This creates export RADOS objects containing the export block, where
 
@@ -297,9 +318,16 @@ values may be separated by a comma (example: ``--sectype krb5p,krb5i``). The
 server will negotatiate a supported security type with the client preferring
 the supplied methods left-to-right.
 
+``<cmount_path>`` specifies the path within the CephFS to mount this export on. It is
+allowed to be any complete path hierarchy between ``/`` and the ``EXPORT {path}``. (i.e. if ``EXPORT { Path }`` parameter is ``/foo/bar`` then cmount_path could be ``/``, ``/foo`` or ``/foo/bar``).
+
+.. note:: If this and the other ``EXPORT { FSAL {} }`` options are the same between multiple exports, those exports will share a single CephFS client.
+          If not specified, the default is ``/``.
+
 .. note:: Specifying values for sectype that require Kerberos will only function on servers
           that are configured to support Kerberos. Setting up NFS-Ganesha to support Kerberos
-          is outside the scope of this document.
+          can be found here `Kerberos setup for NFS Ganesha in Ceph <https://github.com/nfs-ganesha/nfs-ganesha/wiki/Kerberos-setup-for-NFS-Ganesha-in-Ceph>`_.
+
 
 .. note:: Export creation is supported only for NFS Ganesha clusters deployed using nfs interface.
 
@@ -456,9 +484,9 @@ For example,::
      ],
      "fsal": {
        "name": "CEPH",
-       "user_id": "nfs.mynfs.1",
        "fs_name": "a",
-       "sec_label_xattr": ""
+       "sec_label_xattr": "",
+       "cmount_path": "/"
      },
      "clients": []
    }
@@ -472,6 +500,9 @@ provided JSON should fully describe the new state of the export (just
 as when creating a new export), with the exception of the
 authentication credentials, which will be carried over from the
 previous state of the export where possible.
+
+!! NOTE: The ``user_id`` in the ``fsal`` block should not be modified or mentioned in the JSON file as it is auto-generated for CephFS exports.
+It's auto-generated in the format ``nfs.<cluster_id>.<fs_name>.<hash_id>``.
 
 ::
 
@@ -493,9 +524,9 @@ previous state of the export where possible.
      ],
      "fsal": {
        "name": "CEPH",
-       "user_id": "nfs.mynfs.1",
        "fs_name": "a",
-       "sec_label_xattr": ""
+       "sec_label_xattr": "",
+       "cmount_path": "/"
      },
      "clients": []
    }
@@ -546,6 +577,9 @@ If the NFS service is running on a non-standard port number:
     $ mount -t nfs -o port=<ganesha-port> <ganesha-host-name>:<ganesha-pseudo_path> <mount-point>
 
 .. note:: Only NFS v4.0+ is supported.
+
+.. note:: As of this writing (01 Jan 2024), no version of Microsoft Windows
+   supports mouting an NFS v4.x export natively.
 
 Troubleshooting
 ===============

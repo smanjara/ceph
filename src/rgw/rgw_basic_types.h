@@ -1,4 +1,4 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab ft=cpp
 
 /*
@@ -18,10 +18,10 @@
  * radosgw or OSD contexts (e.g., rgw_sal.h, rgw_common.h)
  */
 
-#ifndef CEPH_RGW_BASIC_TYPES_H
-#define CEPH_RGW_BASIC_TYPES_H
+#pragma once
 
 #include <string>
+#include <optional>
 #include <fmt/format.h>
 
 #include "include/types.h"
@@ -32,7 +32,9 @@
 #include "rgw_user_types.h"
 #include "rgw_bucket_types.h"
 #include "rgw_obj_types.h"
-#include "rgw_obj_manifest.h"
+#include "rgw_cksum.h"
+
+#include "driver/rados/rgw_obj_manifest.h" // FIXME: subclass dependency
 
 #include "common/Formatter.h"
 
@@ -66,13 +68,22 @@ struct rgw_zone_id {
   rgw_zone_id(std::string&& _id) : id(std::move(_id)) {}
 
   void encode(ceph::buffer::list& bl) const {
-    /* backward compatiblity, not using ENCODE_{START,END} macros */
+    /* backward compatibility, not using ENCODE_{START,END} macros */
     ceph::encode(id, bl);
   }
 
   void decode(ceph::buffer::list::const_iterator& bl) {
-    /* backward compatiblity, not using DECODE_{START,END} macros */
+    /* backward compatibility, not using DECODE_{START,END} macros */
     ceph::decode(id, bl);
+  }
+
+  void dump(ceph::Formatter *f) const {
+    f->dump_string("id", id);
+  }
+
+  static void generate_test_instances(std::list<rgw_zone_id*>& o) {
+    o.push_back(new rgw_zone_id);
+    o.push_back(new rgw_zone_id("id"));
   }
 
   void clear() {
@@ -132,7 +143,7 @@ extern void decode_json_obj(rgw_placement_rule& v, JSONObj *obj);
 namespace rgw {
 namespace auth {
 class Principal {
-  enum types { User, Role, Tenant, Wildcard, OidcProvider, AssumedRole };
+  enum types { User, Role, Account, Wildcard, OidcProvider, AssumedRole };
   types t;
   rgw_user u;
   std::string idp_url;
@@ -160,8 +171,8 @@ public:
     return Principal(Role, std::move(t), std::move(u));
   }
 
-  static Principal tenant(std::string&& t) {
-    return Principal(Tenant, std::move(t), {});
+  static Principal account(std::string&& t) {
+    return Principal(Account, std::move(t), {});
   }
 
   static Principal oidc_provider(std::string&& idp_url) {
@@ -184,8 +195,8 @@ public:
     return t == Role;
   }
 
-  bool is_tenant() const {
-    return t == Tenant;
+  bool is_account() const {
+    return t == Account;
   }
 
   bool is_oidc_provider() const {
@@ -196,7 +207,7 @@ public:
     return t == AssumedRole;
   }
 
-  const std::string& get_tenant() const {
+  const std::string& get_account() const {
     return u.tenant;
   }
 
@@ -249,11 +260,15 @@ struct RGWUploadPartInfo {
   ceph::real_time modified;
   RGWObjManifest manifest;
   RGWCompressionInfo cs_info;
+  std::optional<rgw::cksum::Cksum> cksum;
+
+  // Previous part obj prefixes. Recorded here for later cleanup.
+  std::set<std::string> past_prefixes; 
 
   RGWUploadPartInfo() : num(0), size(0) {}
 
   void encode(bufferlist& bl) const {
-    ENCODE_START(4, 2, bl);
+    ENCODE_START(6, 2, bl);
     encode(num, bl);
     encode(size, bl);
     encode(etag, bl);
@@ -261,10 +276,12 @@ struct RGWUploadPartInfo {
     encode(manifest, bl);
     encode(cs_info, bl);
     encode(accounted_size, bl);
+    encode(past_prefixes, bl);
+    encode(cksum, bl);
     ENCODE_FINISH(bl);
   }
   void decode(bufferlist::const_iterator& bl) {
-    DECODE_START_LEGACY_COMPAT_LEN(4, 2, 2, bl);
+    DECODE_START_LEGACY_COMPAT_LEN(6, 2, 2, bl);
     decode(num, bl);
     decode(size, bl);
     decode(etag, bl);
@@ -277,11 +294,15 @@ struct RGWUploadPartInfo {
     } else {
       accounted_size = size;
     }
+    if (struct_v >= 5) {
+      decode(past_prefixes, bl);
+    }
+    if (struct_v >= 6) {
+      decode(cksum, bl);
+    }
     DECODE_FINISH(bl);
   }
   void dump(Formatter *f) const;
   static void generate_test_instances(std::list<RGWUploadPartInfo*>& o);
 };
 WRITE_CLASS_ENCODER(RGWUploadPartInfo)
-
-#endif /* CEPH_RGW_BASIC_TYPES_H */

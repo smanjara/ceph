@@ -79,6 +79,7 @@ struct RGWNameToId {
 
   void dump(Formatter *f) const;
   void decode_json(JSONObj *obj);
+  static void generate_test_instances(std::list<RGWNameToId*>& o);
 };
 WRITE_CLASS_ENCODER(RGWNameToId)
 
@@ -122,6 +123,7 @@ struct RGWZoneStorageClass {
 
   void dump(Formatter *f) const;
   void decode_json(JSONObj *obj);
+  static void generate_test_instances(std::list<RGWZoneStorageClass*>& o);
 };
 WRITE_CLASS_ENCODER(RGWZoneStorageClass)
 
@@ -209,6 +211,7 @@ public:
 
   void dump(Formatter *f) const;
   void decode_json(JSONObj *obj);
+  static void generate_test_instances(std::list<RGWZoneStorageClasses*>& o);
 };
 WRITE_CLASS_ENCODER(RGWZoneStorageClasses)
 
@@ -305,6 +308,7 @@ struct RGWZonePlacementInfo {
 
   void dump(Formatter *f) const;
   void decode_json(JSONObj *obj);
+  static void generate_test_instances(std::list<RGWZonePlacementInfo*>& o);
 
 };
 WRITE_CLASS_ENCODER(RGWZonePlacementInfo)
@@ -328,7 +332,7 @@ struct RGWZone {
  */
   uint32_t bucket_index_max_shards;
 
-  // pre-shard buckets on creation to enable some write-parallism by default,
+  // pre-shard buckets on creation to enable some write-parallelism by default,
   // delay the need to reshard as the bucket grows, and (in multisite) get some
   // bucket index sharding where dynamic resharding is not supported
   static constexpr uint32_t default_bucket_index_max_shards = 11;
@@ -539,9 +543,13 @@ struct RGWZoneGroupPlacementTierS3 {
 WRITE_CLASS_ENCODER(RGWZoneGroupPlacementTierS3)
 
 struct RGWZoneGroupPlacementTier {
+#define DEFAULT_READ_THROUGH_RESTORE_DAYS 1
+
   std::string tier_type;
   std::string storage_class;
   bool retain_head_object = false;
+  bool allow_read_through = false;
+  uint64_t read_through_restore_days = 1;
 
   struct _tier {
     RGWZoneGroupPlacementTierS3 s3;
@@ -551,10 +559,12 @@ struct RGWZoneGroupPlacementTier {
   int clear_params(const JSONFormattable& config);
 
   void encode(bufferlist& bl) const {
-    ENCODE_START(1, 1, bl);
+    ENCODE_START(2, 1, bl);
     encode(tier_type, bl);
     encode(storage_class, bl);
     encode(retain_head_object, bl);
+    encode(allow_read_through, bl);
+    encode(read_through_restore_days, bl);
     if (tier_type == "cloud-s3") {
       encode(t.s3, bl);
     }
@@ -562,10 +572,14 @@ struct RGWZoneGroupPlacementTier {
   }
 
   void decode(bufferlist::const_iterator& bl) {
-    DECODE_START(1, bl);
+    DECODE_START(2, bl);
     decode(tier_type, bl);
     decode(storage_class, bl);
     decode(retain_head_object, bl);
+    if (struct_v >= 2) {
+      decode(allow_read_through, bl);
+      decode(read_through_restore_days, bl);
+    }
     if (tier_type == "cloud-s3") {
       decode(t.s3, bl);
     }
@@ -574,6 +588,12 @@ struct RGWZoneGroupPlacementTier {
 
   void dump(Formatter *f) const;
   void decode_json(JSONObj *obj);
+  static void generate_test_instances(std::list<RGWZoneGroupPlacementTier*>& o) {
+    o.push_back(new RGWZoneGroupPlacementTier);
+    o.push_back(new RGWZoneGroupPlacementTier);
+    o.back()->tier_type = "cloud-s3";
+    o.back()->storage_class = "STANDARD";
+  }
 };
 WRITE_CLASS_ENCODER(RGWZoneGroupPlacementTier)
 
@@ -621,5 +641,16 @@ struct RGWZoneGroupPlacementTarget {
   }
   void dump(Formatter *f) const;
   void decode_json(JSONObj *obj);
+  static void generate_test_instances(std::list<RGWZoneGroupPlacementTarget*>& o) {
+    o.push_back(new RGWZoneGroupPlacementTarget);
+    o.back()->storage_classes.insert("STANDARD");
+    o.push_back(new RGWZoneGroupPlacementTarget);
+    o.back()->name = "target";
+    o.back()->tags.insert("tag1");
+    o.back()->tags.insert("tag2");
+    o.back()->storage_classes.insert("STANDARD_IA");
+    o.back()->tier_targets["cloud-s3"].tier_type = "cloud-s3";
+    o.back()->tier_targets["cloud-s3"].storage_class = "STANDARD";
+  }
 };
 WRITE_CLASS_ENCODER(RGWZoneGroupPlacementTarget)

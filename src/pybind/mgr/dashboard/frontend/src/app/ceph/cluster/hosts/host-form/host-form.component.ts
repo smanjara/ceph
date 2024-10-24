@@ -1,8 +1,6 @@
 import { Component, OnInit } from '@angular/core';
-import { FormControl, Validators } from '@angular/forms';
-import { Router } from '@angular/router';
-
-import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap';
+import { UntypedFormControl, Validators } from '@angular/forms';
+import { ActivatedRoute, Router } from '@angular/router';
 import expand from 'brace-expansion';
 
 import { HostService } from '~/app/shared/api/host.service';
@@ -12,8 +10,10 @@ import { ActionLabelsI18n, URLVerbs } from '~/app/shared/constants/app.constants
 import { CdForm } from '~/app/shared/forms/cd-form';
 import { CdFormGroup } from '~/app/shared/forms/cd-form-group';
 import { CdValidators } from '~/app/shared/forms/cd-validators';
+import { CdTableFetchDataContext } from '~/app/shared/models/cd-table-fetch-data-context';
 import { FinishedTask } from '~/app/shared/models/finished-task';
 import { TaskWrapperService } from '~/app/shared/services/task-wrapper.service';
+import { Location } from '@angular/common';
 
 @Component({
   selector: 'cd-host-form',
@@ -21,6 +21,7 @@ import { TaskWrapperService } from '~/app/shared/services/task-wrapper.service';
   styleUrls: ['./host-form.component.scss']
 })
 export class HostFormComponent extends CdForm implements OnInit {
+  open: boolean = false;
   hostForm: CdFormGroup;
   action: string;
   resource: string;
@@ -45,7 +46,8 @@ export class HostFormComponent extends CdForm implements OnInit {
     private actionLabels: ActionLabelsI18n,
     private hostService: HostService,
     private taskWrapper: TaskWrapperService,
-    public activeModal: NgbActiveModal
+    private route: ActivatedRoute,
+    private location: Location
   ) {
     super();
     this.resource = $localize`host`;
@@ -53,11 +55,10 @@ export class HostFormComponent extends CdForm implements OnInit {
   }
 
   ngOnInit() {
-    if (this.router.url.includes('hosts')) {
-      this.pageURL = 'hosts';
-    }
+    this.open = this.route.outlet === 'modal';
     this.createForm();
-    this.hostService.list('false').subscribe((resp: any[]) => {
+    const hostContext = new CdTableFetchDataContext(() => undefined);
+    this.hostService.list(hostContext.toParams(), 'false').subscribe((resp: any[]) => {
       this.hostnames = resp.map((host) => {
         return host['hostname'];
       });
@@ -67,7 +68,7 @@ export class HostFormComponent extends CdForm implements OnInit {
     this.hostService.getLabels().subscribe((resp: string[]) => {
       const uniqueLabels = new Set(resp.concat(this.hostService.predefinedLabels));
       this.labelsOption = Array.from(uniqueLabels).map((label) => {
-        return { enabled: true, name: label, selected: false, description: null };
+        return { enabled: true, name: label, content: label, selected: false, description: null };
       });
     });
   }
@@ -80,7 +81,7 @@ export class HostFormComponent extends CdForm implements OnInit {
 
   private createForm() {
     this.hostForm = new CdFormGroup({
-      hostname: new FormControl('', {
+      hostname: new UntypedFormControl('', {
         validators: [
           Validators.required,
           CdValidators.custom('uniqueName', (hostname: string) => {
@@ -88,11 +89,11 @@ export class HostFormComponent extends CdForm implements OnInit {
           })
         ]
       }),
-      addr: new FormControl('', {
+      addr: new UntypedFormControl('', {
         validators: [CdValidators.ip()]
       }),
-      labels: new FormControl([]),
-      maintenance: new FormControl(false)
+      labels: new UntypedFormControl([]),
+      maintenance: new UntypedFormControl()
     });
   }
 
@@ -164,9 +165,13 @@ export class HostFormComponent extends CdForm implements OnInit {
           complete: () => {
             this.pageURL === 'hosts'
               ? this.router.navigate([this.pageURL, { outlets: { modal: null } }])
-              : this.activeModal.close();
+              : this.location.back();
           }
         });
     });
+  }
+
+  closeModal(): void {
+    this.location.back();
   }
 }

@@ -12,10 +12,9 @@
 #include <optional>
 #include <string>
 
-#undef FMT_HEADER_ONLY
-#define FMT_HEADER_ONLY 1
 #include <fmt/format.h>
 
+#include "common/Formatter.h"
 #include "include/buffer.h"
 #include "include/types.h"
 
@@ -54,6 +53,14 @@ struct entry_header {
     DECODE_START(1, bl);
     decode(mtime, bl);
     DECODE_FINISH(bl);
+  }
+  void dump(ceph::Formatter *f) const {
+    f->dump_stream("mtime") << mtime;
+  }
+  static void generate_test_instances(std::list<entry_header*>& ls) {
+    ls.push_back(new entry_header);
+    ls.push_back(new entry_header);
+    ls.back()->mtime = ceph::real_clock::now();
   }
 };
 WRITE_CLASS_ENCODER(entry_header)

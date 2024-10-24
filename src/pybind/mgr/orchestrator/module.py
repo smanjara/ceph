@@ -1,7 +1,7 @@
 import enum
 import errno
 import json
-from typing import List, Set, Optional, Iterator, cast, Dict, Any, Union, Sequence, Mapping
+from typing import List, Set, Optional, Iterator, cast, Dict, Any, Union, Sequence, Mapping, Tuple
 import re
 import datetime
 import math
@@ -19,18 +19,42 @@ from ceph.deployment.inventory import Device  # noqa: F401; pylint: disable=unus
 from ceph.deployment.drive_group import DriveGroupSpec, DeviceSelection, OSDMethod
 from ceph.deployment.service_spec import PlacementSpec, ServiceSpec, service_spec_allow_invalid_from_json, TracingSpec
 from ceph.deployment.hostspec import SpecValidationError
+from ceph.deployment.utils import unwrap_ipv6
 from ceph.utils import datetime_now
 
-from mgr_util import to_pretty_timedelta, format_dimless, format_bytes
+from mgr_util import to_pretty_timedelta, format_bytes
 from mgr_module import MgrModule, HandleCommandResult, Option
 from object_format import Format
 
-from ._interface import OrchestratorClientMixin, DeviceLightLoc, _cli_read_command, \
-    raise_if_exception, _cli_write_command, OrchestratorError, \
-    NoOrchestrator, OrchestratorValidationError, NFSServiceSpec, \
-    RGWSpec, InventoryFilter, InventoryHost, HostSpec, CLICommandMeta, \
-    ServiceDescription, DaemonDescription, IscsiServiceSpec, json_to_generic_spec, \
-    GenericSpec, DaemonDescriptionStatus, SNMPGatewaySpec, MDSSpec, TunedProfileSpec
+from ._interface import (
+    CLICommandMeta,
+    DaemonDescription,
+    DaemonDescriptionStatus,
+    DeviceLightLoc,
+    GenericSpec,
+    HostSpec,
+    InventoryFilter,
+    InventoryHost,
+    IscsiServiceSpec,
+    MDSSpec,
+    NFSServiceSpec,
+    NoOrchestrator,
+    NvmeofServiceSpec,
+    OrchestratorClientMixin,
+    OrchestratorError,
+    OrchestratorValidationError,
+    RGWSpec,
+    SMBSpec,
+    SNMPGatewaySpec,
+    MgmtGatewaySpec,
+    OAuth2ProxySpec,
+    ServiceDescription,
+    TunedProfileSpec,
+    _cli_read_command,
+    _cli_write_command,
+    json_to_generic_spec,
+    raise_if_exception,
+)
 
 
 def nice_delta(now: datetime.datetime, t: Optional[datetime.datetime], suffix: str = '') -> str:
@@ -44,6 +68,10 @@ def nice_bytes(v: Optional[int]) -> str:
     if not v:
         return '-'
     return format_bytes(v, 5)
+
+
+class ArgumentError(Exception):
+    pass
 
 
 class HostDetails:
@@ -89,8 +117,9 @@ class HostDetails:
 
         if self._facts:
             self.server = f"{self._facts.get('vendor', '').strip()} {self._facts.get('model', '').strip()}"
-            _cores = self._facts.get('cpu_cores', 0) * self._facts.get('cpu_count', 0)
-            _threads = self._facts.get('cpu_threads', 0) * _cores
+            _cpu_count = self._facts.get('cpu_count', 1)
+            _cores = self._facts.get('cpu_cores', 0) * _cpu_count
+            _threads = self._facts.get('cpu_threads', 0) * _cpu_count
             self.os = self._facts.get('operating_system', 'N/A')
             self.cpu_summary = f"{_cores}C/{_threads}T" if _cores > 0 else 'N/A'
 
@@ -122,11 +151,24 @@ class HostDetails:
         return _cls
 
     @staticmethod
-    def yaml_representer(dumper: 'yaml.SafeDumper', data: 'HostDetails') -> Any:
+    def yaml_representer(dumper: 'yaml.Dumper', data: 'HostDetails') -> yaml.Node:
         return dumper.represent_dict(cast(Mapping, data.to_json().items()))
 
 
 yaml.add_representer(HostDetails, HostDetails.yaml_representer)
+
+
+class DaemonFields(enum.Enum):
+    service_name = 'service_name'
+    daemon_type = 'daemon_type'
+    name = 'name'  # type: ignore
+    host = 'host'
+    status = 'status'
+    refreshed = 'refreshed'
+    age = 'age'
+    mem_use = 'mem_use'
+    mem_lim = 'mem_lim'
+    image = 'image'
 
 
 class ServiceType(enum.Enum):
@@ -146,6 +188,7 @@ class ServiceType(enum.Enum):
     rgw = 'rgw'
     nfs = 'nfs'
     iscsi = 'iscsi'
+    nvmeof = 'nvmeof'
     snmp_gateway = 'snmp-gateway'
     elasticsearch = 'elasticsearch'
     jaeger_agent = 'jaeger-agent'
@@ -168,6 +211,18 @@ class DaemonAction(enum.Enum):
     restart = 'restart'
     reconfig = 'reconfig'
     rotate_key = 'rotate-key'
+
+
+class IngressType(enum.Enum):
+    default = 'default'
+    keepalive_only = 'keepalive-only'
+    haproxy_standard = 'haproxy-standard'
+    haproxy_protocol = 'haproxy-protocol'
+
+    def canonicalize(self) -> "IngressType":
+        if self == self.default:
+            return IngressType(self.haproxy_standard)
+        return IngressType(self)
 
 
 def to_format(what: Any, format: Format, many: bool, cls: Any) -> Any:
@@ -448,21 +503,189 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
         if labels and len(labels) == 1:
             labels = labels[0].split(',')
 
+        if addr is not None:
+            addr = unwrap_ipv6(addr)
+
         s = HostSpec(hostname=hostname, addr=addr, labels=labels, status=_status)
 
         return self._apply_misc([s], False, Format.plain)
 
+    @_cli_write_command('orch hardware status')
+    def _hardware_status(self, hostname: Optional[str] = None, _end_positional_: int = 0, category: str = 'summary', format: Format = Format.plain) -> HandleCommandResult:
+        """
+        Display hardware status summary
+
+        :param hostname: hostname
+        """
+        table_heading_mapping = {
+            'summary': ['HOST', 'SN', 'STORAGE', 'CPU', 'NET', 'MEMORY', 'POWER', 'FANS'],
+            'fullreport': [],
+            'firmwares': ['HOST', 'COMPONENT', 'NAME', 'DATE', 'VERSION', 'STATUS'],
+            'criticals': ['HOST', 'COMPONENT', 'NAME', 'STATUS', 'STATE'],
+            'memory': ['HOST', 'SYS_ID', 'NAME', 'STATUS', 'STATE'],
+            'storage': ['HOST', 'SYS_ID', 'NAME', 'MODEL', 'SIZE', 'PROTOCOL', 'SN', 'STATUS', 'STATE'],
+            'processors': ['HOST', 'SYS_ID', 'NAME', 'MODEL', 'CORES', 'THREADS', 'STATUS', 'STATE'],
+            'network': ['HOST', 'SYS_ID', 'NAME', 'SPEED', 'STATUS', 'STATE'],
+            'power': ['HOST', 'CHASSIS_ID', 'ID', 'NAME', 'MODEL', 'MANUFACTURER', 'STATUS', 'STATE'],
+            'fans': ['HOST', 'CHASSIS_ID', 'ID', 'NAME', 'STATUS', 'STATE']
+        }
+
+        if category not in table_heading_mapping.keys():
+            return HandleCommandResult(stdout=f"'{category}' is not a valid category.")
+
+        table_headings = table_heading_mapping.get(category, [])
+        table = PrettyTable(table_headings, border=True)
+        output = ''
+
+        if category == 'summary':
+            completion = self.node_proxy_summary(hostname=hostname)
+            summary: Dict[str, Any] = raise_if_exception(completion)
+            if format == Format.json:
+                output = json.dumps(summary)
+            else:
+                for k, v in summary.items():
+                    row = [k, v['sn']]
+                    row.extend([v['status'][key] for key in ['storage', 'processors',
+                                                             'network', 'memory',
+                                                             'power', 'fans']])
+                    table.add_row(row)
+                output = table.get_string()
+        elif category == 'fullreport':
+            if hostname is None:
+                output = 'Missing host name'
+            elif format != Format.json:
+                output = 'fullreport only supports json output'
+            else:
+                completion = self.node_proxy_fullreport(hostname=hostname)
+                fullreport: Dict[str, Any] = raise_if_exception(completion)
+                output = json.dumps(fullreport)
+        elif category == 'firmwares':
+            output = 'Missing host name' if hostname is None else self._firmwares_table(hostname, table, format)
+        elif category == 'criticals':
+            output = self._criticals_table(hostname, table, format)
+        else:
+            output = self._common_table(category, hostname, table, format)
+
+        return HandleCommandResult(stdout=output)
+
+    def _firmwares_table(self, hostname: Optional[str], table: PrettyTable, format: Format) -> str:
+        completion = self.node_proxy_firmwares(hostname=hostname)
+        data = raise_if_exception(completion)
+        # data = self.node_proxy_firmware(hostname=hostname)
+        if format == Format.json:
+            return json.dumps(data)
+        for host, details in data.items():
+            for k, v in details.items():
+                try:
+                    status = v['status']['health']
+                except (KeyError, TypeError):
+                    status = 'N/A'
+                table.add_row((host, k, v['name'], v['release_date'], v['version'], status))
+        return table.get_string()
+
+    def _criticals_table(self, hostname: Optional[str], table: PrettyTable, format: Format) -> str:
+        completion = self.node_proxy_criticals(hostname=hostname)
+        data = raise_if_exception(completion)
+        # data = self.node_proxy_criticals(hostname=hostname)
+        if format == Format.json:
+            return json.dumps(data)
+        for host, host_details in data.items():
+            for component, component_details in host_details.items():
+                for member, member_details in component_details.items():
+                    description = member_details.get('description') or member_details.get('name')
+                    table.add_row((host, component, description, member_details['status']['health'], member_details['status']['state']))
+        return table.get_string()
+
+    def _common_table(self, category: str, hostname: Optional[str], table: PrettyTable, format: Format) -> str:
+        completion = self.node_proxy_common(category=category, hostname=hostname)
+        data = raise_if_exception(completion)
+        # data = self.node_proxy_common(category=category, hostname=hostname)
+        if format == Format.json:
+            return json.dumps(data)
+        mapping = {
+            'memory': ('description', 'health', 'state'),
+            'storage': ('description', 'model', 'capacity_bytes', 'protocol', 'serial_number', 'health', 'state'),
+            'processors': ('model', 'total_cores', 'total_threads', 'health', 'state'),
+            'network': ('name', 'speed_mbps', 'health', 'state'),
+            'power': ('name', 'model', 'manufacturer', 'health', 'state'),
+            'fans': ('name', 'health', 'state')
+        }
+
+        fields = mapping.get(category, ())
+        for host in data.keys():
+            for sys_id, details in data[host].items():
+                for k, v in details.items():
+                    row = []
+                    for field in fields:
+                        if field in v:
+                            row.append(v[field])
+                        elif field in v.get('status', {}):
+                            row.append(v['status'][field])
+                        else:
+                            row.append('')
+                    if category in ('power', 'fans', 'processors'):
+                        table.add_row((host, sys_id,) + (k,) + tuple(row))
+                    else:
+                        table.add_row((host, sys_id,) + tuple(row))
+
+        return table.get_string()
+
+    class HardwareLightType(enum.Enum):
+        chassis = 'chassis'
+        device = 'drive'
+
+    class HardwareLightAction(enum.Enum):
+        on = 'on'
+        off = 'off'
+        get = 'get'
+
+    @_cli_write_command('orch hardware light')
+    def _hardware_light(self,
+                        light_type: HardwareLightType, action: HardwareLightAction,
+                        hostname: str, device: Optional[str] = None) -> HandleCommandResult:
+        """Enable or Disable a device or chassis LED"""
+        if light_type == self.HardwareLightType.device and not device:
+            return HandleCommandResult(stderr='you must pass a device ID.',
+                                       retval=-errno.ENOENT)
+
+        completion = self.hardware_light(light_type.value, action.value, hostname, device)
+        data = raise_if_exception(completion)
+        output: str = ''
+        if action == self.HardwareLightAction.get:
+            status = 'on' if data['LocationIndicatorActive'] else 'off'
+            if light_type == self.HardwareLightType.device:
+                output = f'ident LED for {device} on {hostname} is: {status}'
+            else:
+                output = f'ident chassis LED for {hostname} is: {status}'
+        else:
+            pass
+        return HandleCommandResult(stdout=output)
+
+    @_cli_write_command('orch hardware powercycle')
+    def _hardware_powercycle(self, hostname: str, yes_i_really_mean_it: bool = False) -> HandleCommandResult:
+        """Reboot a host"""
+        completion = self.hardware_powercycle(hostname, yes_i_really_mean_it=yes_i_really_mean_it)
+        raise_if_exception(completion)
+        return HandleCommandResult(stdout=completion.result_str())
+
+    @_cli_write_command('orch hardware shutdown')
+    def _hardware_shutdown(self, hostname: str, force: Optional[bool] = False, yes_i_really_mean_it: bool = False) -> HandleCommandResult:
+        """Shutdown a host"""
+        completion = self.hardware_shutdown(hostname, force, yes_i_really_mean_it=yes_i_really_mean_it)
+        raise_if_exception(completion)
+        return HandleCommandResult(stdout=completion.result_str())
+
     @_cli_write_command('orch host rm')
-    def _remove_host(self, hostname: str, force: bool = False, offline: bool = False) -> HandleCommandResult:
+    def _remove_host(self, hostname: str, force: bool = False, offline: bool = False, rm_crush_entry: bool = False) -> HandleCommandResult:
         """Remove a host"""
-        completion = self.remove_host(hostname, force, offline)
+        completion = self.remove_host(hostname, force, offline, rm_crush_entry)
         raise_if_exception(completion)
         return HandleCommandResult(stdout=completion.result_str())
 
     @_cli_write_command('orch host drain')
-    def _drain_host(self, hostname: str, force: bool = False) -> HandleCommandResult:
+    def _drain_host(self, hostname: str, force: bool = False, keep_conf_keyring: bool = False, zap_osd_devices: bool = False) -> HandleCommandResult:
         """drain all daemons from a host"""
-        completion = self.drain_host(hostname, force)
+        completion = self.drain_host(hostname, force, keep_conf_keyring, zap_osd_devices)
         raise_if_exception(completion)
         return HandleCommandResult(stdout=completion.result_str())
 
@@ -566,11 +789,11 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
         return HandleCommandResult(stdout=completion.result_str())
 
     @_cli_write_command('orch host maintenance enter')
-    def _host_maintenance_enter(self, hostname: str, force: bool = False) -> HandleCommandResult:
+    def _host_maintenance_enter(self, hostname: str, force: bool = False, yes_i_really_mean_it: bool = False) -> HandleCommandResult:
         """
         Prepare a host for maintenance by shutting down and disabling all Ceph daemons (cephadm only)
         """
-        completion = self.enter_host_maintenance(hostname, force=force)
+        completion = self.enter_host_maintenance(hostname, force=force, yes_i_really_mean_it=yes_i_really_mean_it)
         raise_if_exception(completion)
 
         return HandleCommandResult(stdout=completion.result_str())
@@ -595,12 +818,28 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
             return HandleCommandResult(stdout=completion.result_str())
         return HandleCommandResult(stdout=completion.result_str().split('.')[0])
 
+    @_cli_read_command('orch device replace')
+    def _replace_device(self,
+                        hostname: str,
+                        device: str,
+                        clear: bool = False,
+                        yes_i_really_mean_it: bool = False) -> HandleCommandResult:
+        """Perform all required operations in order to replace a device.
+        """
+        completion = self.replace_device(hostname=hostname,
+                                         device=device,
+                                         clear=clear,
+                                         yes_i_really_mean_it=yes_i_really_mean_it)
+        raise_if_exception(completion)
+        return HandleCommandResult(stdout=completion.result_str())
+
     @_cli_read_command('orch device ls')
     def _list_devices(self,
                       hostname: Optional[List[str]] = None,
                       format: Format = Format.plain,
                       refresh: bool = False,
-                      wide: bool = False) -> HandleCommandResult:
+                      wide: bool = False,
+                      summary: bool = False) -> HandleCommandResult:
         """
         List devices on a host
         """
@@ -647,8 +886,22 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
             table.left_padding_width = 0
             table.right_padding_width = 2
             now = datetime_now()
+            host_count = 0
+            available_count = 0
+            device_count = {
+                "hdd": 0,
+                "ssd": 0}
+
             for host_ in natsorted(inv_hosts, key=lambda h: h.name):  # type: InventoryHost
+                host_count += 1
                 for d in sorted(host_.devices.devices, key=lambda d: d.path):  # type: Device
+
+                    if d.available:
+                        available_count += 1
+                    try:
+                        device_count[d.human_readable_type] += 1
+                    except KeyError:
+                        device_count[d.human_readable_type] = 1
 
                     led_ident = 'N/A'
                     led_fail = 'N/A'
@@ -665,7 +918,7 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
                                 d.lsm_data.get('transport', ''),
                                 d.lsm_data.get('rpm', ''),
                                 d.device_id,
-                                format_dimless(d.sys_api.get('size', 0), 5),
+                                format_bytes(d.sys_api.get('size', 0), 5),
                                 d.lsm_data.get('health', ''),
                                 display_map[led_ident],
                                 display_map[led_fail],
@@ -681,13 +934,18 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
                                 d.path,
                                 d.human_readable_type,
                                 d.device_id,
-                                format_dimless(d.sys_api.get('size', 0), 5),
+                                format_bytes(d.sys_api.get('size', 0), 5),
                                 display_map[d.available],
                                 nice_delta(now, d.created, ' ago'),
                                 ', '.join(d.rejected_reasons)
                             )
                         )
             out.append(table.get_string())
+
+            if summary:
+                device_summary = [f"{device_count[devtype]} {devtype.upper()}" for devtype in sorted(device_count.keys())]
+                out.append(f"{host_count} host(s), {', '.join(device_summary)}, {available_count} available")
+
             return HandleCommandResult(stdout='\n'.join(out))
 
     @_cli_write_command('orch device zap')
@@ -698,15 +956,6 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
         if not force:
             raise OrchestratorError('must pass --force to PERMANENTLY ERASE DEVICE DATA')
         completion = self.zap_device(hostname, path)
-        raise_if_exception(completion)
-        return HandleCommandResult(stdout=completion.result_str())
-
-    @_cli_write_command('orch sd dump cert')
-    def _service_discovery_dump_cert(self) -> HandleCommandResult:
-        """
-        Returns service discovery server root certificate
-        """
-        completion = self.service_discovery_dump_cert()
         raise_if_exception(completion)
         return HandleCommandResult(stdout=completion.result_str())
 
@@ -796,6 +1045,7 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
                       service_name: Optional[str] = None,
                       daemon_type: Optional[str] = None,
                       daemon_id: Optional[str] = None,
+                      sort_by: Optional[DaemonFields] = DaemonFields.name,
                       format: Format = Format.plain,
                       refresh: bool = False) -> HandleCommandResult:
         """
@@ -811,6 +1061,31 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
 
         def ukn(s: Optional[str]) -> str:
             return '<unknown>' if s is None else s
+
+        def sort_by_field(d: DaemonDescription) -> Any:
+            if sort_by == DaemonFields.name:
+                return d.name()
+            elif sort_by == DaemonFields.host:
+                return d.hostname
+            elif sort_by == DaemonFields.status:
+                return d.status.name if d.status else None
+            elif sort_by == DaemonFields.refreshed:
+                return d.last_refresh
+            elif sort_by == DaemonFields.age:
+                return d.created
+            elif sort_by == DaemonFields.mem_use:
+                return d.memory_usage
+            elif sort_by == DaemonFields.mem_lim:
+                return d.memory_request
+            elif sort_by == DaemonFields.image:
+                return d.container_image_id
+            elif sort_by == DaemonFields.daemon_type:
+                return d.daemon_type
+            elif sort_by == DaemonFields.service_name:
+                return d.service_name()
+            else:
+                return None
+
         # Sort the list for display
         daemons.sort(key=lambda s: (ukn(s.daemon_type), ukn(s.hostname), ukn(s.daemon_id)))
 
@@ -834,7 +1109,7 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
             table._align['MEM LIM'] = 'r'
             table.left_padding_width = 0
             table.right_padding_width = 2
-            for s in natsorted(daemons, key=lambda d: d.name()):
+            for s in natsorted(daemons, key=lambda d: sort_by_field(d)):
                 if s.status_desc:
                     status = s.status_desc
                 else:
@@ -869,6 +1144,164 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
 
             return HandleCommandResult(stdout=table.get_string())
 
+    def _process_cert_store_json(self, d: Dict[str, Any], level: int = 0) -> str:
+        result_str = ''
+        indent = '  ' * level
+        for k, v in d.items():
+            if isinstance(v, dict):
+                result_str += f'{indent}{k}\n'
+                result_str += self._process_cert_store_json(v, level + 1)
+            else:
+                result_str += f'{indent}{k} - {v}\n'
+        return result_str
+
+    @_cli_read_command('orch cert-store cert ls')
+    def _cert_store_cert_ls(self, format: Format = Format.plain) -> HandleCommandResult:
+        completion = self.cert_store_cert_ls()
+        cert_ls = raise_if_exception(completion)
+        if format != Format.plain:
+            return HandleCommandResult(stdout=to_format(cert_ls, format, many=False, cls=None))
+        else:
+            result_str = self._process_cert_store_json(cert_ls, 0)
+            return HandleCommandResult(stdout=result_str)
+
+    @_cli_read_command('orch cert-store key ls')
+    def _cert_store_key_ls(self, format: Format = Format.plain) -> HandleCommandResult:
+        completion = self.cert_store_key_ls()
+        key_ls = raise_if_exception(completion)
+        if format != Format.plain:
+            return HandleCommandResult(stdout=to_format(key_ls, format, many=False, cls=None))
+        else:
+            result_str = self._process_cert_store_json(key_ls, 0)
+            return HandleCommandResult(stdout=result_str)
+
+    @_cli_read_command('orch cert-store get cert')
+    def _cert_store_get_cert(
+        self,
+        entity: str,
+        _end_positional_: int = 0,
+        service_name: Optional[str] = None,
+        hostname: Optional[str] = None,
+        no_exception_when_missing: bool = False
+    ) -> HandleCommandResult:
+        completion = self.cert_store_get_cert(
+            entity,
+            service_name,
+            hostname,
+            no_exception_when_missing
+        )
+        cert = raise_if_exception(completion)
+        return HandleCommandResult(stdout=cert)
+
+    @_cli_read_command('orch cert-store get key')
+    def _cert_store_get_key(
+        self,
+        entity: str,
+        _end_positional_: int = 0,
+        service_name: Optional[str] = None,
+        hostname: Optional[str] = None,
+        no_exception_when_missing: bool = False
+    ) -> HandleCommandResult:
+        completion = self.cert_store_get_key(
+            entity,
+            service_name,
+            hostname,
+            no_exception_when_missing
+        )
+        key = raise_if_exception(completion)
+        return HandleCommandResult(stdout=key)
+
+    def _get_credentials(self, username: Optional[str] = None, password: Optional[str] = None, inbuf: Optional[str] = None) -> Tuple[str, str]:
+
+        _username = username
+        _password = password
+        if inbuf:
+            try:
+                credentials = json.loads(inbuf)
+                _username = credentials['username'].strip()
+                _password = credentials['password'].strip()
+            except (KeyError, json.JSONDecodeError):
+                raise ArgumentError("""
+                json provided for credentials did not include all necessary fields. Please setup json file as:
+
+                {
+                   "username": "USERNAME",
+                   "password": "PASSWORD"
+                }
+                """)
+
+        if not _username or not _password:
+            raise ArgumentError("Invalid arguments. Please provide arguments <username> <password> or -i <credentials_json_file>")
+
+        return _username, _password
+
+    @_cli_write_command('orch certmgr generate-certificates')
+    def _cert_mgr_generate_certificates(self, module_name: str) -> HandleCommandResult:
+        try:
+            completion = self.generate_certificates(module_name)
+            result = raise_if_exception(completion)
+            return HandleCommandResult(stdout=json.dumps(result))
+        except ArgumentError as e:
+            return HandleCommandResult(-errno.EINVAL, "", (str(e)))
+
+    @_cli_write_command('orch prometheus set-credentials')
+    def _set_prometheus_access_info(self, username: Optional[str] = None, password: Optional[str] = None, inbuf: Optional[str] = None) -> HandleCommandResult:
+        try:
+            username, password = self._get_credentials(username, password, inbuf)
+            completion = self.set_prometheus_access_info(username, password)
+            result = raise_if_exception(completion)
+            return HandleCommandResult(stdout=json.dumps(result))
+        except ArgumentError as e:
+            return HandleCommandResult(-errno.EINVAL, "", (str(e)))
+
+    @_cli_write_command('orch prometheus set-target')
+    def _set_prometheus_target(self, url: str) -> HandleCommandResult:
+        completion = self.set_prometheus_target(url)
+        result = raise_if_exception(completion)
+        return HandleCommandResult(stdout=json.dumps(result))
+
+    @_cli_write_command('orch prometheus remove-target')
+    def _remove_prometheus_target(self, url: str) -> HandleCommandResult:
+        completion = self.remove_prometheus_target(url)
+        result = raise_if_exception(completion)
+        return HandleCommandResult(stdout=json.dumps(result))
+
+    @_cli_write_command('orch alertmanager set-credentials')
+    def _set_alertmanager_access_info(self, username: Optional[str] = None, password: Optional[str] = None, inbuf: Optional[str] = None) -> HandleCommandResult:
+        try:
+            username, password = self._get_credentials(username, password, inbuf)
+            completion = self.set_alertmanager_access_info(username, password)
+            result = raise_if_exception(completion)
+            return HandleCommandResult(stdout=json.dumps(result))
+        except ArgumentError as e:
+            return HandleCommandResult(-errno.EINVAL, "", (str(e)))
+
+    @_cli_write_command('orch prometheus get-credentials')
+    def _get_prometheus_access_info(self) -> HandleCommandResult:
+        completion = self.get_prometheus_access_info()
+        access_info = raise_if_exception(completion)
+        return HandleCommandResult(stdout=json.dumps(access_info))
+
+    @_cli_write_command('orch get-security-config')
+    def _get_security_config(self) -> HandleCommandResult:
+        completion = self.get_security_config()
+        result = raise_if_exception(completion)
+        return HandleCommandResult(stdout=json.dumps(result))
+
+    @_cli_write_command('orch alertmanager get-credentials')
+    def _get_alertmanager_access_info(self) -> HandleCommandResult:
+        completion = self.get_alertmanager_access_info()
+        access_info = raise_if_exception(completion)
+        return HandleCommandResult(stdout=json.dumps(access_info))
+
+    @_cli_write_command('orch prometheus set-custom-alerts')
+    def _set_custom_prometheus_alerts(self, inbuf: Optional[str] = None) -> HandleCommandResult:
+        if not inbuf:
+            raise OrchestratorError('This command requires passing a file with "-i <filepath>"')
+        completion = self.set_custom_prometheus_alerts(inbuf)
+        out = raise_if_exception(completion)
+        return HandleCommandResult(stdout=json.dumps(out))
+
     @_cli_write_command('orch apply osd')
     def _apply_osd(self,
                    all_available_devices: bool = False,
@@ -876,6 +1309,7 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
                    unmanaged: Optional[bool] = None,
                    dry_run: bool = False,
                    no_overwrite: bool = False,
+                   method: Optional[OSDMethod] = None,
                    inbuf: Optional[str] = None  # deprecated. Was deprecated before Quincy
                    ) -> HandleCommandResult:
         """
@@ -883,11 +1317,11 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
         """
 
         if inbuf and all_available_devices:
-            return HandleCommandResult(-errno.EINVAL, '-i infile and --all-available-devices are mutually exclusive')
+            return HandleCommandResult(-errno.EINVAL, stderr='-i infile and --all-available-devices are mutually exclusive')
 
         if not inbuf and not all_available_devices:
             # one parameter must be present
-            return HandleCommandResult(-errno.EINVAL, '--all-available-devices is required')
+            return HandleCommandResult(-errno.EINVAL, stderr='--all-available-devices is required')
 
         if inbuf:
             if unmanaged is not None:
@@ -918,7 +1352,8 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
                     placement=PlacementSpec(host_pattern='*'),
                     data_devices=DeviceSelection(all=True),
                     unmanaged=unmanaged,
-                    preview_only=dry_run
+                    preview_only=dry_run,
+                    method=method
                 )
             ]
             return self._apply_misc(dg_specs, dry_run, format, no_overwrite)
@@ -935,12 +1370,14 @@ class OrchestratorCli(OrchestratorClientMixin, MgrModule,
         usage = """
 Usage:
   ceph orch daemon add osd host:device1,device2,...
-  ceph orch daemon add osd host:data_devices=device1,device2,db_devices=device3,osds_per_device=2,...
+  ceph orch daemon add osd host:data_devices=device1,device2,db_devices=device3,osds_per_device=2[,encrypted=false]
+  ceph orch daemon add osd host:data_devices=device1[,encrypted=true,tpm2=true]
 """
         if not svc_arg:
             return HandleCommandResult(-errno.EINVAL, stderr=usage)
         try:
             host_name, raw = svc_arg.split(":")
+            list_drive_group_spec_bool_arg: List[str] = []
             drive_group_spec = {
                 'data_devices': []
             }  # type: Dict
@@ -957,7 +1394,11 @@ Usage:
                         drive_group_spec[drv_grp_spec_arg] = []
                         drive_group_spec[drv_grp_spec_arg].append(value)
                     else:
-                        drive_group_spec[drv_grp_spec_arg] = value
+                        if value.lower() in ['true', 'false']:
+                            list_drive_group_spec_bool_arg.append(drv_grp_spec_arg)
+                            drive_group_spec[drv_grp_spec_arg] = value.lower() == "true"
+                        else:
+                            drive_group_spec[drv_grp_spec_arg] = value
                 elif drv_grp_spec_arg is not None:
                     drive_group_spec[drv_grp_spec_arg].append(v)
                 else:
@@ -986,9 +1427,12 @@ Usage:
                       osd_id: List[str],
                       replace: bool = False,
                       force: bool = False,
-                      zap: bool = False) -> HandleCommandResult:
+                      zap: bool = False,
+                      no_destroy: bool = False) -> HandleCommandResult:
         """Remove OSD daemons"""
-        completion = self.remove_osds(osd_id, replace=replace, force=force, zap=zap)
+        completion = self.remove_osds(osd_id,
+                                      replace=replace,
+                                      force=force, zap=zap, no_destroy=no_destroy)
         raise_if_exception(completion)
         return HandleCommandResult(stdout=completion.result_str())
 
@@ -1127,6 +1571,24 @@ Usage:
         )
         return self._daemon_add_misc(spec)
 
+    @_cli_write_command('orch daemon add nvmeof')
+    def _nvmeof_add(self,
+                    pool: str,
+                    group: str,
+                    placement: Optional[str] = None,
+                    inbuf: Optional[str] = None) -> HandleCommandResult:
+        """Start nvmeof daemon(s)"""
+        if inbuf:
+            raise OrchestratorValidationError('unrecognized command -i; -h or --help for usage')
+
+        spec = NvmeofServiceSpec(
+            service_id=f'{pool}.{group}' if group else pool,
+            pool=pool,
+            group=group,
+            placement=PlacementSpec.from_string(placement),
+        )
+        return self._daemon_add_misc(spec)
+
     @_cli_write_command('orch')
     def _service_action(self, action: ServiceAction, service_name: str) -> HandleCommandResult:
         """Start, stop, restart, redeploy, or reconfig an entire service (i.e. all daemons)"""
@@ -1189,12 +1651,14 @@ Usage:
                    format: Format = Format.plain,
                    unmanaged: bool = False,
                    no_overwrite: bool = False,
+                   continue_on_error: bool = False,
                    inbuf: Optional[str] = None) -> HandleCommandResult:
         """Update the size or placement for a service or apply a large yaml spec"""
         usage = """Usage:
   ceph orch apply -i <yaml spec> [--dry-run]
   ceph orch apply <service_type> [--placement=<placement_string>] [--unmanaged]
         """
+        errs: List[str] = []
         if inbuf:
             if service_type or placement or unmanaged:
                 raise OrchestratorValidationError(usage)
@@ -1204,7 +1668,14 @@ Usage:
             # None entries in the output. Let's skip them silently.
             content = [o for o in yaml_objs if o is not None]
             for s in content:
-                spec = json_to_generic_spec(s)
+                try:
+                    spec = json_to_generic_spec(s)
+                except Exception as e:
+                    if continue_on_error:
+                        errs.append(f'Failed to convert {s} from json object: {str(e)}')
+                        continue
+                    else:
+                        raise e
 
                 # validate the config (we need MgrModule for that)
                 if isinstance(spec, ServiceSpec) and spec.config:
@@ -1212,7 +1683,32 @@ Usage:
                         try:
                             self.get_foreign_ceph_option('mon', k)
                         except KeyError:
-                            raise SpecValidationError(f'Invalid config option {k} in spec')
+                            err = SpecValidationError(f'Invalid config option {k} in spec')
+                            if continue_on_error:
+                                errs.append(str(err))
+                                continue
+                            else:
+                                raise err
+
+                # There is a general "osd" service with no service id, but we use
+                # that to dump osds created individually with "ceph orch daemon add osd"
+                # and those made with "ceph orch apply osd --all-available-devices"
+                # For actual user created OSD specs, we should promote users having a
+                # service id so it doesn't get mixed in with those other OSDs. This
+                # check is being done in this spot in particular as this is the only
+                # place we can 100% differentiate between an actual user created OSD
+                # spec and a spec we made ourselves to cover the all-available-devices case
+                if (
+                    isinstance(spec, DriveGroupSpec)
+                    and spec.service_type == 'osd'
+                    and not spec.service_id
+                ):
+                    err = SpecValidationError('Please provide the service_id field in your OSD spec')
+                    if continue_on_error:
+                        errs.append(str(err))
+                        continue
+                    else:
+                        raise err
 
                 if dry_run and not isinstance(spec, HostSpec):
                     spec.preview_only = dry_run
@@ -1222,15 +1718,30 @@ Usage:
                     continue
                 specs.append(spec)
         else:
+            # Note in this case there is only ever one spec
+            # being applied so there is no need to worry about
+            # handling of continue_on_error
             placementspec = PlacementSpec.from_string(placement)
             if not service_type:
                 raise OrchestratorValidationError(usage)
             specs = [ServiceSpec(service_type.value, placement=placementspec,
                                  unmanaged=unmanaged, preview_only=dry_run)]
-        return self._apply_misc(specs, dry_run, format, no_overwrite)
+        cmd_result = self._apply_misc(specs, dry_run, format, no_overwrite, continue_on_error)
+        if errs:
+            # HandleCommandResult is a named tuple, so use
+            # _replace to modify it.
+            cmd_result = cmd_result._replace(stdout=cmd_result.stdout + '\n' + '\n'.join(errs))
+        return cmd_result
 
-    def _apply_misc(self, specs: Sequence[GenericSpec], dry_run: bool, format: Format, no_overwrite: bool = False) -> HandleCommandResult:
-        completion = self.apply(specs, no_overwrite)
+    def _apply_misc(
+        self,
+        specs: Sequence[GenericSpec],
+        dry_run: bool,
+        format: Format,
+        no_overwrite: bool = False,
+        continue_on_error: bool = False
+    ) -> HandleCommandResult:
+        completion = self.apply(specs, no_overwrite, continue_on_error)
         raise_if_exception(completion)
         out = completion.result_str()
         if dry_run:
@@ -1275,6 +1786,7 @@ Usage:
                    realm: Optional[str] = None,
                    zonegroup: Optional[str] = None,
                    zone: Optional[str] = None,
+                   networks: Optional[List[str]] = None,
                    port: Optional[int] = None,
                    ssl: bool = False,
                    dry_run: bool = False,
@@ -1298,6 +1810,7 @@ Usage:
             rgw_realm=realm,
             rgw_zonegroup=zonegroup,
             rgw_zone=zone,
+            networks=networks,
             rgw_frontend_port=port,
             ssl=ssl,
             placement=PlacementSpec.from_string(placement),
@@ -1357,6 +1870,82 @@ Usage:
             api_user=api_user,
             api_password=api_password,
             trusted_ip_list=trusted_ip_list,
+            placement=PlacementSpec.from_string(placement),
+            unmanaged=unmanaged,
+            preview_only=dry_run
+        )
+
+        spec.validate()  # force any validation exceptions to be caught correctly
+
+        return self._apply_misc([spec], dry_run, format, no_overwrite)
+
+    @_cli_write_command('orch apply mgmt-gateway')
+    def _apply_mgmt_gateway(self,
+                            port: Optional[int] = None,
+                            disable_https: Optional[bool] = False,
+                            enable_auth: Optional[bool] = False,
+                            placement: Optional[str] = None,
+                            unmanaged: bool = False,
+                            dry_run: bool = False,
+                            format: Format = Format.plain,
+                            no_overwrite: bool = False,
+                            inbuf: Optional[str] = None) -> HandleCommandResult:
+        """Add a cluster gateway service (cephadm only)"""
+        if inbuf:
+            raise OrchestratorValidationError('unrecognized command -i; -h or --help for usage')
+
+        spec = MgmtGatewaySpec(
+            placement=PlacementSpec.from_string(placement),
+            unmanaged=unmanaged,
+            port=port,
+            disable_https=disable_https,
+            enable_auth=enable_auth,
+            preview_only=dry_run
+        )
+
+        spec.validate()  # force any validation exceptions to be caught correctly
+
+        return self._apply_misc([spec], dry_run, format, no_overwrite)
+
+    @_cli_write_command('orch apply oauth2-proxy')
+    def _apply_oauth2_proxy(self,
+                            https_address: Optional[str] = None,
+                            placement: Optional[str] = None,
+                            unmanaged: bool = False,
+                            dry_run: bool = False,
+                            format: Format = Format.plain,
+                            no_overwrite: bool = False,
+                            inbuf: Optional[str] = None) -> HandleCommandResult:
+        """Add a cluster gateway service (cephadm only)"""
+
+        spec = OAuth2ProxySpec(
+            placement=PlacementSpec.from_string(placement),
+            unmanaged=unmanaged,
+            https_address=https_address
+        )
+
+        spec.validate()  # force any validation exceptions to be caught correctly
+
+        return self._apply_misc([spec], dry_run, format, no_overwrite)
+
+    @_cli_write_command('orch apply nvmeof')
+    def _apply_nvmeof(self,
+                      pool: str,
+                      group: str,
+                      placement: Optional[str] = None,
+                      unmanaged: bool = False,
+                      dry_run: bool = False,
+                      format: Format = Format.plain,
+                      no_overwrite: bool = False,
+                      inbuf: Optional[str] = None) -> HandleCommandResult:
+        """Scale an nvmeof service"""
+        if inbuf:
+            raise OrchestratorValidationError('unrecognized command -i; -h or --help for usage')
+
+        spec = NvmeofServiceSpec(
+            service_id=f'{pool}.{group}' if group else pool,
+            pool=pool,
+            group=group,
             placement=PlacementSpec.from_string(placement),
             unmanaged=unmanaged,
             preview_only=dry_run
@@ -1430,6 +2019,58 @@ Usage:
                            unmanaged=unmanaged)
         specs: List[ServiceSpec] = spec.get_tracing_specs()
         return self._apply_misc(specs, dry_run, format, no_overwrite)
+
+    @_cli_write_command('orch apply smb')
+    def _apply_smb(
+        self,
+        cluster_id: str,
+        config_uri: str,
+        features: str = '',
+        join_sources: Optional[List[str]] = None,
+        custom_dns: Optional[List[str]] = None,
+        include_ceph_users: Optional[List[str]] = None,
+        placement: Optional[str] = None,
+        unmanaged: bool = False,
+        dry_run: bool = False,
+        format: Format = Format.plain,
+        no_overwrite: bool = False,
+    ) -> HandleCommandResult:
+        """Apply an SMB network file system gateway service configuration."""
+
+        _features = features.replace(',', ' ').split()
+        spec = SMBSpec(
+            service_id=cluster_id,
+            placement=PlacementSpec.from_string(placement),
+            unmanaged=unmanaged,
+            preview_only=dry_run,
+            cluster_id=cluster_id,
+            features=_features,
+            config_uri=config_uri,
+            join_sources=join_sources,
+            custom_dns=custom_dns,
+            include_ceph_users=include_ceph_users,
+        )
+
+        spec.validate()  # force any validation exceptions to be caught correctly
+        # The previous comment makes no sense to JJM. But when in rome.
+
+        return self._apply_misc([spec], dry_run, format, no_overwrite)
+
+    @_cli_write_command('orch set-unmanaged')
+    def _set_unmanaged(self, service_name: str) -> HandleCommandResult:
+        """Set 'unmanaged: true' for the given service name"""
+        completion = self.set_unmanaged(service_name, True)
+        raise_if_exception(completion)
+        out = completion.result_str()
+        return HandleCommandResult(stdout=out)
+
+    @_cli_write_command('orch set-managed')
+    def _set_managed(self, service_name: str) -> HandleCommandResult:
+        """Set 'unmanaged: false' for the given service name"""
+        completion = self.set_unmanaged(service_name, False)
+        raise_if_exception(completion)
+        out = completion.result_str()
+        return HandleCommandResult(stdout=out)
 
     @_cli_write_command('orch set backend')
     def _set_backend(self, module_name: Optional[str] = None) -> HandleCommandResult:

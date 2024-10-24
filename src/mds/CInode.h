@@ -305,6 +305,7 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
 
     bool last_scrub_dirty = false; /// are our stamps dirty with respect to disk state?
     bool scrub_in_progress = false; /// are we currently scrubbing?
+    bool uninline_in_progress = false; /// are we currently uninlining?
 
     fragset_t queued_frags;
 
@@ -398,8 +399,9 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
   static const uint64_t WAIT_FROZEN      = (1<<1);
   static const uint64_t WAIT_TRUNC       = (1<<2);
   static const uint64_t WAIT_FLOCK       = (1<<3);
+  static const uint64_t WAIT_BITS        = 4;
   
-  static const uint64_t WAIT_ANY_MASK	= (uint64_t)(-1);
+  static const uint64_t WAIT_ANY_MASK    = ((1ul << WAIT_BITS) - 1);
 
   // misc
   static const unsigned EXPORT_NONCE = 1; // nonce given to replicas created by export
@@ -422,7 +424,7 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
 
   std::string_view pin_name(int p) const override;
 
-  std::ostream& print_db_line_prefix(std::ostream& out) override;
+  std::ostream& print_db_line_prefix(std::ostream& out) const override;
 
   const scrub_info_t *scrub_info() const {
     if (!scrub_infop)
@@ -436,7 +438,7 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
   }
 
   bool scrub_is_in_progress() const {
-    return (scrub_infop && scrub_infop->scrub_in_progress);
+    return (scrub_infop && (scrub_infop->scrub_in_progress || scrub_infop->uninline_in_progress));
   }
   /**
    * Start scrubbing on this inode. That could be very short if it's
@@ -447,6 +449,7 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
    * directory's get_projected_version())
    */
   void scrub_initialize(ScrubHeaderRef& header);
+  void uninline_initialize();
   /**
    * Call this once the scrub has been completed, whether it's a full
    * recursive scrub on a directory or simply the data on a file (or
@@ -455,6 +458,8 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
    * be complete()ed.
    */
   void scrub_finished();
+  void uninline_finished();
+  void common_finished();
 
   void scrub_aborted();
 
@@ -656,10 +661,13 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
   bool is_mdsdir() const { return MDS_INO_IS_MDSDIR(ino()); }
   bool is_base() const { return MDS_INO_IS_BASE(ino()); }
   bool is_system() const { return ino() < MDS_INO_SYSTEM_BASE; }
+  bool is_lost_and_found() const { return ino() == CEPH_INO_LOST_AND_FOUND; }
   bool is_normal() const { return !(is_base() || is_system() || is_stray()); }
   bool is_file() const    { return get_inode()->is_file(); }
   bool is_symlink() const { return get_inode()->is_symlink(); }
   bool is_dir() const     { return get_inode()->is_dir(); }
+  bool is_quiesced() const;
+  bool will_block_for_quiesce(const MDRequestRef& mdr = MDRequestRef {});
 
   bool is_head() const { return last == CEPH_NOSNAP; }
 
@@ -703,6 +711,8 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
   const CDir *get_projected_parent_dir() const;
   CDir *get_projected_parent_dir();
   CInode *get_parent_inode();
+
+  bool is_any_ancestor_inode_a_replica();
   
   bool is_lt(const MDSCacheObject *r) const override {
     const CInode *o = static_cast<const CInode*>(r);
@@ -711,7 +721,7 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
   }
 
   // -- misc -- 
-  bool is_ancestor_of(const CInode *other) const;
+  bool is_ancestor_of(const CInode *other, std::unordered_map<CInode const*,bool>* visited=nullptr) const;
   bool is_projected_ancestor_of(const CInode *other) const;
 
   void make_path_string(std::string& s, bool projected=false, const CDentry *use_parent=NULL) const;
@@ -744,8 +754,9 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
                    inode_backtrace_t &bt);
   void build_backtrace(int64_t pool, inode_backtrace_t& bt);
   void _store_backtrace(std::vector<CInodeCommitOperation> &ops_vec,
-                        inode_backtrace_t &bt, int op_prio);
-  void store_backtrace(CInodeCommitOperations &op, int op_prio);
+                        inode_backtrace_t &bt, int op_prio, bool ignore_old_pools);
+  void store_backtrace(CInodeCommitOperations &op, int op_prio,
+		       bool ignore_old_pools=false);
   void store_backtrace(MDSContext *fin, int op_prio=-1);
   void _stored_backtrace(int r, version_t v, Context *fin);
   void fetch_backtrace(Context *fin, ceph::buffer::list *backtrace);
@@ -864,6 +875,8 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
 
   int count_nonstale_caps();
   bool multiple_nonstale_caps();
+
+  int get_caps_quiesce_mask() const;
 
   bool is_any_caps() { return !client_caps.empty(); }
   bool is_any_nonstale_caps() { return count_nonstale_caps(); }
@@ -1023,14 +1036,14 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
 
   bool has_ephemeral_policy() const {
     return get_inode()->export_ephemeral_random_pin > 0.0 ||
-           get_inode()->export_ephemeral_distributed_pin;
+           get_inode()->get_ephemeral_distributed_pin();
   }
   bool is_ephemerally_pinned() const {
     return state_test(STATE_DISTEPHEMERALPIN) ||
            state_test(STATE_RANDEPHEMERALPIN);
   }
 
-  void print(std::ostream& out) override;
+  void print(std::ostream& out) const override;
   void dump(ceph::Formatter *f, int flags = DUMP_DEFAULT) const;
 
   /**
@@ -1050,6 +1063,15 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
                            MDSContext *fin);
   static void dump_validation_results(const validated_data& results,
                                       ceph::Formatter *f);
+  bool has_inline_data() {
+    if (is_normal() && is_file()) {
+      auto pin = get_projected_inode();
+      if (pin->inline_data.version != CEPH_INLINE_NONE) {
+	return true;
+      }
+    }
+    return false;
+  }
 
   //bool hack_accessed = false;
   //utime_t hack_load_stamp;
@@ -1079,6 +1101,7 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
   elist<CInode*>::item item_dirty_dirfrag_dir;
   elist<CInode*>::item item_dirty_dirfrag_nest;
   elist<CInode*>::item item_dirty_dirfrag_dirfragtree;
+  elist<CInode*>::item item_to_flush;
 
   // also update RecoveryQueue::RecoveryQueue() if you change this
   elist<CInode*>::item& item_recover_queue = item_dirty_dirfrag_dir;
@@ -1088,32 +1111,45 @@ class CInode : public MDSCacheObject, public InodeStoreBase, public Counter<CIno
   elist<CInode*>::item item_pop_lru;
 
   // -- locks --
-  static LockType versionlock_type;
-  static LockType authlock_type;
-  static LockType linklock_type;
-  static LockType dirfragtreelock_type;
-  static LockType filelock_type;
-  static LockType xattrlock_type;
-  static LockType snaplock_type;
-  static LockType nestlock_type;
-  static LockType flocklock_type;
-  static LockType policylock_type;
+  static const LockType versionlock_type;
+  static const LockType authlock_type;
+  static const LockType linklock_type;
+  static const LockType dirfragtreelock_type;
+  static const LockType filelock_type;
+  static const LockType xattrlock_type;
+  static const LockType snaplock_type;
+  static const LockType nestlock_type;
+  static const LockType flocklock_type;
+  static const LockType policylock_type;
+  static const LockType quiescelock_type;
 
-  // FIXME not part of mempool
-  LocalLockC  versionlock;
-  SimpleLock authlock;
-  SimpleLock linklock;
-  ScatterLock dirfragtreelock;
-  ScatterLock filelock;
-  SimpleLock xattrlock;
-  SimpleLock snaplock;
-  ScatterLock nestlock;
-  SimpleLock flocklock;
-  SimpleLock policylock;
+  /* Please consult doc/dev/mds_internals/quiesce.rst for information about the
+   * quiescelock.
+   */
+
+  LocalLockC quiescelock; // FIXME not part of mempool
+  LocalLockC versionlock; // FIXME not part of mempool
+  SimpleLock authlock; // FIXME not part of mempool
+  SimpleLock linklock; // FIXME not part of mempool
+  ScatterLock dirfragtreelock; // FIXME not part of mempool
+  ScatterLock filelock; // FIXME not part of mempool
+  SimpleLock xattrlock; // FIXME not part of mempool
+  SimpleLock snaplock; // FIXME not part of mempool
+  ScatterLock nestlock; // FIXME not part of mempool
+  SimpleLock flocklock; // FIXME not part of mempool
+  SimpleLock policylock; // FIXME not part of mempool
 
   // -- caps -- (new)
   // client caps
   client_t loner_cap = -1, want_loner_cap = -1;
+
+  /**
+   * Return the pool ID where we currently write backtraces for
+   * this inode (in addition to inode.old_pools)
+   *
+   * @returns a pool ID >=0
+   */
+  int64_t get_backtrace_pool() const;
 
 protected:
   ceph_lock_state_t *get_fcntl_lock_state() {
@@ -1164,14 +1200,6 @@ protected:
     else
       clear_flock_lock_state();
   }
-
-  /**
-   * Return the pool ID where we currently write backtraces for
-   * this inode (in addition to inode.old_pools)
-   *
-   * @returns a pool ID >=0
-   */
-  int64_t get_backtrace_pool() const;
 
   // parent dentries in cache
   CDentry         *parent = nullptr;             // primary link

@@ -1,8 +1,7 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab ft=cpp
 
-#ifndef CEPH_RGW_KEYSTONE_H
-#define CEPH_RGW_KEYSTONE_H
+#pragma once
 
 #include <atomic>
 #include <string_view>
@@ -30,12 +29,6 @@ static inline std::string rgw_get_token_id(const std::string& token)
 namespace rgw {
 namespace keystone {
 
-enum class ApiVersion {
-  VER_2,
-  VER_3
-};
-
-
 class Config {
 protected:
   Config() = default;
@@ -43,7 +36,6 @@ protected:
 
 public:
   virtual std::string get_endpoint_url() const noexcept = 0;
-  virtual ApiVersion get_api_version() const noexcept = 0;
 
   virtual std::string get_admin_token() const noexcept = 0;
   virtual std::string_view get_admin_user() const noexcept = 0;
@@ -67,7 +59,6 @@ public:
   }
 
   std::string get_endpoint_url() const noexcept override;
-  ApiVersion get_api_version() const noexcept override;
 
   std::string get_admin_token() const noexcept override;
 
@@ -121,16 +112,17 @@ public:
   typedef RGWKeystoneHTTPTransceiver RGWGetKeystoneAdminToken;
 
   static int get_admin_token(const DoutPrefixProvider *dpp,
-                             CephContext* const cct,
                              TokenCache& token_cache,
                              const Config& config,
-                             std::string& token);
+                             optional_yield y,
+                             std::string& token,
+                             bool& token_cached);
   static int issue_admin_token_request(const DoutPrefixProvider *dpp,
-                                       CephContext* const cct,
                                        const Config& config,
+                                       optional_yield y,
                                        TokenEnvelope& token);
   static int get_keystone_barbican_token(const DoutPrefixProvider *dpp,
-                                         CephContext * const cct,
+                                         optional_yield y,
                                          std::string& token);
 };
 
@@ -156,14 +148,22 @@ public:
     Token() : expires(0) { }
     std::string id;
     time_t expires;
-    Project tenant_v2;
     void decode_json(JSONObj *obj);
   };
 
   class Role {
   public:
+    Role() : is_admin(false), is_reader(false) { }
+    Role(const Role &r) {
+      id = r.id;
+      name = r.name;
+      is_admin = r.is_admin;
+      is_reader = r.is_reader;
+    }
     std::string id;
     std::string name;
+    bool is_admin;
+    bool is_reader;
     void decode_json(JSONObj *obj);
   };
 
@@ -172,7 +172,6 @@ public:
     std::string id;
     std::string name;
     Domain domain;
-    std::list<Role> roles_v2;
     void decode_json(JSONObj *obj);
   };
 
@@ -181,8 +180,7 @@ public:
   User user;
   std::list<Role> roles;
 
-  void decode_v3(JSONObj* obj);
-  void decode_v2(JSONObj* obj);
+  void decode(JSONObj* obj);
 
 public:
   /* We really need the default ctor because of the internals of TokenCache. */
@@ -201,10 +199,11 @@ public:
     const uint64_t now = ceph_clock_now().sec();
     return std::cmp_greater_equal(now, get_expires());
   }
-  int parse(const DoutPrefixProvider *dpp, CephContext* cct,
+  int parse(const DoutPrefixProvider *dpp,
             const std::string& token_str,
-            ceph::buffer::list& bl /* in */,
-            ApiVersion version);
+            ceph::buffer::list& bl /* in */);
+  void update_roles(const std::vector<std::string> & admin,
+                    const std::vector<std::string> & reader);
 };
 
 
@@ -274,6 +273,7 @@ public:
   void add_admin(const TokenEnvelope& token);
   void add_barbican(const TokenEnvelope& token);
   void invalidate(const DoutPrefixProvider *dpp, const std::string& token_id);
+  void invalidate_admin(const DoutPrefixProvider *dpp);
   bool going_down() const;
 private:
   void add_locked(const std::string& token_id, const TokenEnvelope& token,
@@ -283,47 +283,28 @@ private:
 };
 
 
-class AdminTokenRequest {
+class TokenRequestBase {
 public:
-  virtual ~AdminTokenRequest() = default;
+  virtual ~TokenRequestBase() = default;
   virtual void dump(Formatter* f) const = 0;
 };
 
-class AdminTokenRequestVer2 : public AdminTokenRequest {
+class AdminTokenRequest : public TokenRequestBase {
   const Config& conf;
 
 public:
-  explicit AdminTokenRequestVer2(const Config& conf)
-    : conf(conf) {
-  }
+  explicit AdminTokenRequest(const Config& conf)
+     : conf(conf) {
+   }
   void dump(Formatter *f) const override;
 };
 
-class AdminTokenRequestVer3 : public AdminTokenRequest {
-  const Config& conf;
 
-public:
-  explicit AdminTokenRequestVer3(const Config& conf)
-    : conf(conf) {
-  }
-  void dump(Formatter *f) const override;
-};
-
-class BarbicanTokenRequestVer2 : public AdminTokenRequest {
+class BarbicanTokenRequest : public TokenRequestBase {
   CephContext *cct;
 
 public:
-  explicit BarbicanTokenRequestVer2(CephContext * const _cct)
-    : cct(_cct) {
-  }
-  void dump(Formatter *f) const override;
-};
-
-class BarbicanTokenRequestVer3 : public AdminTokenRequest {
-  CephContext *cct;
-
-public:
-  explicit BarbicanTokenRequestVer3(CephContext * const _cct)
+  explicit BarbicanTokenRequest(CephContext * const _cct)
     : cct(_cct) {
   }
   void dump(Formatter *f) const override;
@@ -332,5 +313,3 @@ public:
 
 }; /* namespace keystone */
 }; /* namespace rgw */
-
-#endif

@@ -159,6 +159,23 @@
               <label class="custom-control-label"
                      for="suspended"
                      i18n>Suspended</label>
+              <cd-helper i18n>Suspending the user disables the user and subuser.</cd-helper>
+            </div>
+          </div>
+        </div>
+
+        <!-- System User -->
+        <div class="form-group row">
+          <div class="cd-col-form-offset">
+            <div class="custom-control custom-checkbox">
+              <input class="custom-control-input"
+                     id="system"
+                     type="checkbox"
+                     formControlName="system">
+              <label class="custom-control-label"
+                     for="system"
+                     i18n>System user</label>
+              <cd-helper i18n>System users are distinct from regular users, they are used by the RGW service to perform administrative tasks, manage buckets and objects</cd-helper>
             </div>
           </div>
         </div>
@@ -502,6 +519,9 @@
               <span class="invalid-feedback"
                     *ngIf="userForm.showError('user_quota_max_size', frm, 'quotaMaxSize')"
                     i18n>The value is not valid.</span>
+              <span *ngIf="userForm.showError('user_quota_max_size', formDir, 'pattern')"
+                    class="invalid-feedback"
+                    i18n>Size must be a number or in a valid format. eg: 5 GiB</span>
             </div>
           </div>
 
@@ -596,6 +616,9 @@
               <span class="invalid-feedback"
                     *ngIf="userForm.showError('bucket_quota_max_size', frm, 'quotaMaxSize')"
                     i18n>The value is not valid.</span>
+              <span *ngIf="userForm.showError('bucket_quota_max_size', formDir, 'pattern')"
+                    class="invalid-feedback"
+                    i18n>Size must be a number or in a valid format. eg: 5 GiB</span>
             </div>
           </div>
 

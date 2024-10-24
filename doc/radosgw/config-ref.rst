@@ -53,6 +53,8 @@ instances or all radosgw-admin options can be put into the ``[global]`` or the
 .. confval:: rgw_bucket_default_quota_max_size
 .. confval:: rgw_user_default_quota_max_objects
 .. confval:: rgw_user_default_quota_max_size
+.. confval:: rgw_account_default_quota_max_objects
+.. confval:: rgw_account_default_quota_max_size
 .. confval:: rgw_verify_ssl
 .. confval:: rgw_max_chunk_size
 
@@ -79,7 +81,7 @@ workload with a smaller number of buckets but higher number of objects (hundreds
 per bucket you would consider decreasing :confval:`rgw_lc_max_wp_worker` from the default value of 3.
 
 .. note:: When looking to tune either of these specific values please validate the
-       current Cluster performance and Ceph Object Gateway utilization before increasing.
+   current Cluster performance and Ceph Object Gateway utilization before increasing.
 
 Garbage Collection Settings
 ===========================
@@ -97,8 +99,9 @@ To view the queue of objects awaiting garbage collection, execute the following
 
    radosgw-admin gc list
 
-.. note:: specify ``--include-all`` to list all entries, including unexpired
-  
+.. note:: Specify ``--include-all`` to list all entries, including unexpired
+   Garbage Collection objects.
+
 Garbage collection is a background activity that may
 execute continuously or during times of low loads, depending upon how the
 administrator configures the Ceph Object Gateway. By default, the Ceph Object
@@ -121,7 +124,9 @@ configuration parameters.
 
 :Tuning Garbage Collection for Delete Heavy Workloads:
 
-As an initial step towards tuning Ceph Garbage Collection to be more aggressive the following options are suggested to be increased from their default configuration values::
+As an initial step towards tuning Ceph Garbage Collection to be more
+aggressive the following options are suggested to be increased from their
+default configuration values::
 
   rgw_gc_max_concurrent_io = 20
   rgw_gc_max_trim_chunk = 64
@@ -144,7 +149,6 @@ file under each ``[client.radosgw.{instance-name}]`` instance.
 .. confval:: rgw_run_sync_thread
 .. confval:: rgw_data_log_window
 .. confval:: rgw_data_log_changes_size
-.. confval:: rgw_data_log_obj_prefix
 .. confval:: rgw_data_log_num_shards
 .. confval:: rgw_md_log_max_shards
 .. confval:: rgw_data_sync_poll_interval
@@ -197,7 +201,6 @@ Keystone Settings
 =================
 
 .. confval:: rgw_keystone_url
-.. confval:: rgw_keystone_api_version
 .. confval:: rgw_keystone_admin_domain
 .. confval:: rgw_keystone_admin_project
 .. confval:: rgw_keystone_admin_token
@@ -260,18 +263,18 @@ QoS settings
 
 .. versionadded:: Nautilus
 
-The ``civetweb`` frontend has a threading model that uses a thread per
+The older and now non-default``civetweb`` frontend has a threading model that uses a thread per
 connection and hence is automatically throttled by :confval:`rgw_thread_pool_size`
-configurable when it comes to accepting connections. The newer ``beast`` frontend is
-not restricted by the thread pool size when it comes to accepting new
-connections, so a scheduler abstraction is introduced in the Nautilus release
-to support future methods of scheduling requests.
+when accepting connections. The newer and default ``beast`` frontend is
+not limited by the thread pool size when it comes to accepting new
+connections, so a scheduler abstraction was introduced in the Nautilus release
+to support additional methods of scheduling requests.
 
-Currently the scheduler defaults to a throttler which throttles the active
-connections to a configured limit. QoS based on mClock is currently in an
-*experimental* phase and not recommended for production yet. Current
-implementation of *dmclock_client* op queue divides RGW Ops on admin, auth
-(swift auth, sts) metadata & data requests.
+Currently the scheduler defaults to a throttler that limits active
+connections to a configured limit. QoS rate limiting based on mClock is currently
+*experimental* phase and not recommended for production. The current
+implementation of the *dmclock_client* op queue divides RGW ops into admin, auth
+(swift auth, sts) metadata, and data requests.
 
 
 .. confval:: rgw_max_concurrent_requests
@@ -296,3 +299,45 @@ implementation of *dmclock_client* op queue divides RGW Ops on admin, auth
 .. _Barbican: ../barbican
 .. _Encryption: ../encryption
 .. _HTTP Frontends: ../frontends
+
+D4N Settings
+============
+
+D4N is a caching architecture that utilizes Redis to speed up S3 object storage 
+operations by establishing shared databases among Ceph Object Gateway (RGW) daemons.
+
+The D4N architecture can only function on one Redis instance at a time. 
+The address is configurable and can be changed by accessing the parameters 
+below.
+
+.. confval:: rgw_d4n_address
+.. confval:: rgw_d4n_l1_datacache_persistent_path
+.. confval:: rgw_d4n_l1_datacache_size
+.. confval:: rgw_d4n_l1_evict_cache_on_start
+.. confval:: rgw_d4n_l1_fadvise
+.. confval:: rgw_d4n_libaio_aio_threads
+.. confval:: rgw_d4n_libaio_aio_num
+.. confval:: rgw_lfuda_sync_frequency
+.. confval:: rgw_d4n_l1_datacache_address
+
+Topic persistency settings
+==========================
+
+Topic persistency will repeatedly push notifications until they succeed.
+For more information, see `Bucket Notifications`_.
+
+The default behavior is to push indefinitely and as frequently as possible.
+With these settings you can control how long and how often to retry an
+unsuccessful notification by configuring the maximum retention time and/or or
+maximum number of retries.
+The interval between push retries can be configured via the sleep duration
+parameter.
+
+All of these options default to the value `0`, which means that persistent
+retention is indefinite, and notifications are retried as frequently as possible.
+
+.. confval:: rgw_topic_persistency_time_to_live
+.. confval:: rgw_topic_persistency_max_retries
+.. confval:: rgw_topic_persistency_sleep_duration
+
+.. _Bucket Notifications: ../notifications

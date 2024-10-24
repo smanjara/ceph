@@ -45,6 +45,11 @@ class SessionMapIOContext : public MDSIOContextBase
 };
 };
 
+SessionMap::SessionMap(MDSRank *m)
+  : mds(m),
+    mds_session_metadata_threshold(g_conf().get_val<Option::size_t>("mds_session_metadata_threshold")) {
+}
+
 void SessionMap::register_perfcounters()
 {
   PerfCountersBuilder plb(g_ceph_context, "mds_sessions",
@@ -66,6 +71,8 @@ void SessionMap::register_perfcounters()
   plb.add_u64(l_mdssm_avg_load, "average_load", "Average Load");
   plb.add_u64(l_mdssm_avg_session_uptime, "avg_session_uptime",
                "Average session uptime");
+  plb.add_u64(l_mdssm_metadata_threshold_sessions_evicted, "mdthresh_evicted",
+	      "Sessions evicted on reaching metadata threshold");
 
   logger = plb.create_perf_counters();
   g_ceph_context->get_perfcounters_collection()->add(logger);
@@ -375,6 +382,11 @@ public:
 };
 }
 
+bool SessionMap::validate_and_encode_session(MDSRank *mds, Session *session, bufferlist& bl) {
+  session->info.encode(bl, mds->mdsmap->get_up_features());
+  return bl.length() < mds_session_metadata_threshold;
+}
+
 void SessionMap::save(MDSContext *onsave, version_t needv)
 {
   dout(10) << __func__ << ": needv " << needv << ", v " << version << dendl;
@@ -410,6 +422,7 @@ void SessionMap::save(MDSContext *onsave, version_t needv)
 
   dout(20) << " updating keys:" << dendl;
   map<string, bufferlist> to_set;
+  std::set<entity_name_t> to_blocklist;
   for(std::set<entity_name_t>::iterator i = dirty_sessions.begin();
       i != dirty_sessions.end(); ++i) {
     const entity_name_t name = *i;
@@ -420,13 +433,19 @@ void SessionMap::save(MDSContext *onsave, version_t needv)
 	session->is_stale() ||
 	session->is_killing()) {
       dout(20) << "  " << name << dendl;
-      // Serialize K
-      CachedStackStringStream css;
-      *css << name;
 
       // Serialize V
       bufferlist bl;
-      session->info.encode(bl, mds->mdsmap->get_up_features());
+      if (!validate_and_encode_session(mds, session, bl)) {
+	derr << __func__ << ": session (" << name << ") exceeds"
+	     << " sesion metadata threshold - blocklisting" << dendl;
+	to_blocklist.emplace(name);
+	continue;
+      }
+
+      // Serialize K
+      CachedStackStringStream css;
+      *css << name;
 
       // Add to RADOS op
       to_set[std::string(css->strv())] = bl;
@@ -461,6 +480,8 @@ void SessionMap::save(MDSContext *onsave, version_t needv)
 			0,
 			new C_OnFinisher(new C_IO_SM_Save(this, version),
 					 mds->finisher));
+  apply_blocklist(to_blocklist);
+  logger->inc(l_mdssm_metadata_threshold_sessions_evicted, to_blocklist.size());
 }
 
 void SessionMap::_save_finish(version_t v)
@@ -601,6 +622,9 @@ void Session::dump(Formatter *f, bool cap_dump) const
   f->dump_object("session_cache_liveness", session_cache_liveness);
   f->dump_object("cap_acquisition", cap_acquisition);
 
+  f->dump_unsigned("last_trim_completed_requests_tid", last_trim_completed_requests_tid);
+  f->dump_unsigned("last_trim_completed_flushes_tid", last_trim_completed_flushes_tid);
+
   f->open_array_section("delegated_inos");
   for (const auto& [start, len] : delegated_inos) {
     f->open_object_section("ino_range");
@@ -681,6 +705,7 @@ void SessionMap::remove_session(Session *s)
 
   s->trim_completed_requests(0);
   s->item_session_list.remove_myself();
+  broken_root_squash_clients.erase(s);
   session_map.erase(s->info.inst.name);
   dirty_sessions.erase(s->info.inst.name);
   null_sessions.insert(s->info.inst.name);
@@ -823,7 +848,8 @@ void SessionMap::save_if_dirty(const std::set<entity_name_t> &tgt_sessions,
 {
   ceph_assert(gather_bld != NULL);
 
-  std::vector<entity_name_t> write_sessions;
+  std::set<entity_name_t> to_blocklist;
+  std::map<entity_name_t, bufferlist> write_sessions;
 
   // Decide which sessions require a write
   for (std::set<entity_name_t>::iterator i = tgt_sessions.begin();
@@ -848,13 +874,24 @@ void SessionMap::save_if_dirty(const std::set<entity_name_t> &tgt_sessions,
       // need to pre-empt that.
       continue;
     }
+
+    // Serialize V
+    bufferlist bl;
+    if (!validate_and_encode_session(mds, session, bl)) {
+      derr << __func__ << ": session (" << session_id << ") exceeds"
+	   << " sesion metadata threshold - blocklisting" << dendl;
+      to_blocklist.emplace(session_id);
+      continue;
+    }
+
     // Okay, passed all our checks, now we write
     // this session out.  The version we write
     // into the OMAP may now be higher-versioned
     // than the version in the header, but that's
     // okay because it's never a problem to have
     // an overly-fresh copy of a session.
-    write_sessions.push_back(*i);
+    write_sessions.emplace(session_id, std::move(bl));
+    session->clear_dirty_completed_requests();
   }
 
   dout(4) << __func__ << ": writing " << write_sessions.size() << dendl;
@@ -862,21 +899,15 @@ void SessionMap::save_if_dirty(const std::set<entity_name_t> &tgt_sessions,
   // Batch writes into mds_sessionmap_keys_per_op
   const uint32_t kpo = g_conf()->mds_sessionmap_keys_per_op;
   map<string, bufferlist> to_set;
-  for (uint32_t i = 0; i < write_sessions.size(); ++i) {
-    const entity_name_t &session_id = write_sessions[i];
-    Session *session = session_map[session_id];
-    session->clear_dirty_completed_requests();
 
+  uint32_t i = 0;
+  for (auto &[session_id, bl] : write_sessions) {
     // Serialize K
     CachedStackStringStream css;
     *css << session_id;
 
-    // Serialize V
-    bufferlist bl;
-    session->info.encode(bl, mds->mdsmap->get_up_features());
-
     // Add to RADOS op
-    to_set[css->str()] = bl;
+    to_set[css->str()] = std::move(bl);
 
     // Complete this write transaction?
     if (i == write_sessions.size() - 1
@@ -895,7 +926,11 @@ void SessionMap::save_if_dirty(const std::set<entity_name_t> &tgt_sessions,
 			      new C_IO_SM_Save_One(this, on_safe),
 			      mds->finisher));
     }
+    ++i;
   }
+
+  apply_blocklist(to_blocklist);
+  logger->inc(l_mdssm_metadata_threshold_sessions_evicted, to_blocklist.size());
 }
 
 // =================
@@ -1005,12 +1040,35 @@ int Session::check_access(CInode *in, unsigned mask,
 			  const vector<uint64_t> *caller_gid_list,
 			  int new_uid, int new_gid)
 {
+  dout(20) << __func__ << ": " << *in
+           << " caller_uid=" << caller_uid
+           << " caller_gid=" << caller_gid
+           << " caller_gid_list=" << *caller_gid_list
+           << dendl;
+
   string path;
-  CInode *diri = NULL;
-  if (!in->is_base())
-    diri = in->get_projected_parent_dn()->get_dir()->get_inode();
-  if (diri && diri->is_stray()){
-    path = in->get_projected_inode()->stray_prior_path;
+  if (!in->is_base()) {
+    auto* dn = in->get_projected_parent_dn();
+    auto* pdiri = dn->get_dir()->get_inode();
+    if (pdiri) {
+      if (pdiri->is_stray()) {
+        path = in->get_projected_inode()->stray_prior_path;
+      } else if (!pdiri->is_base()) {
+        /* is the pdiri in the stray (is this inode in a snapshotted deleted directory?) */
+        auto* gpdiri = pdiri->get_projected_parent_dn()->get_dir()->get_inode();
+        /* stray_prior_path will not necessarily be part of the inode because
+         * it's set on unlink but that happens after the snapshot, naturally.
+         * We need to construct it manually.
+         */
+        if (gpdiri->is_stray()) {
+          /* just check access on the parent dir */
+          path = pdiri->get_projected_inode()->stray_prior_path;
+        }
+      }
+    }
+  }
+
+  if (!path.empty()) {
     dout(20) << __func__ << " stray_prior_path " << path << dendl;
   } else {
     in->make_path_string(path, true);
@@ -1109,6 +1167,10 @@ void SessionMap::handle_conf_change(const std::set<std::string>& changed)
     };
     apply_to_open_sessions(mut);
   }
+
+  if (changed.count("mds_session_metadata_threshold")) {
+    mds_session_metadata_threshold = g_conf().get_val<Option::size_t>("mds_session_metadata_threshold");
+  }
 }
 
 void SessionMap::update_average_session_age() {
@@ -1118,6 +1180,20 @@ void SessionMap::update_average_session_age() {
 
   double avg_uptime = std::chrono::duration<double>(clock::now()-avg_birth_time).count();
   logger->set(l_mdssm_avg_session_uptime, (uint64_t)avg_uptime);
+}
+
+void SessionMap::apply_blocklist(const std::set<entity_name_t>& victims) {
+  if (victims.empty()) {
+    return;
+  }
+
+  C_GatherBuilder gather(g_ceph_context, new C_MDSInternalNoop);
+  for (auto &victim : victims) {
+    CachedStackStringStream css;
+    mds->evict_client(victim.num(), false, g_conf()->mds_session_blocklist_on_evict, *css,
+		      gather.new_sub());
+  }
+  gather.activate();
 }
 
 int SessionFilter::parse(
@@ -1164,6 +1240,13 @@ int SessionFilter::parse(
       state = v;
     } else if (k == "id") {
       std::string err;
+      if (v == "*") {
+        // evict all clients , by default id set to 0
+        return 0;
+      } else if (v == "0") {
+        *ss << "Invalid value";
+        return -CEPHFS_EINVAL;
+      }
       id = strict_strtoll(v.c_str(), 10, &err);
       if (!err.empty()) {
         *ss << err;

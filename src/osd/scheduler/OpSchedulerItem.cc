@@ -59,39 +59,12 @@ void PGScrub::run(OSD* osd, OSDShard* sdata, PGRef& pg, ThreadPool::TPHandle& ha
   pg->unlock();
 }
 
-void PGScrubAfterRepair::run(OSD* osd,
-			  OSDShard* sdata,
-			  PGRef& pg,
-			  ThreadPool::TPHandle& handle)
-{
-  pg->recovery_scrub(epoch_queued, handle);
-  pg->unlock();
-}
-
 void PGScrubResched::run(OSD* osd,
 			 OSDShard* sdata,
 			 PGRef& pg,
 			 ThreadPool::TPHandle& handle)
 {
   pg->scrub_send_scrub_resched(epoch_queued, handle);
-  pg->unlock();
-}
-
-void PGScrubResourcesOK::run(OSD* osd,
-			     OSDShard* sdata,
-			     PGRef& pg,
-			     ThreadPool::TPHandle& handle)
-{
-  pg->scrub_send_resources_granted(epoch_queued, handle);
-  pg->unlock();
-}
-
-void PGScrubDenied::run(OSD* osd,
-			OSDShard* sdata,
-			PGRef& pg,
-			ThreadPool::TPHandle& handle)
-{
-  pg->scrub_send_resources_denied(epoch_queued, handle);
   pg->unlock();
 }
 
@@ -131,30 +104,12 @@ void PGScrubDigestUpdate::run(OSD* osd,
   pg->unlock();
 }
 
-void PGScrubGotLocalMap::run(OSD* osd,
-			     OSDShard* sdata,
-			     PGRef& pg,
-			     ThreadPool::TPHandle& handle)
-{
-  pg->scrub_send_local_map_ready(epoch_queued, handle);
-  pg->unlock();
-}
-
 void PGScrubGotReplMaps::run(OSD* osd,
 			     OSDShard* sdata,
 			     PGRef& pg,
 			     ThreadPool::TPHandle& handle)
 {
   pg->scrub_send_replmaps_ready(epoch_queued, handle);
-  pg->unlock();
-}
-
-void PGScrubMapsCompared::run(OSD* osd,
-			     OSDShard* sdata,
-			     PGRef& pg,
-			     ThreadPool::TPHandle& handle)
-{
-  pg->scrub_send_maps_compared(epoch_queued, handle);
   pg->unlock();
 }
 
@@ -224,7 +179,10 @@ void PGRecovery::run(
   PGRef& pg,
   ThreadPool::TPHandle &handle)
 {
-  osd->do_recovery(pg.get(), epoch_queued, reserved_pushes, handle);
+  osd->logger->tinc(
+    l_osd_recovery_queue_lat,
+    time_queued - ceph_clock_now());
+  osd->do_recovery(pg.get(), epoch_queued, reserved_pushes, priority, handle);
   pg->unlock();
 }
 
@@ -234,6 +192,9 @@ void PGRecoveryContext::run(
   PGRef& pg,
   ThreadPool::TPHandle &handle)
 {
+  osd->logger->tinc(
+    l_osd_recovery_context_queue_lat,
+    time_queued - ceph_clock_now());
   c.release()->complete(handle);
   pg->unlock();
 }
@@ -253,6 +214,21 @@ void PGRecoveryMsg::run(
   PGRef& pg,
   ThreadPool::TPHandle &handle)
 {
+  auto latency = time_queued - ceph_clock_now();
+  switch (op->get_req()->get_type()) {
+  case MSG_OSD_PG_PUSH:
+    osd->logger->tinc(l_osd_recovery_push_queue_lat, latency);
+  case MSG_OSD_PG_PUSH_REPLY:
+    osd->logger->tinc(l_osd_recovery_push_reply_queue_lat, latency);
+  case MSG_OSD_PG_PULL:
+    osd->logger->tinc(l_osd_recovery_pull_queue_lat, latency);
+  case MSG_OSD_PG_BACKFILL:
+    osd->logger->tinc(l_osd_recovery_backfill_queue_lat, latency);
+  case MSG_OSD_PG_BACKFILL_REMOVE:
+    osd->logger->tinc(l_osd_recovery_backfill_remove_queue_lat, latency);
+  case MSG_OSD_PG_SCAN:
+    osd->logger->tinc(l_osd_recovery_scan_queue_lat, latency);
+  }
   osd->dequeue_op(pg, op, handle);
   pg->unlock();
 }

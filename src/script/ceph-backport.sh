@@ -95,6 +95,11 @@ declare -A comp_hash=(
 
 declare -A flagged_pr_hash=()
 
+function run {
+    printf '%s\n' "$*" >&2
+    "$@"
+}
+
 function abort_due_to_setup_problem {
     error "problem detected in your setup"
     info "Run \"${this_script} --setup\" to fix"
@@ -228,36 +233,38 @@ function cherry_pick_phase {
             false
         fi
     fi
+    base_sha="$(printf '%s' "${remote_api_output}" | jq -r .base.sha)"
+    head_sha="$(printf '%s' "${remote_api_output}" | jq -r .head.sha)"
     merged=$(echo "${remote_api_output}" | jq -r '.merged')
     if [ "$merged" = "true" ] ; then
-        true
-    else
-        error "${original_pr_url} is not merged yet"
-        info "Cowardly refusing to perform automated cherry-pick"
-        false
-    fi
-    number_of_commits=$(echo "${remote_api_output}" | jq '.commits')
-    if [ "$number_of_commits" -eq "$number_of_commits" ] 2>/dev/null ; then
-        # \$number_of_commits is set, and is an integer
-        if [ "$number_of_commits" -eq "1" ] ; then
-            singular_or_plural_commit="commit"
-        else
-            singular_or_plural_commit="commits"
+        # Use the merge commit in case the branch HEAD changes after merge.
+        merge_commit_sha=$(printf '%s' "$remote_api_output" | jq -r '.merge_commit_sha')
+        if [ -z "$merge_commit_sha" ]; then
+            error "Could not determine the merge commit of ${original_pr_url}"
+            bail_out_github_api "$remote_api_output"
+            false
         fi
+        cherry_pick_sha="${merge_commit_sha}^..${merge_commit_sha}^2"
     else
-        error "Could not determine the number of commits in ${original_pr_url}"
-        bail_out_github_api "$remote_api_output"
+        if [ "$FORCE" ] ; then
+            warning "${original_pr_url} is not merged yet"
+            info "--force was given, so continuing anyway"
+            cherry_pick_sha="${base_sha}..${head_sha}"
+        else
+            error "${original_pr_url} is not merged yet"
+            info "Cowardly refusing to perform automated cherry-pick"
+            false
+        fi
     fi
-    info "Found $number_of_commits $singular_or_plural_commit in $original_pr_url"
 
     set -x
-    git fetch "$upstream_remote"
+    git fetch "$upstream_remote" "refs/heads/${milestone}"
 
     if git show-ref --verify --quiet "refs/heads/$local_branch" ; then
         if [ "$FORCE" ] ; then
             if [ "$non_interactive" ] ; then
                 git checkout "$local_branch"
-                git reset --hard "${upstream_remote}/${milestone}"
+                git reset --hard FETCH_HEAD
             else
                 echo
                 echo "A local branch $local_branch already exists and the --force option was given."
@@ -269,7 +276,7 @@ function cherry_pick_phase {
                 [ "$yes_or_no_answer" ] && yes_or_no_answer="${yes_or_no_answer:0:1}"
                 if [ "$yes_or_no_answer" = "y" ] ; then
                     git checkout "$local_branch"
-                    git reset --hard "${upstream_remote}/${milestone}"
+                    git reset --hard FETCH_HEAD
                 else
                     info "OK, bailing out!"
                     false
@@ -282,40 +289,23 @@ function cherry_pick_phase {
             false
         fi
     else
-        git checkout "${upstream_remote}/${milestone}" -b "$local_branch"
+        git checkout -b "$local_branch" FETCH_HEAD
     fi
 
-    git fetch "$upstream_remote" "pull/$original_pr/head:pr-$original_pr"
+    git fetch "$upstream_remote" "$merge_commit_sha"
 
     set +x
     maybe_restore_set_x
-    info "Attempting to cherry pick $number_of_commits commits from ${original_pr_url} into local branch $local_branch"
-    offset="$((number_of_commits - 1))" || true
-    for ((i=offset; i>=0; i--)) ; do
-        info "Running \"git cherry-pick -x\" on $(git log --oneline --max-count=1 --no-decorate "pr-${original_pr}~${i}")"
-        sha1_to_cherry_pick=$(git rev-parse --verify "pr-${original_pr}~${i}")
-        set -x
-        if git cherry-pick -x "$sha1_to_cherry_pick" ; then
-            set +x
-            maybe_restore_set_x
-        else
-            set +x
-            maybe_restore_set_x
-            [ "$VERBOSE" ] && git status
-            error "Cherry pick failed"
-            info "Next, manually fix conflicts and complete the current cherry-pick"
-            if [ "$i" -gt "0" ] >/dev/null 2>&1 ; then
-                info "Then, cherry-pick the remaining commits from ${original_pr_url}, i.e.:"
-                for ((j=i-1; j>=0; j--)) ; do
-                    info "-> missing commit: $(git log --oneline --max-count=1 --no-decorate "pr-${original_pr}~${j}")"
-                done
-                info "Finally, re-run the script"
-            else
-                info "Then re-run the script"
-            fi
-            false
-        fi
-    done
+    info "Attempting to cherry pick ${original_pr_url} into local branch $local_branch"
+    if ! run git cherry-pick -x "$cherry_pick_sha"; then
+        [ "$VERBOSE" ] && git status
+        error "Cherry pick failed due to conflicts?"
+        info "Manually fix conflicts and complete the current cherry-pick:"
+        info "    git cherry-pick --continue"
+        info "Finally, re-run this script"
+        false
+    fi
+
     info "Cherry picking completed without conflicts"
 }
 
@@ -1087,6 +1077,7 @@ function try_known_milestones {
         octopus) mn="13" ;;
         pacific) mn="14" ;;
         quincy) mn="15" ;;
+        reef) mn="16" ;;
     esac
     echo "$mn"
 }
@@ -1579,6 +1570,7 @@ redmine_url="$(number_to_url "redmine" "${issue}")"
 debug "Considering Redmine issue: $redmine_url - is it in the Backport tracker?"
 
 remote_api_output="$(curl --silent "${redmine_url}.json")"
+debug $remote_api_output
 tracker="$(echo "$remote_api_output" | jq -r '.issue.tracker.name')"
 if [ "$tracker" = "Backport" ]; then
     debug "Yes, $redmine_url is a Backport issue"
@@ -1589,7 +1581,7 @@ else
 fi
 
 debug "Looking up release/milestone of $redmine_url"
-milestone="$(echo "$remote_api_output" | jq -r '.issue.custom_fields[0].value')"
+milestone="$(echo "$remote_api_output" | jq -r '.issue.custom_fields[] | select(.id == 16) | .value')"
 if [ "$milestone" ] ; then
     debug "Release/milestone: $milestone"
 else
@@ -1758,9 +1750,9 @@ if [ "$TRACKER_PHASE" ] ; then
     desc_should_be="${backport_pr_url}"
     assignee_should_be="${redmine_user_id}"
     if [ "$EXISTING_PR" ] ; then
-        data_binary="{\"issue\":{\"description\":\"${desc_should_be}\",\"status_id\":${status_should_be}}}"
+        data_binary="{\"issue\":{\"description\":\"${desc_should_be}\",\"status_id\":${status_should_be},\"custom_fields\":[{\"id\":21,\"value\":\"${backport_pr_number}\"}]}}"
     else
-        data_binary="{\"issue\":{\"description\":\"${desc_should_be}\",\"status_id\":${status_should_be},\"assigned_to_id\":${assignee_should_be}}}"
+        data_binary="{\"issue\":{\"description\":\"${desc_should_be}\",\"status_id\":${status_should_be},\"assigned_to_id\":${assignee_should_be},\"custom_fields\":[{\"id\":21,\"value\":\"${backport_pr_number}\"}]}}"
     fi
     remote_api_status_code="$(curl --write-out '%{http_code}' --output /dev/null --silent -X PUT --header "Content-type: application/json" --data-binary "${data_binary}" "${redmine_url}.json?key=$redmine_key")"
     if [ "$FORCE" ] || [ "$EXISTING_PR" ] ; then 

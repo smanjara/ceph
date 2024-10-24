@@ -87,9 +87,6 @@
 /* Defined if you have libdml */
 #cmakedefine HAVE_LIBDML
 
-/* Defined if you have libzbd */
-#cmakedefine HAVE_LIBZBD
-
 /* Defined if you have liburing */
 #cmakedefine HAVE_LIBURING
 
@@ -148,6 +145,9 @@
 /* define if kernel rbd enabled */
 #cmakedefine WITH_KRBD
 
+/* define if rbd ubbd enabled */
+#cmakedefine WITH_RBD_UBBD
+
 /* define if key-value-store is enabled */
 #cmakedefine WITH_KVS
 
@@ -156,6 +156,9 @@
 
 /* define if radosgw has openssl support */
 #cmakedefine WITH_CURL_OPENSSL
+
+/*define if D4N filter enabled */
+#cmakedefine WITH_RADOSGW_D4N 
 
 /* define if HAVE_THREAD_SAFE_RES_QUERY */
 #cmakedefine HAVE_THREAD_SAFE_RES_QUERY
@@ -357,11 +360,17 @@
 /* Backend CORTX-DAOS for Rados Gateway */
 #cmakedefine WITH_RADOSGW_DAOS
 
+/* Backend POSIX for Rados Gateway */
+#cmakedefine WITH_RADOSGW_POSIX
+
 /* Defined if std::map::merge() is supported */
 #cmakedefine HAVE_STDLIB_MAP_SPLICING
 
 /* Defined if Intel QAT compress/decompress is supported */
 #cmakedefine HAVE_QATZIP
+
+/* Defined if UADK compress/decompress is supported */
+#cmakedefine HAVE_UADK
 
 /* Define if seastar is available. */
 #cmakedefine HAVE_SEASTAR
@@ -383,6 +392,9 @@
 
 /* Define if libcryptsetup can be used (linux only) */
 #cmakedefine HAVE_LIBCRYPTSETUP
+
+/* Define if libnbd can be used */
+#cmakedefine HAVE_LIBNBD
 
 /* Shared library extension, such as .so, .dll or .dylib */
 #cmakedefine CMAKE_SHARED_LIBRARY_SUFFIX "@CMAKE_SHARED_LIBRARY_SUFFIX@"

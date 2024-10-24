@@ -137,10 +137,32 @@ export class ActionLabelsI18n {
   REDEPLOY: string;
   RESTART: string;
   RESYNC: string;
+  EXPORT: string;
+  IMPORT: any;
+  MIGRATE: string;
+  START_UPGRADE: string;
+  ACTIVATE: string;
+  DEACTIVATE: string;
+  ATTACH: string;
+  CONNECT: string;
+  DISCONNECT: string;
+  RECONNECT: string;
+  AUTHORIZE: string;
+  EXPAND_CLUSTER: string;
+  SETUP_MULTISITE_REPLICATION: string;
+  NFS_EXPORT: string;
 
   constructor() {
     /* Create a new item */
     this.CREATE = $localize`Create`;
+
+    this.EXPORT = $localize`Export`;
+
+    this.IMPORT = $localize`Import`;
+
+    this.SETUP_MULTISITE_REPLICATION = $localize`Setup Multi-site Replication`;
+
+    this.MIGRATE = $localize`Migrate`;
 
     /* Destroy an existing item */
     this.DELETE = $localize`Delete`;
@@ -190,6 +212,7 @@ export class ActionLabelsI18n {
     this.FLAGS = $localize`Flags`;
     this.ENTER_MAINTENANCE = $localize`Enter Maintenance`;
     this.EXIT_MAINTENANCE = $localize`Exit Maintenance`;
+    this.AUTHORIZE = $localize`Authorize`;
 
     this.START_DRAIN = $localize`Start Drain`;
     this.STOP_DRAIN = $localize`Stop Drain`;
@@ -206,6 +229,19 @@ export class ActionLabelsI18n {
     this.REMOVE_SCHEDULING = $localize`Remove Scheduling`;
     this.PROMOTE = $localize`Promote`;
     this.DEMOTE = $localize`Demote`;
+
+    this.START_UPGRADE = $localize`Start Upgrade`;
+
+    this.ACTIVATE = $localize`Activate`;
+    this.DEACTIVATE = $localize`Deactivate`;
+
+    this.ATTACH = $localize`Attach`;
+    this.CONNECT = $localize`Connect`;
+    this.DISCONNECT = $localize`Disconnect`;
+    this.RECONNECT = $localize`Reconnect`;
+    this.EXPAND_CLUSTER = $localize`Expand Cluster`;
+
+    this.NFS_EXPORT = $localize`Create NFS Export`;
   }
 }
 
@@ -224,6 +260,8 @@ export class SucceededActionLabelsI18n {
   CANCELED: string;
   PREVIEWED: string;
   MOVED: string;
+  EXPORT: string;
+  IMPORT: string;
   COPIED: string;
   CLONED: string;
   DEEP_SCRUBBED: string;
@@ -303,3 +341,30 @@ export class SucceededActionLabelsI18n {
     this.RESTART = $localize`Restart`;
   }
 }
+
+@Injectable({
+  providedIn: 'root'
+})
+export class TimerServiceInterval {
+  TIMER_SERVICE_PERIOD: number;
+
+  constructor() {
+    this.TIMER_SERVICE_PERIOD = 5000;
+  }
+}
+
+export const SSL_PROTOCOLS = ['TLSv1.2', 'TLSv1.3'];
+
+export const SSL_CIPHERS = [
+  'ECDHE',
+  'ECDSA',
+  'AES128',
+  'GCM',
+  'SHA256',
+  'RSA',
+  'AES256',
+  'SHA384',
+  'CHACHA20',
+  'POLY1305',
+  'DHE'
+];

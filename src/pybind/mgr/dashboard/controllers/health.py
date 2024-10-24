@@ -6,6 +6,7 @@ from .. import mgr
 from ..rest_client import RequestException
 from ..security import Permission, Scope
 from ..services.ceph_service import CephService
+from ..services.cluster import ClusterModel
 from ..services.iscsi_cli import IscsiGatewaysConfig
 from ..services.iscsi_client import IscsiClient
 from ..tools import partial_dict
@@ -43,6 +44,7 @@ HEALTH_MINIMAL_SCHEMA = ({
                 'failed': ([int], ''),
                 'metadata_pool': (int, ''),
                 'epoch': (int, ''),
+                'btime': (str, ''),
                 'stopped': ([int], ''),
                 'max_mds': (int, ''),
                 'compat': ({
@@ -291,3 +293,15 @@ class Health(BaseController):
                  responses={200: HEALTH_MINIMAL_SCHEMA})
     def minimal(self):
         return self.health_minimal.all_health()
+
+    @Endpoint()
+    def get_cluster_capacity(self):
+        return ClusterModel.get_capacity()
+
+    @Endpoint()
+    def get_cluster_fsid(self):
+        return mgr.get('config')['fsid']
+
+    @Endpoint()
+    def get_telemetry_status(self):
+        return mgr.get_module_option_ex('telemetry', 'enabled', False)

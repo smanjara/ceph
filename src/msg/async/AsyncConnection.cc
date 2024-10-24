@@ -116,6 +116,7 @@ AsyncConnection::AsyncConnection(CephContext *cct, AsyncMessenger *m, DispatchQu
   : Connection(cct, m),
     delay_state(NULL), async_msgr(m), conn_id(q->get_id()),
     logger(w->get_perf_counter()),
+    labeled_logger(w->get_labeled_perf_counter()),
     state(STATE_NONE), port(-1),
     dispatch_queue(q), recv_buf(NULL),
     recv_max_prefetch(std::max<int64_t>(msgr->cct->_conf->ms_tcp_prefetch_max_size, TCP_PREFETCH_MIN_SIZE)),
@@ -309,7 +310,7 @@ ssize_t AsyncConnection::write(ceph::buffer::list &bl,
     outgoing_bl.claim_append(bl);
     ssize_t r = _try_send(more);
     if (r > 0) {
-      writeCallback = callback;
+      writeCallback = std::move(callback);
     }
     return r;
 }
@@ -620,7 +621,7 @@ void AsyncConnection::fault()
 }
 
 void AsyncConnection::_stop() {
-  writeCallback.reset();
+  writeCallback = {};
   dispatch_queue->discard_queue(conn_id);
   async_msgr->unregister_conn(this);
   worker->release_worker();
@@ -736,8 +737,7 @@ void AsyncConnection::handle_write_callback() {
   recv_start_time = ceph::mono_clock::now();
   write_lock.lock();
   if (writeCallback) {
-    auto callback = *writeCallback;
-    writeCallback.reset();
+    auto callback = std::move(writeCallback);
     write_lock.unlock();
     callback(0);
     return;
@@ -791,6 +791,7 @@ void AsyncConnection::tick(uint64_t id)
                                 << target_addr << ", fault."
                                 << dendl;
       protocol->fault();
+      labeled_logger->inc(l_msgr_connection_ready_timeouts);
     } else {
       last_tick_id = center->create_time_event(connect_timeout_us, tick_handler);
     }
@@ -803,6 +804,7 @@ void AsyncConnection::tick(uint64_t id)
                                 << " us, fault."
                                 << dendl;
       protocol->fault();
+      labeled_logger->inc(l_msgr_connection_idle_timeouts);
     } else {
       last_tick_id = center->create_time_event(inactive_timeout_us, tick_handler);
     }

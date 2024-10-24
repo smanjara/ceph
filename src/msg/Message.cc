@@ -131,6 +131,8 @@
 #include "messages/MClientMetrics.h"
 
 #include "messages/MMDSPeerRequest.h"
+#include "messages/MMDSQuiesceDbListing.h"
+#include "messages/MMDSQuiesceDbAck.h"
 
 #include "messages/MMDSMap.h"
 #include "messages/MFSMap.h"
@@ -216,6 +218,9 @@
 
 #include "messages/MOSDPGUpdateLogMissing.h"
 #include "messages/MOSDPGUpdateLogMissingReply.h"
+
+#include "messages/MNVMeofGwBeacon.h"
+#include "messages/MNVMeofGwMap.h"
 
 #ifdef WITH_BLKIN
 #include "Messenger.h"
@@ -314,6 +319,10 @@ Message *decode_message(CephContext *cct,
                         ceph::bufferlist& data,
                         Message::ConnectionRef conn)
 {
+#ifdef WITH_SEASTAR
+  // In crimson, conn is independently maintained outside Message.
+  ceph_assert(conn == nullptr);
+#endif
   // verify crc
   if (crcflags & MSG_CRC_HEADER) {
     __u32 front_crc = front.crc32c(0);
@@ -322,7 +331,10 @@ Message *decode_message(CephContext *cct,
     if (front_crc != footer.front_crc) {
       if (cct) {
 	ldout(cct, 0) << "bad crc in front " << front_crc << " != exp " << footer.front_crc
-		      << " from " << conn->get_peer_addr() << dendl;
+#ifndef WITH_SEASTAR
+	              << " from " << conn->get_peer_addr()
+#endif
+	              << dendl;
 	ldout(cct, 20) << " ";
 	front.hexdump(*_dout);
 	*_dout << dendl;
@@ -332,7 +344,10 @@ Message *decode_message(CephContext *cct,
     if (middle_crc != footer.middle_crc) {
       if (cct) {
 	ldout(cct, 0) << "bad crc in middle " << middle_crc << " != exp " << footer.middle_crc
-		      << " from " << conn->get_peer_addr() << dendl;
+#ifndef WITH_SEASTAR
+	              << " from " << conn->get_peer_addr()
+#endif
+	              << dendl;
 	ldout(cct, 20) << " ";
 	middle.hexdump(*_dout);
 	*_dout << dendl;
@@ -346,7 +361,10 @@ Message *decode_message(CephContext *cct,
       if (data_crc != footer.data_crc) {
 	if (cct) {
 	  ldout(cct, 0) << "bad crc in data " << data_crc << " != exp " << footer.data_crc
-			<< " from " << conn->get_peer_addr() << dendl;
+#ifndef WITH_SEASTAR
+	                << " from " << conn->get_peer_addr()
+#endif
+	                << dendl;
 	  ldout(cct, 20) << " ";
 	  data.hexdump(*_dout);
 	  *_dout << dendl;
@@ -818,9 +836,6 @@ Message *decode_message(CephContext *cct,
     break;
 
 
-  case MSG_MDS_DENTRYUNLINK_ACK:
-    m = make_message<MDentryUnlinkAck>();
-    break;
   case MSG_MDS_DENTRYUNLINK:
     m = make_message<MDentryUnlink>();
     break;
@@ -838,6 +853,14 @@ Message *decode_message(CephContext *cct,
 
   case MSG_MDS_TABLE_REQUEST:
     m = make_message<MMDSTableRequest>();
+    break;
+
+  case MSG_MDS_QUIESCE_DB_LISTING:
+    m = make_message<MMDSQuiesceDbListing>();
+    break;
+
+  case MSG_MDS_QUIESCE_DB_ACK:
+    m = make_message<MMDSQuiesceDbAck>();
     break;
 
 	/*  case MSG_MDS_INODEUPDATE:
@@ -864,6 +887,10 @@ Message *decode_message(CephContext *cct,
   case MSG_MGR_BEACON:
     m = make_message<MMgrBeacon>();
     break;
+
+  case MSG_MNVMEOF_GW_BEACON:
+    m = make_message<MNVMeofGwBeacon>();
+  break;
 
   case MSG_MON_MGR_REPORT:
     m = make_message<MMonMgrReport>();
@@ -924,6 +951,9 @@ Message *decode_message(CephContext *cct,
     m = make_message<MMonHealthChecks>();
     break;
 
+  case MSG_MNVMEOF_GW_MAP:
+    m = make_message<MNVMeofGwMap>();
+    break;
     // -- simple messages without payload --
 
   case CEPH_MSG_SHUTDOWN:
@@ -1023,6 +1053,15 @@ void Message::decode_trace(ceph::bufferlist::const_iterator &p, bool create)
 #endif
 }
 
+void Message::encode_otel_trace(ceph::bufferlist &bl, uint64_t features) const
+{
+  tracing::encode(otel_trace, bl);
+}
+
+void Message::decode_otel_trace(ceph::bufferlist::const_iterator &p, bool create)
+{
+  tracing::decode(otel_trace, p);
+}
 
 // This routine is not used for ordinary messages, but only when encapsulating a message
 // for forwarding and routing.  It's also used in a backward compatibility test, which only

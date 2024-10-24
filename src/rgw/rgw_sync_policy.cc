@@ -74,6 +74,14 @@ void rgw_sync_pipe_filter::set_prefix(std::optional<std::string> opt_prefix,
   }
 }
 
+bool rgw_sync_pipe_filter::check_prefix(const std::string& obj_name) const
+{
+  if (prefix.has_value()) {
+    return boost::starts_with(obj_name, prefix.value());
+  }
+  return true;
+}
+
 void rgw_sync_pipe_filter::set_tags(std::list<std::string>& tags_add,
                                     std::list<std::string>& tags_rm)
 {
@@ -772,6 +780,12 @@ void rgw_sync_policy_info::dump(Formatter *f) const
   for (auto& group : groups ) {
     encode_json("group", group.second, f);
   }
+}
+
+void rgw_sync_policy_info::generate_test_instances(list<rgw_sync_policy_info*>& o)
+{
+  rgw_sync_policy_info *info = new rgw_sync_policy_info;
+  o.push_back(info);
 }
 
 void rgw_sync_policy_info::decode_json(JSONObj *obj)

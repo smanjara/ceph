@@ -49,8 +49,9 @@ bool operator<(const std::vector<rgw_bucket_shard_sync_info>& lhs,
 
 bool empty(const BucketIndexShardsManager& markers, int size)
 {
+  static const std::string empty_string;
   for (int i = 0; i < size; ++i) {
-    const auto& m = markers.get(i, "");
+    const auto& m = markers.get(i, empty_string);
     if (!m.empty()) {
       return false;
     }
@@ -225,8 +226,8 @@ int rgw_bucket_sync_checkpoint(const DoutPrefixProvider* dpp,
     entry.pipe = pipe;
 
     // fetch remote markers
-    spawn::spawn(ioctx, [&] (yield_context yield) {
-      auto y = optional_yield{ioctx, yield};
+    boost::asio::spawn(ioctx, [&] (boost::asio::yield_context yield) {
+      auto y = optional_yield{yield};
       rgw_bucket_index_marker_info info;
       int r = source_bilog_info(dpp, store->svc()->zone, entry.pipe,
                                 info, entry.remote_markers, y);
@@ -236,10 +237,12 @@ int rgw_bucket_sync_checkpoint(const DoutPrefixProvider* dpp,
         throw std::system_error(-r, std::system_category());
       }
       entry.latest_gen = info.latest_gen;
+    }, [] (std::exception_ptr eptr) {
+      if (eptr) std::rethrow_exception(eptr);
     });
     // fetch source bucket info
-    spawn::spawn(ioctx, [&] (yield_context yield) {
-      auto y = optional_yield{ioctx, yield};
+    boost::asio::spawn(ioctx, [&] (boost::asio::yield_context yield) {
+      auto y = optional_yield{yield};
       int r = store->getRados()->get_bucket_instance_info(
           *entry.pipe.source.bucket, entry.source_bucket_info,
           nullptr, nullptr, y, dpp);
@@ -248,6 +251,8 @@ int rgw_bucket_sync_checkpoint(const DoutPrefixProvider* dpp,
             << cpp_strerror(r) << dendl;
         throw std::system_error(-r, std::system_category());
       }
+    }, [] (std::exception_ptr eptr) {
+      if (eptr) std::rethrow_exception(eptr);
     });
   }
 

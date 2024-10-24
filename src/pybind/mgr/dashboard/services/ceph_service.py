@@ -2,6 +2,7 @@
 
 import json
 import logging
+from abc import ABC, abstractmethod
 
 import rados
 from mgr_module import CommandResult
@@ -10,7 +11,7 @@ from mgr_util import get_most_recent_rate, get_time_series_rates, name_to_config
 from .. import mgr
 
 try:
-    from typing import Any, Dict, Optional, Union
+    from typing import Any, Dict, List, Optional, Union
 except ImportError:
     pass  # For typing only
 
@@ -22,6 +23,45 @@ class SendCommandError(rados.Error):
         self.prefix = prefix
         self.argdict = argdict
         super(SendCommandError, self).__init__(err, errno)
+
+
+class BackendConfig(ABC):
+    @abstractmethod
+    def get_config_keys(self) -> List[str]:
+        pass
+
+    @abstractmethod
+    def get_required_keys(self) -> List[str]:
+        pass
+
+    @abstractmethod
+    def get_key_pattern(self, enc_type: str) -> str:
+        pass
+
+
+class VaultConfig(BackendConfig):
+    def get_config_keys(self) -> List[str]:
+        return ['addr', 'auth', 'namespace', 'prefix', 'secret_engine',
+                'token_file', 'ssl_cacert', 'ssl_clientcert', 'ssl_clientkey',
+                'verify_ssl']
+
+    def get_required_keys(self) -> List[str]:
+        return ['auth', 'prefix', 'secret_engine', 'addr']
+
+    def get_key_pattern(self, enc_type: str) -> str:
+        return 'rgw_crypt_{backend}_{key}' if enc_type == 'SSE_KMS' else 'rgw_crypt_sse_s3_{backend}_{key}'  # noqa E501  #pylint: disable=line-too-long
+
+
+class KmipConfig(BackendConfig):
+    def get_config_keys(self) -> List[str]:
+        return ['addr', 'ca_path', 'client_cert', 'client_key', 'kms_key_template',
+                'password', 's3_key_template', 'username']
+
+    def get_required_keys(self) -> List[str]:
+        return ['addr', 'username', 'password']
+
+    def get_key_pattern(self, enc_type: str) -> str:
+        return 'rgw_crypt_{backend}_{key}' if enc_type == 'SSE_KMS' else 'rgw_crypt_sse_s3_{backend}_{key}'  # noqa E501  #pylint: disable=line-too-long
 
 
 # pylint: disable=too-many-public-methods
@@ -183,64 +223,59 @@ class CephService(object):
         return None
 
     @classmethod
-    def get_encryption_config(cls, daemon_name):
-        kms_vault_configured = False
-        s3_vault_configured = False
-        kms_backend: str = ''
-        sse_s3_backend: str = ''
-        vault_stats = []
+    def get_encryption_config(cls, daemon_name: str) -> Dict[str, List[Dict[str, Any]]]:
+        # Define backends with their respective configuration classes
+        backends: Dict[str, Dict[str, BackendConfig]] = {
+            'SSE_KMS': {
+                'vault': VaultConfig(),
+                'kmip': KmipConfig()
+            },
+            'SSE_S3': {
+                'vault': VaultConfig()
+            }
+        }
+
+        # Final configuration values
+        config_values: Dict[str, List[Dict[str, Any]]] = {
+            'SSE_KMS': [],
+            'SSE_S3': []
+        }
+
         full_daemon_name = 'rgw.' + daemon_name
 
-        kms_backend = CephService.send_command('mon', 'config get',
-                                               who=name_to_config_section(full_daemon_name),
-                                               key='rgw_crypt_s3_kms_backend')
-        sse_s3_backend = CephService.send_command('mon', 'config get',
-                                                  who=name_to_config_section(full_daemon_name),
-                                                  key='rgw_crypt_sse_s3_backend')
+        for enc_type, backend_list in backends.items():
+            for backend_name, backend in backend_list.items():
+                config_keys = backend.get_config_keys()
+                required_keys = backend.get_required_keys()
+                key_pattern = backend.get_key_pattern(enc_type)
 
-        if kms_backend.strip() == 'vault':
-            kms_vault_auth: str = CephService.send_command('mon', 'config get',
-                                                           who=name_to_config_section(full_daemon_name),  # noqa E501 #pylint: disable=line-too-long
-                                                           key='rgw_crypt_vault_auth')
-            kms_vault_engine: str = CephService.send_command('mon', 'config get',
-                                                             who=name_to_config_section(full_daemon_name),  # noqa E501 #pylint: disable=line-too-long
-                                                             key='rgw_crypt_vault_secret_engine')
-            kms_vault_address: str = CephService.send_command('mon', 'config get',
-                                                              who=name_to_config_section(full_daemon_name),  # noqa E501 #pylint: disable=line-too-long
-                                                              key='rgw_crypt_vault_addr')
-            kms_vault_token: str = CephService.send_command('mon', 'config get',
-                                                            who=name_to_config_section(full_daemon_name),  # noqa E501 #pylint: disable=line-too-long
-                                                            key='rgw_crypt_vault_token_file')  # noqa E501 #pylint: disable=line-too-long
-            if (kms_vault_auth.strip() != "" and kms_vault_engine.strip() != "" and kms_vault_address.strip() != ""):  # noqa E501 #pylint: disable=line-too-long
-                if(kms_vault_auth == 'token' and kms_vault_token.strip() == ""):
-                    kms_vault_configured = False
-                else:
-                    kms_vault_configured = True
+                # Check if all required configurations are present and not empty
+                all_required_configs_present = True
+                for key in required_keys:
+                    config_key = key_pattern.format(backend=backend_name, key=key)
+                    value = CephService.send_command('mon', 'config get',
+                                                     who=name_to_config_section(full_daemon_name),
+                                                     key=config_key)
+                    if not (isinstance(value, str) and value.strip()):
+                        all_required_configs_present = False
+                        break
 
-        if sse_s3_backend.strip() == 'vault':
-            s3_vault_auth: str = CephService.send_command('mon', 'config get',
-                                                          who=name_to_config_section(full_daemon_name),  # noqa E501 #pylint: disable=line-too-long
-                                                          key='rgw_crypt_sse_s3_vault_auth')
-            s3_vault_engine: str = CephService.send_command('mon',
-                                                            'config get',
-                                                            who=name_to_config_section(full_daemon_name),  # noqa E501 #pylint: disable=line-too-long
-                                                            key='rgw_crypt_sse_s3_vault_secret_engine')  # noqa E501 #pylint: disable=line-too-long
-            s3_vault_address: str = CephService.send_command('mon', 'config get',
-                                                             who=name_to_config_section(full_daemon_name),  # noqa E501 #pylint: disable=line-too-long
-                                                             key='rgw_crypt_sse_s3_vault_addr')
-            s3_vault_token: str = CephService.send_command('mon', 'config get',
-                                                           who=name_to_config_section(full_daemon_name),  # noqa E501 #pylint: disable=line-too-long
-                                                           key='rgw_crypt_sse_s3_vault_token_file')  # noqa E501 #pylint: disable=line-too-long
+                # If all required configurations are present, gather all config values
+                if all_required_configs_present:
+                    config_dict = {}
+                    for key in config_keys:
+                        config_key = key_pattern.format(backend=backend_name, key=key)
+                        value = CephService.send_command('mon', 'config get',
+                                                         who=name_to_config_section(full_daemon_name),  # noqa E501  #pylint: disable=line-too-long
+                                                         key=config_key)
+                        if value:
+                            config_dict[key] = value.strip() if isinstance(value, str) else value
+                    config_dict['backend'] = backend_name
+                    config_dict['encryption_type'] = enc_type
+                    config_dict['unique_id'] = enc_type + '-' + backend_name
+                    config_values[enc_type].append(config_dict)
 
-            if (s3_vault_auth.strip() != "" and s3_vault_engine.strip() != "" and s3_vault_address.strip() != ""):  # noqa E501 #pylint: disable=line-too-long
-                if(s3_vault_auth == 'token' and s3_vault_token.strip() == ""):
-                    s3_vault_configured = False
-                else:
-                    s3_vault_configured = True
-
-        vault_stats.append(kms_vault_configured)
-        vault_stats.append(s3_vault_configured)
-        return vault_stats
+        return config_values
 
     @classmethod
     def set_encryption_config(cls, encryption_type, kms_provider, auth_method,
@@ -294,6 +329,36 @@ class CephService(object):
         return {}
 
     @classmethod
+    def set_multisite_config(cls, realm_name, zonegroup_name, zone_name, daemon_name):
+        full_daemon_name = 'rgw.' + daemon_name
+
+        KMS_CONFIG = [
+            ['rgw_realm', realm_name],
+            ['rgw_zonegroup', zonegroup_name],
+            ['rgw_zone', zone_name]
+        ]
+
+        for (key, value) in KMS_CONFIG:
+            if value == 'null':
+                continue
+            CephService.send_command('mon', 'config set',
+                                     who=name_to_config_section(full_daemon_name),
+                                     name=key, value=value)
+        return {}
+
+    @classmethod
+    def get_realm_tokens(cls):
+        tokens_info = mgr.remote('rgw', 'get_realm_tokens')
+        return tokens_info
+
+    @classmethod
+    def import_realm_token(cls, realm_token, zone_name, port, placement_spec):
+        tokens_info = mgr.remote('rgw', 'import_realm_token', zone_name=zone_name,
+                                 realm_token=realm_token, port=port, placement=placement_spec,
+                                 start_radosgw=True)
+        return tokens_info
+
+    @classmethod
     def get_pool_pg_status(cls, pool_name):
         # type: (str) -> dict
         pool = cls.get_pool_by_attribute('pool_name', pool_name)
@@ -302,13 +367,14 @@ class CephService(object):
         return mgr.get("pg_summary")['by_pool'][pool['pool'].__str__()]
 
     @staticmethod
-    def send_command(srv_type, prefix, srv_spec='', **kwargs):
-        # type: (str, str, Optional[str], Any) -> Any
+    def send_command(srv_type, prefix, srv_spec='', to_json=True, inbuf='', **kwargs):
+        # type: (str, str, Optional[str], bool, str, Any) -> Any
         """
         :type prefix: str
         :param srv_type: mon |
         :param kwargs: will be added to argdict
         :param srv_spec: typically empty. or something like "<fs_id>:0"
+        :param to_json: if true return as json format
 
         :raises PermissionError: See rados.make_ex
         :raises ObjectNotFound: See rados.make_ex
@@ -323,11 +389,12 @@ class CephService(object):
         """
         argdict = {
             "prefix": prefix,
-            "format": "json",
         }
+        if to_json:
+            argdict["format"] = "json"
         argdict.update({k: v for k, v in kwargs.items() if v is not None})
         result = CommandResult("")
-        mgr.send_command(result, srv_type, srv_spec, json.dumps(argdict), "")
+        mgr.send_command(result, srv_type, srv_spec, json.dumps(argdict), "", inbuf=inbuf)
         r, outb, outs = result.wait()
         if r != 0:
             logger.error("send_command '%s' failed. (r=%s, outs=\"%s\", kwargs=%s)", prefix, r,

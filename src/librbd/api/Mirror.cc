@@ -299,6 +299,15 @@ int list_mirror_images(librados::IoCtx& io_ctx,
   return 0;
 }
 
+template <typename I>
+const char *pool_or_namespace(I *ictx) {
+  if (!ictx->md_ctx.get_namespace().empty()) {
+    return "namespace";
+  } else {
+    return "pool";
+  }
+}
+
 struct C_ImageGetInfo : public Context {
   mirror_image_info_t *mirror_image_info;
   mirror_image_mode_t *mirror_image_mode;
@@ -434,9 +443,15 @@ int Mirror<I>::image_enable(I *ictx, mirror_image_mode_t mode,
     return r;
   }
 
+  if (mirror_mode == cls::rbd::MIRROR_MODE_DISABLED) {
+    lderr(cct) << "cannot enable mirroring: mirroring is not enabled on a "
+               << pool_or_namespace(ictx) << dendl;
+    return -EINVAL;
+  }
+
   if (mirror_mode != cls::rbd::MIRROR_MODE_IMAGE) {
-    lderr(cct) << "cannot enable mirroring in the current pool mirroring mode"
-               << dendl;
+    lderr(cct) << "cannot enable mirroring: " << pool_or_namespace(ictx)
+               << " is not in image mirror mode" << dendl;
     return -EINVAL;
   }
 
@@ -1100,9 +1115,8 @@ int Mirror<I>::mode_set(librados::IoCtx& io_ctx,
                << dendl;
     return r;
   }
-
   if (current_mirror_mode == next_mirror_mode) {
-    return 0;
+    return 0; // Nothing more to be done
   } else if (current_mirror_mode == cls::rbd::MIRROR_MODE_DISABLED) {
     uuid_d uuid_gen;
     uuid_gen.generate_random();
@@ -1253,6 +1267,55 @@ int Mirror<I>::mode_set(librados::IoCtx& io_ctx,
     lderr(cct) << "failed to send update notification: " << cpp_strerror(r)
                << dendl;
   }
+  return 0;
+}
+
+template <typename I>
+int Mirror<I>::remote_namespace_get(librados::IoCtx& io_ctx,
+                                    std::string* remote_namespace) {
+
+  CephContext *cct = reinterpret_cast<CephContext *>(io_ctx.cct());
+  ldout(cct, 20) << dendl;
+
+  int r = cls_client::mirror_remote_namespace_get(&io_ctx, remote_namespace);
+  if (r < 0) {
+    if (r != -ENOENT && r != -EOPNOTSUPP) {
+      lderr(cct) << "failed to retrieve remote mirror namespace: "
+                 << cpp_strerror(r) << dendl;
+      return r;
+    }
+    *remote_namespace = io_ctx.get_namespace();
+  }
+  return 0;
+}
+
+
+template <typename I>
+int Mirror<I>::remote_namespace_set(librados::IoCtx& io_ctx,
+                                    const std::string& remote_namespace) {
+  CephContext *cct = reinterpret_cast<CephContext *>(io_ctx.cct());
+  ldout(cct, 20) << dendl;
+  
+  std::string local_namespace = io_ctx.get_namespace();
+
+  if (local_namespace.empty() && !remote_namespace.empty()) {
+    lderr(cct) << "cannot mirror the default namespace to a "
+               << "non-default namespace." << dendl;
+    return -EINVAL;
+  }
+
+  if (!local_namespace.empty() && remote_namespace.empty()) {
+    lderr(cct) << "cannot mirror a non-default namespace to the default "
+               << "namespace." << dendl;
+    return -EINVAL;
+  }
+
+  int r = cls_client::mirror_remote_namespace_set(&io_ctx, remote_namespace);
+  if (r < 0) {
+    lderr(cct) << "failed to set remote mirror namespace: "
+               << cpp_strerror(r) << dendl;
+    return r;
+  } 
   return 0;
 }
 
@@ -1639,7 +1702,7 @@ int Mirror<I>::peer_site_remove(librados::IoCtx& io_ctx,
       for (auto snap_id : snap_ids) {
         C_SaferCond cond;
         auto req = mirror::snapshot::UnlinkPeerRequest<I>::create(
-          img_ctx, snap_id, uuid, &cond);
+          img_ctx, snap_id, uuid, true, &cond);
         req->send();
         r = cond.wait();
         if (r == -ENOENT) {

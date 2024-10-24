@@ -50,6 +50,7 @@ TEST_F(LibRadosMiscPP, LongNamePP) {
 }
 
 TEST_F(LibRadosMiscPP, LongLocatorPP) {
+  SKIP_IF_CRIMSON();
   bufferlist bl;
   bl.append("content");
   int maxlen = g_conf()->osd_max_object_name_len;
@@ -473,6 +474,7 @@ public:
   ~LibRadosTwoPoolsECPP() override {};
 protected:
   static void SetUpTestCase() {
+    SKIP_IF_CRIMSON();
     pool_name = get_temp_pool_name();
     ASSERT_EQ("", create_one_ec_pool_pp(pool_name, s_cluster));
     src_pool_name = get_temp_pool_name();
@@ -487,6 +489,7 @@ protected:
     src_ioctx.application_enable("rados", true);
   }
   static void TearDownTestCase() {
+    SKIP_IF_CRIMSON();
     ASSERT_EQ(0, s_cluster.pool_delete(src_pool_name.c_str()));
     ASSERT_EQ(0, destroy_one_ec_pool_pp(pool_name, s_cluster));
   }

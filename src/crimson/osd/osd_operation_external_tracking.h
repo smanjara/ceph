@@ -11,8 +11,10 @@
 #include "crimson/osd/osd_operations/pg_advance_map.h"
 #include "crimson/osd/osd_operations/recovery_subrequest.h"
 #include "crimson/osd/osd_operations/replicated_request.h"
+#include "crimson/osd/osd_operations/snaptrim_event.h"
 #include "crimson/osd/pg_activation_blocker.h"
 #include "crimson/osd/pg_map.h"
+#include "crimson/osd/scrub/pg_scrubber.h"
 
 namespace crimson::osd {
 
@@ -21,15 +23,21 @@ struct LttngBackend
   : ClientRequest::StartEvent::Backend,
     ConnectionPipeline::AwaitActive::BlockingEvent::Backend,
     ConnectionPipeline::AwaitMap::BlockingEvent::Backend,
-    ConnectionPipeline::GetPG::BlockingEvent::Backend,
+    ConnectionPipeline::GetPGMapping::BlockingEvent::Backend,
+    PerShardPipeline::CreateOrWaitPG::BlockingEvent::Backend,
     OSD_OSDMapGate::OSDMapBlocker::BlockingEvent::Backend,
     PGMap::PGCreationBlockingEvent::Backend,
     ClientRequest::PGPipeline::AwaitMap::BlockingEvent::Backend,
     PG_OSDMapGate::OSDMapBlocker::BlockingEvent::Backend,
     ClientRequest::PGPipeline::WaitForActive::BlockingEvent::Backend,
     PGActivationBlocker::BlockingEvent::Backend,
+    scrub::PGScrubber::BlockingEvent::Backend,
     ClientRequest::PGPipeline::RecoverMissing::BlockingEvent::Backend,
-    ClientRequest::PGPipeline::GetOBC::BlockingEvent::Backend,
+    ClientRequest::PGPipeline::RecoverMissing::
+      BlockingEvent::ExitBarrierEvent::Backend,
+    ClientRequest::PGPipeline::CheckAlreadyCompleteGetObc::BlockingEvent::Backend,
+    ClientRequest::PGPipeline::LockOBC::BlockingEvent::Backend,
+    ClientRequest::PGPipeline::LockOBC::BlockingEvent::ExitBarrierEvent::Backend,
     ClientRequest::PGPipeline::Process::BlockingEvent::Backend,
     ClientRequest::PGPipeline::WaitRepop::BlockingEvent::Backend,
     ClientRequest::PGPipeline::WaitRepop::BlockingEvent::ExitBarrierEvent::Backend,
@@ -54,9 +62,14 @@ struct LttngBackend
               const OSD_OSDMapGate::OSDMapBlocker&) override {
   }
 
-  void handle(ConnectionPipeline::GetPG::BlockingEvent& ev,
+  void handle(ConnectionPipeline::GetPGMapping::BlockingEvent& ev,
               const Operation& op,
-              const ConnectionPipeline::GetPG& blocker) override {
+              const ConnectionPipeline::GetPGMapping& blocker) override {
+  }
+
+  void handle(PerShardPipeline::CreateOrWaitPG::BlockingEvent& ev,
+              const Operation& op,
+              const PerShardPipeline::CreateOrWaitPG& blocker) override {
   }
 
   void handle(PGMap::PGCreationBlockingEvent&,
@@ -84,14 +97,33 @@ struct LttngBackend
               const PGActivationBlocker& blocker) override {
   }
 
+  void handle(scrub::PGScrubber::BlockingEvent& ev,
+              const Operation& op,
+              const scrub::PGScrubber& blocker) override {
+  }
+
   void handle(ClientRequest::PGPipeline::RecoverMissing::BlockingEvent& ev,
               const Operation& op,
               const ClientRequest::PGPipeline::RecoverMissing& blocker) override {
   }
 
-  void handle(ClientRequest::PGPipeline::GetOBC::BlockingEvent& ev,
+  void handle(ClientRequest::PGPipeline::RecoverMissing::BlockingEvent::ExitBarrierEvent& ev,
+	      const Operation& op) override {
+  }
+
+  void handle(ClientRequest::PGPipeline::CheckAlreadyCompleteGetObc::BlockingEvent& ev,
               const Operation& op,
-              const ClientRequest::PGPipeline::GetOBC& blocker) override {
+              const ClientRequest::PGPipeline::CheckAlreadyCompleteGetObc& blocker) override {
+  }
+
+
+  void handle(ClientRequest::PGPipeline::LockOBC::BlockingEvent& ev,
+              const Operation& op,
+              const ClientRequest::PGPipeline::LockOBC& blocker) override {
+  }
+
+  void handle(ClientRequest::PGPipeline::LockOBC::BlockingEvent::ExitBarrierEvent& ev,
+              const Operation& op) override {
   }
 
   void handle(ClientRequest::PGPipeline::Process::BlockingEvent& ev,
@@ -121,15 +153,21 @@ struct HistoricBackend
   : ClientRequest::StartEvent::Backend,
     ConnectionPipeline::AwaitActive::BlockingEvent::Backend,
     ConnectionPipeline::AwaitMap::BlockingEvent::Backend,
-    ConnectionPipeline::GetPG::BlockingEvent::Backend,
+    ConnectionPipeline::GetPGMapping::BlockingEvent::Backend,
+    PerShardPipeline::CreateOrWaitPG::BlockingEvent::Backend,
     OSD_OSDMapGate::OSDMapBlocker::BlockingEvent::Backend,
     PGMap::PGCreationBlockingEvent::Backend,
     ClientRequest::PGPipeline::AwaitMap::BlockingEvent::Backend,
     PG_OSDMapGate::OSDMapBlocker::BlockingEvent::Backend,
     ClientRequest::PGPipeline::WaitForActive::BlockingEvent::Backend,
     PGActivationBlocker::BlockingEvent::Backend,
+    scrub::PGScrubber::BlockingEvent::Backend,
     ClientRequest::PGPipeline::RecoverMissing::BlockingEvent::Backend,
-    ClientRequest::PGPipeline::GetOBC::BlockingEvent::Backend,
+    ClientRequest::PGPipeline::RecoverMissing::
+      BlockingEvent::ExitBarrierEvent::Backend,
+    ClientRequest::PGPipeline::CheckAlreadyCompleteGetObc::BlockingEvent::Backend,
+    ClientRequest::PGPipeline::LockOBC::BlockingEvent::Backend,
+    ClientRequest::PGPipeline::LockOBC::BlockingEvent::ExitBarrierEvent::Backend,
     ClientRequest::PGPipeline::Process::BlockingEvent::Backend,
     ClientRequest::PGPipeline::WaitRepop::BlockingEvent::Backend,
     ClientRequest::PGPipeline::WaitRepop::BlockingEvent::ExitBarrierEvent::Backend,
@@ -154,9 +192,14 @@ struct HistoricBackend
               const OSD_OSDMapGate::OSDMapBlocker&) override {
   }
 
-  void handle(ConnectionPipeline::GetPG::BlockingEvent& ev,
+  void handle(ConnectionPipeline::GetPGMapping::BlockingEvent& ev,
               const Operation& op,
-              const ConnectionPipeline::GetPG& blocker) override {
+              const ConnectionPipeline::GetPGMapping& blocker) override {
+  }
+
+  void handle(PerShardPipeline::CreateOrWaitPG::BlockingEvent& ev,
+              const Operation& op,
+              const PerShardPipeline::CreateOrWaitPG& blocker) override {
   }
 
   void handle(PGMap::PGCreationBlockingEvent&,
@@ -184,14 +227,32 @@ struct HistoricBackend
               const PGActivationBlocker& blocker) override {
   }
 
+  void handle(scrub::PGScrubber::BlockingEvent& ev,
+              const Operation& op,
+              const scrub::PGScrubber& blocker) override {
+  }
+
   void handle(ClientRequest::PGPipeline::RecoverMissing::BlockingEvent& ev,
               const Operation& op,
               const ClientRequest::PGPipeline::RecoverMissing& blocker) override {
   }
 
-  void handle(ClientRequest::PGPipeline::GetOBC::BlockingEvent& ev,
+  void handle(ClientRequest::PGPipeline::RecoverMissing::BlockingEvent::ExitBarrierEvent& ev,
+              const Operation& op) override {
+  }
+
+  void handle(ClientRequest::PGPipeline::CheckAlreadyCompleteGetObc::BlockingEvent& ev,
               const Operation& op,
-              const ClientRequest::PGPipeline::GetOBC& blocker) override {
+              const ClientRequest::PGPipeline::CheckAlreadyCompleteGetObc& blocker) override {
+  }
+
+  void handle(ClientRequest::PGPipeline::LockOBC::BlockingEvent& ev,
+              const Operation& op,
+              const ClientRequest::PGPipeline::LockOBC& blocker) override {
+  }
+
+  void handle(ClientRequest::PGPipeline::LockOBC::BlockingEvent::ExitBarrierEvent& ev,
+              const Operation& op) override {
   }
 
   void handle(ClientRequest::PGPipeline::Process::BlockingEvent& ev,
@@ -291,6 +352,13 @@ struct EventBackendRegistry<osd::BackfillRecovery> {
 
 template <>
 struct EventBackendRegistry<osd::PGAdvanceMap> {
+  static std::tuple<> get_backends() {
+    return {};
+  }
+};
+
+template <>
+struct EventBackendRegistry<osd::SnapTrimObjSubEvent> {
   static std::tuple<> get_backends() {
     return {};
   }

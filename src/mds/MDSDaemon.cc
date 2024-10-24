@@ -127,7 +127,7 @@ public:
     const cmdmap_t& cmdmap,
     Formatter *f,
     const bufferlist& inbl,
-    std::function<void(int,const std::string&,bufferlist&)> on_finish) override {
+    asok_finisher on_finish) override {
     mds->asok_command(command, cmdmap, f, inbl, on_finish);
   }
 };
@@ -137,7 +137,7 @@ void MDSDaemon::asok_command(
   const cmdmap_t& cmdmap,
   Formatter *f,
   const bufferlist& inbl,
-  std::function<void(int,const std::string&,bufferlist&)> on_finish)
+  asok_finisher on_finish)
 {
   dout(1) << "asok_command: " << command << " " << cmdmap
 	  << " (starting...)" << dendl;
@@ -149,6 +149,13 @@ void MDSDaemon::asok_command(
   if (command == "status") {
     dump_status(f);
     r = 0;
+  } else if (command == "lockup") {
+    int64_t millisecs;
+    cmd_getval(cmdmap, "millisecs", millisecs);
+    derr << "(lockup) sleeping with mds_lock for " << millisecs << dendl;
+    std::lock_guard l(mds_lock);
+    std::this_thread::sleep_for(std::chrono::milliseconds(millisecs));
+    r = 0;
   } else if (command == "exit") {
     outbl.append("Exiting...\n");
     r = 0;
@@ -157,6 +164,7 @@ void MDSDaemon::asok_command(
 		    // our response before seeing us disappear from mdsmap
 		    sleep(1);
 		    std::lock_guard l(mds_lock);
+                    derr << "Exiting due to admin socket command" << dendl;
 		    suicide();
 		  });
     t.detach();
@@ -255,11 +263,30 @@ void MDSDaemon::set_up_admin_socket()
   r = admin_socket->register_command("status", asok_hook,
 				     "high-level status of MDS");
   ceph_assert(r == 0);
+  r = admin_socket->register_command("lockup "
+				     "name=millisecs,type=CephInt,req=true,range=0"
+                                     , asok_hook
+				     , "sleep with mds_lock held (dev)");
+  ceph_assert(r == 0);
   r = admin_socket->register_command("dump_ops_in_flight", asok_hook,
 				     "show the ops currently in flight");
   ceph_assert(r == 0);
-  r = admin_socket->register_command("ops", asok_hook,
-				     "show the ops currently in flight");
+  r = admin_socket->register_command("ops "
+				     "name=flags,type=CephChoices,strings=locks,n=N,req=false "
+				     "name=path,type=CephString,req=false "
+                                     ,asok_hook
+				     ,"show the ops currently in flight");
+  ceph_assert(r == 0);
+  r = admin_socket->register_command("op kill "
+                                     "name=id,type=CephString,req=true",
+				     asok_hook,
+				     "kill op");
+  ceph_assert(r == 0);
+  r = admin_socket->register_command("op get "
+				     "name=flags,type=CephChoices,strings=locks,n=N,req=false "
+                                     "name=id,type=CephString,req=true",
+				     asok_hook,
+				     "get op");
   ceph_assert(r == 0);
   r = admin_socket->register_command("dump_blocked_ops",
       asok_hook,
@@ -286,7 +313,7 @@ void MDSDaemon::set_up_admin_socket()
   ceph_assert(r == 0);
   r = admin_socket->register_command("scrub start "
 				     "name=path,type=CephString "
-				     "name=scrubops,type=CephChoices,strings=force|recursive|repair,n=N,req=false "
+				     "name=scrubops,type=CephChoices,strings=force|recursive|repair|scrub_mdsdir,n=N,req=false "
 				     "name=tag,type=CephString,req=false",
 				     asok_hook,
 				     "scrub and inode and output results");
@@ -306,6 +333,11 @@ void MDSDaemon::set_up_admin_socket()
   r = admin_socket->register_command("scrub status",
                                      asok_hook,
                                      "Status of scrub operations(s)");
+  ceph_assert(r == 0);
+  r = admin_socket->register_command("scrub purge_status "
+				     "name=tag,type=CephString,req=true",
+                                     asok_hook,
+                                     "Purge status of scrub tag|all");
   ceph_assert(r == 0);
   r = admin_socket->register_command("tag path name=path,type=CephString"
                                      " name=tag,type=CephString",
@@ -333,13 +365,30 @@ void MDSDaemon::set_up_admin_socket()
 				     asok_hook,
 				     "trim cache and optionally request client to release all caps and flush the journal");
   ceph_assert(r == 0);
+  r = admin_socket->register_command("lock path"
+                                     " name=path,type=CephString,req=true"
+                                     " name=locks,type=CephString,n=N,req=false"
+                                     " name=ap_dont_block,type=CephBool,req=false"
+                                     " name=ap_freeze,type=CephBool,req=false"
+                                     " name=await,type=CephBool,req=false"
+                                     " name=lifetime,type=CephFloat,req=false"
+				     ,asok_hook
+				     ,"lock a path");
+  ceph_assert(r == 0);
   r = admin_socket->register_command("cache status",
                                      asok_hook,
                                      "show cache status");
   ceph_assert(r == 0);
+  r = admin_socket->register_command("quiesce path"
+                                     " name=path,type=CephString,req=true"
+                                     " name=await,type=CephBool,req=false"
+				     ,asok_hook
+				     ,"quiesce a subtree");
+  ceph_assert(r == 0);
   r = admin_socket->register_command("dump tree "
 				     "name=root,type=CephString,req=true "
-				     "name=depth,type=CephInt,req=false ",
+				     "name=depth,type=CephInt,req=false "
+				     "name=path,type=CephString,req=false ",
 				     asok_hook,
 				     "dump metadata cache for subtree");
   ceph_assert(r == 0);
@@ -364,21 +413,17 @@ void MDSDaemon::set_up_admin_socket()
 				     asok_hook,
 				     "List client sessions based on a filter");
   ceph_assert(r == 0);
-  r = admin_socket->register_command("session evict name=filters,type=CephString,n=N,req=false",
+  r = admin_socket->register_command("session evict name=filters,type=CephString,n=N,req=true",
 				     asok_hook,
 				     "Evict client session(s) based on a filter");
   ceph_assert(r == 0);
-  r = admin_socket->register_command("client evict name=filters,type=CephString,n=N,req=false",
+  r = admin_socket->register_command("client evict name=filters,type=CephString,n=N,req=true",
 				     asok_hook,
 				     "Evict client session(s) based on a filter");
   ceph_assert(r == 0);
   r = admin_socket->register_command("session kill name=client_id,type=CephString",
 				     asok_hook,
 				     "Evict a client session by id");
-  ceph_assert(r == 0);
-  r = admin_socket->register_command("session ls name=cap_dump,type=CephBool,req=false",
-				     asok_hook,
-				     "Enumerate connected CephFS clients");
   ceph_assert(r == 0);
   r = admin_socket->register_command("session config "
 				     "name=client_id,type=CephInt,req=true "
@@ -446,12 +491,37 @@ void MDSDaemon::set_up_admin_socket()
 				     asok_hook,
 				     "dump inode by inode number");
   ceph_assert(r == 0);
+  r = admin_socket->register_command("dump dir "
+				     "name=path,type=CephString,req=true "
+				     "name=dentry_dump,type=CephBool,req=false",
+				     asok_hook,
+				     "dump directory by path");
+  ceph_assert(r == 0);
   r = admin_socket->register_command("exit",
 				     asok_hook,
 				     "Terminate this MDS");
   r = admin_socket->register_command("respawn",
 				     asok_hook,
 				     "Respawn this MDS");
+  ceph_assert(r == 0);
+  r = admin_socket->register_command("quiesce db "
+                                     "name=roots,type=CephString,n=N,req=false "
+                                     "-- "
+                                     "name=set_id,type=CephString,req=false "
+                                     "name=timeout,type=CephFloat,range=0,req=false "
+                                     "name=expiration,type=CephFloat,range=0,req=false "
+                                     "name=await_for,type=CephFloat,range=0,req=false "
+                                     "name=await,type=CephBool,req=false "
+                                     "name=if_version,type=CephInt,range=0,req=false "
+                                     "name=include,type=CephBool,req=false "
+                                     "name=exclude,type=CephBool,req=false "
+                                     "name=reset,type=CephBool,req=false "
+                                     "name=release,type=CephBool,req=false "
+                                     "name=query,type=CephBool,req=false "
+                                     "name=all,type=CephBool,req=false "
+                                     "name=cancel,type=CephBool,req=false",
+      asok_hook,
+      "submit queries to the local QuiesceDbManager");
   ceph_assert(r == 0);
   r = admin_socket->register_command(
     "heap " \
@@ -509,8 +579,10 @@ int MDSDaemon::init()
   dout(10) << sizeof(Capability) << "\tCapability" << dendl;
   dout(10) << sizeof(xlist<void*>::item) << "\txlist<>::item" << dendl;
 
-  messenger->add_dispatcher_tail(&beacon);
-  messenger->add_dispatcher_tail(this);
+  // Ensure beacons are processed ahead of most other dispatchers.
+  messenger->add_dispatcher_head(&beacon, Dispatcher::PRIORITY_HIGH);
+  // order last as MDSDaemon::ms_dispatch2 first acquires the mds_lock
+  messenger->add_dispatcher_head(this, Dispatcher::PRIORITY_LOW);
 
   // init monc
   monc->set_messenger(messenger);
@@ -750,7 +822,7 @@ void MDSDaemon::handle_mds_map(const cref_t<MMDSMap> &m)
        * immediately be assigned a rank).
        */
       if (old_state == DS::STATE_NULL) {
-        dout(1) << "Monitors have assigned me to become a standby." << dendl;
+        dout(1) << "Monitors have assigned me to become a standby" << dendl;
         beacon.set_want_state(*mdsmap, new_state);
       } else if (old_state == DS::STATE_STANDBY) {
         dout(5) << "I am still standby" << dendl;
@@ -915,6 +987,7 @@ void MDSDaemon::respawn()
 
 bool MDSDaemon::ms_dispatch2(const ref_t<Message> &m)
 {
+  dout(25) << __func__ << ": processing " << m << dendl;
   std::lock_guard l(mds_lock);
   if (stopping) {
     return false;
@@ -1074,7 +1147,7 @@ bool MDSDaemon::parse_caps(const AuthCapsInfo& info, MDSAuthCaps& caps)
 
     dout(10) << __func__ << ": parsing auth_cap_str='" << auth_cap_str << "'" << dendl;
     CachedStackStringStream cs;
-    if (caps.parse(g_ceph_context, auth_cap_str, cs.get())) {
+    if (caps.parse(auth_cap_str, cs.get())) {
       return true;
     } else {
       dout(1) << __func__ << ": auth cap parse error: " << cs->strv() << " parsing '" << auth_cap_str << "'" << dendl;
@@ -1083,11 +1156,11 @@ bool MDSDaemon::parse_caps(const AuthCapsInfo& info, MDSAuthCaps& caps)
   }
 }
 
-int MDSDaemon::ms_handle_authentication(Connection *con)
+bool MDSDaemon::ms_handle_fast_authentication(Connection *con)
 {
   /* N.B. without mds_lock! */
   MDSAuthCaps caps;
-  return parse_caps(con->get_peer_caps_info(), caps) ? 0 : -1;
+  return parse_caps(con->get_peer_caps_info(), caps);
 }
 
 void MDSDaemon::ms_handle_accept(Connection *con)

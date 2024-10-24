@@ -943,13 +943,6 @@ public:
 					ObjectStore::CollectionHandle& ch,
 					const pg_info_t &info);
 
-#ifdef WITH_SEASTAR
-  seastar::future<> rebuild_missing_set_with_deletes_crimson(
-    crimson::os::FuturizedStore &store,
-    crimson::os::CollectionRef ch,
-    const pg_info_t &info);
-#endif
-
 protected:
   static void split_by_object(
     mempool::osd_pglog::list<pg_log_entry_t> &entries,
@@ -1683,7 +1676,7 @@ public:
 
 #ifdef WITH_SEASTAR
   seastar::future<> read_log_and_missing_crimson(
-    crimson::os::FuturizedStore &store,
+    crimson::os::FuturizedStore::Shard &store,
     crimson::os::CollectionRef ch,
     const pg_info_t &info,
     ghobject_t pgmeta_oid
@@ -1695,7 +1688,7 @@ public:
   }
 
   static seastar::future<> read_log_and_missing_crimson(
-    crimson::os::FuturizedStore &store,
+    crimson::os::FuturizedStore::Shard &store,
     crimson::os::CollectionRef ch,
     const pg_info_t &info,
     IndexedLog &log,

@@ -474,20 +474,16 @@ out:
 }
 
 int DB::create_bucket(const DoutPrefixProvider *dpp,
-    const RGWUserInfo& owner, rgw_bucket& bucket,
-    const string& zonegroup_id,
+    const rgw_owner& owner, const rgw_bucket& bucket,
+    const std::string& zonegroup_id,
     const rgw_placement_rule& placement_rule,
-    const string& swift_ver_location,
-    const RGWQuotaInfo * pquota_info,
-    map<std::string, bufferlist>& attrs,
-    RGWBucketInfo& info,
-    obj_version *pobjv,
+    const std::map<std::string, bufferlist>& attrs,
+    const std::optional<std::string>& swift_ver_location,
+    const std::optional<RGWQuotaInfo>& quota,
+    std::optional<ceph::real_time> creation_time,
     obj_version *pep_objv,
-    real_time creation_time,
-    rgw_bucket *pmaster_bucket,
-    uint32_t *pmaster_num_shards,
-    optional_yield y,
-    bool exclusive)
+    RGWBucketInfo& info,
+    optional_yield y)
 {
   /*
    * XXX: Simple creation for now.
@@ -506,50 +502,48 @@ int DB::create_bucket(const DoutPrefixProvider *dpp,
   orig_info.bucket.name = bucket.name;
   ret = get_bucket_info(dpp, string("name"), "", orig_info, nullptr, nullptr, nullptr);
 
-  if (!ret && !orig_info.owner.id.empty() && exclusive) {
+  if (!ret && !orig_info.bucket.bucket_id.empty()) {
     /* already exists. Return the old info */
-
     info = std::move(orig_info);
     return ret;
   }
 
   RGWObjVersionTracker& objv_tracker = info.objv_tracker;
-
   objv_tracker.read_version.clear();
+  objv_tracker.generate_new_write_ver(cct);
 
-  if (pobjv) {
-    objv_tracker.write_version = *pobjv;
-  } else {
-    objv_tracker.generate_new_write_ver(cct);
-  }
   params.op.bucket.bucket_version = objv_tracker.write_version;
   objv_tracker.read_version = params.op.bucket.bucket_version;
 
-  uint64_t bid = next_bucket_id();
-  string s = getDBname() + "." + std::to_string(bid);
-  bucket.marker = bucket.bucket_id = s;
-
   info.bucket = bucket;
-  info.owner = owner.user_id;
+  if (info.bucket.marker.empty()) {
+    uint64_t bid = next_bucket_id();
+    string s = getDBname() + "." + std::to_string(bid);
+    info.bucket.marker = info.bucket.bucket_id = s;
+  }
+
+  info.owner = owner;
   info.zonegroup = zonegroup_id;
   info.placement_rule = placement_rule;
-  info.swift_ver_location = swift_ver_location;
-  info.swift_versioning = (!swift_ver_location.empty());
+  if (swift_ver_location) {
+    info.swift_ver_location = *swift_ver_location;
+  }
+  info.swift_versioning = swift_ver_location.has_value();
 
   info.requester_pays = false;
-  if (real_clock::is_zero(creation_time)) {
-    info.creation_time = ceph::real_clock::now();
+  if (creation_time) {
+    info.creation_time = *creation_time;
   } else {
-    info.creation_time = creation_time;
+    info.creation_time = ceph::real_clock::now();
   }
-  if (pquota_info) {
-    info.quota = *pquota_info;
+  if (quota) {
+    info.quota = *quota;
   }
 
   params.op.bucket.info = info;
   params.op.bucket.bucket_attrs = attrs;
   params.op.bucket.mtime = ceph::real_time();
-  params.op.user.uinfo.user_id.id = owner.user_id.id;
+  params.op.bucket.owner = to_string(owner);
 
   ret = ProcessOp(dpp, "InsertBucket", &params);
 
@@ -582,7 +576,7 @@ out:
 }
 
 int DB::list_buckets(const DoutPrefixProvider *dpp, const std::string& query_str,
-    rgw_user& user,
+    std::string& owner,
     const string& marker,
     const string& end_marker,
     uint64_t max,
@@ -595,7 +589,7 @@ int DB::list_buckets(const DoutPrefixProvider *dpp, const std::string& query_str
   DBOpParams params = {};
   InitializeParams(dpp, &params);
 
-  params.op.user.uinfo.user_id = user;
+  params.op.bucket.owner = owner;
   params.op.bucket.min_marker = marker;
   params.op.bucket.max_marker = end_marker;
   params.op.list_max_count = max;
@@ -625,7 +619,7 @@ int DB::list_buckets(const DoutPrefixProvider *dpp, const std::string& query_str
 
   if (query_str == "all") {
     // userID/OwnerID may have changed. Update it.
-    user.id = params.op.bucket.info.owner.id;
+    owner = to_string(params.op.bucket.info.owner);
   }
 
 out:
@@ -635,7 +629,7 @@ out:
 int DB::update_bucket(const DoutPrefixProvider *dpp, const std::string& query_str,
     RGWBucketInfo& info,
     bool exclusive,
-    const rgw_user* powner_id,
+    const rgw_owner* powner,
     map<std::string, bufferlist>* pattrs,
     ceph::real_time* pmtime,
     RGWObjVersionTracker* pobjv)
@@ -656,7 +650,7 @@ int DB::update_bucket(const DoutPrefixProvider *dpp, const std::string& query_st
     goto out;
   }
 
-  if (!orig_info.owner.id.empty() && exclusive) {
+  if (!orig_info.bucket.bucket_id.empty() && exclusive) {
     /* already exists. Return the old info */
 
     info = std::move(orig_info);
@@ -678,17 +672,17 @@ int DB::update_bucket(const DoutPrefixProvider *dpp, const std::string& query_st
 
   params.op.bucket.info.bucket.name = info.bucket.name;
 
-  if (powner_id) {
-    params.op.user.uinfo.user_id.id = powner_id->id;
+  if (powner) {
+    params.op.bucket.owner = to_string(*powner);
   } else {
-    params.op.user.uinfo.user_id.id = orig_info.owner.id;
+    params.op.bucket.owner = to_string(orig_info.owner);
   }
 
   /* Update version & mtime */
   params.op.bucket.bucket_version.ver = ++(bucket_version.ver);
 
   if (pmtime) {
-    params.op.bucket.mtime = *pmtime;;
+    params.op.bucket.mtime = *pmtime;
   } else {
     params.op.bucket.mtime = ceph::real_time();
   }
@@ -1082,17 +1076,21 @@ int DB::Object::set_attrs(const DoutPrefixProvider *dpp,
   DBOpParams params = {};
   rgw::sal::Attrs *attrs;
   map<string, bufferlist>::iterator iter;
+  RGWObjState* state;
 
-  ret = get_object_impl(dpp, params);
+  store->InitializeParams(dpp, &params);
+  InitializeParamsfromObject(dpp, &params);
+  ret = get_state(dpp, &state, true);
 
-  if (ret) {
-    ldpp_dout(dpp, 0) <<"get_object_impl failed err:(" <<ret<<")" << dendl;
+  if (ret && !state->exists) {
+    ldpp_dout(dpp, 0) <<"get_state failed err:(" <<ret<<")" << dendl;
     goto out;
   }
 
   /* For now lets keep it simple..rmattrs & setattrs ..
    * XXX: Check rgw_rados::set_attrs
    */
+  params.op.obj.state = *state;
   attrs = &params.op.obj.state.attrset;
   if (rmattrs) {
     for (iter = rmattrs->begin(); iter != rmattrs->end(); ++iter) {
@@ -1104,7 +1102,10 @@ int DB::Object::set_attrs(const DoutPrefixProvider *dpp,
   }
 
   params.op.query_str = "attrs";
-  params.op.obj.state.mtime = real_clock::now();
+  /* As per https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingMetadata.html, 
+   * the only way for users to modify object metadata is to make a copy of the object and
+   * set the metadata.
+   * Hence do not update mtime for any other attr changes */
 
   ret = store->ProcessOp(dpp, "UpdateObject", &params);
 
@@ -1427,7 +1428,7 @@ int DB::Object::Read::read(int64_t ofs, int64_t end, bufferlist& bl, const DoutP
   if (r < 0)
     return r;
 
-  if (!astate->exists) {
+  if (!astate || !astate->exists) {
     return -ENOENT;
   }
 
@@ -1451,17 +1452,15 @@ int DB::Object::Read::read(int64_t ofs, int64_t end, bufferlist& bl, const DoutP
   bool reading_from_head = (ofs < head_data_size);
 
   if (reading_from_head) {
-    if (astate) { // && astate->prefetch_data)?
-      if (!ofs && astate->data.length() >= len) {
-        bl = astate->data;
-        return bl.length();
-      }
+    if (!ofs && astate->data.length() >= len) {
+      bl = astate->data;
+      return bl.length();
+    }
 
-      if (ofs < astate->data.length()) {
-        unsigned copy_len = std::min((uint64_t)head_data_size - ofs, len);
-        astate->data.begin(ofs).copy(copy_len, bl);
-        return bl.length();
-      }
+    if (ofs < astate->data.length()) {
+      unsigned copy_len = std::min((uint64_t)head_data_size - ofs, len);
+      astate->data.begin(ofs).copy(copy_len, bl);
+      return bl.length();
     }
   }
 
@@ -1772,7 +1771,7 @@ int DB::Object::Write::_do_write_meta(const DoutPrefixProvider *dpp,
   params.op.obj.state.exists = true;
   params.op.obj.state.size = size;
   params.op.obj.state.accounted_size = accounted_size;
-  params.op.obj.owner = target->get_bucket_info().owner.id;
+  params.op.obj.owner = to_string(target->get_bucket_info().owner);
   params.op.obj.category = meta.category;
 
   if (meta.mtime) {
@@ -1974,7 +1973,7 @@ int DB::Object::Delete::create_dm(const DoutPrefixProvider *dpp,
 }
 
 int DB::get_entry(const std::string& oid, const std::string& marker,
-			      std::unique_ptr<rgw::sal::Lifecycle::LCEntry>* entry)
+                  rgw::sal::LCEntry& entry)
 {
   int ret = 0;
   const DoutPrefixProvider *dpp = get_def_dpp();
@@ -1983,7 +1982,7 @@ int DB::get_entry(const std::string& oid, const std::string& marker,
   InitializeParams(dpp, &params);
 
   params.op.lc_entry.index = oid;
-  params.op.lc_entry.entry.set_bucket(marker);
+  params.op.lc_entry.entry.bucket = marker;
 
   params.op.query_str = "get_entry";
   ret = ProcessOp(dpp, "GetLCEntry", &params);
@@ -1993,14 +1992,8 @@ int DB::get_entry(const std::string& oid, const std::string& marker,
     goto out;
   }
 
-  if (!params.op.lc_entry.entry.get_start_time() == 0) { //ensure entry found
-    rgw::sal::Lifecycle::LCEntry* e;
-    e = new rgw::sal::StoreLifecycle::StoreLCEntry(params.op.lc_entry.entry);
-    if (!e) {
-      ret = -ENOMEM;
-      goto out;
-    }
-    entry->reset(e);
+  if (params.op.lc_entry.entry.start_time != 0) { //ensure entry found
+    entry = std::move(params.op.lc_entry.entry);
   }
 
 out:
@@ -2008,7 +2001,7 @@ out:
 }
 
 int DB::get_next_entry(const std::string& oid, const std::string& marker,
-			      std::unique_ptr<rgw::sal::Lifecycle::LCEntry>* entry)
+                       rgw::sal::LCEntry& entry)
 {
   int ret = 0;
   const DoutPrefixProvider *dpp = get_def_dpp();
@@ -2017,7 +2010,7 @@ int DB::get_next_entry(const std::string& oid, const std::string& marker,
   InitializeParams(dpp, &params);
 
   params.op.lc_entry.index = oid;
-  params.op.lc_entry.entry.set_bucket(marker);
+  params.op.lc_entry.entry.bucket = marker;
 
   params.op.query_str = "get_next_entry";
   ret = ProcessOp(dpp, "GetLCEntry", &params);
@@ -2027,21 +2020,15 @@ int DB::get_next_entry(const std::string& oid, const std::string& marker,
     goto out;
   }
 
-  if (!params.op.lc_entry.entry.get_start_time() == 0) { //ensure entry found
-    rgw::sal::Lifecycle::LCEntry* e;
-    e = new rgw::sal::StoreLifecycle::StoreLCEntry(params.op.lc_entry.entry);
-    if (!e) {
-      ret = -ENOMEM;
-      goto out;
-    }
-    entry->reset(e);
+  if (params.op.lc_entry.entry.start_time != 0) { //ensure entry found
+    entry = std::move(params.op.lc_entry.entry);
   }
 
 out:
   return ret;
 }
 
-int DB::set_entry(const std::string& oid, rgw::sal::Lifecycle::LCEntry& entry)
+int DB::set_entry(const std::string& oid, const rgw::sal::LCEntry& entry)
 {
   int ret = 0;
   const DoutPrefixProvider *dpp = get_def_dpp();
@@ -2064,7 +2051,7 @@ out:
 }
 
 int DB::list_entries(const std::string& oid, const std::string& marker,
-  				 uint32_t max_entries, std::vector<std::unique_ptr<rgw::sal::Lifecycle::LCEntry>>& entries)
+                     uint32_t max_entries, std::vector<rgw::sal::LCEntry>& entries)
 {
   int ret = 0;
   const DoutPrefixProvider *dpp = get_def_dpp();
@@ -2086,14 +2073,14 @@ int DB::list_entries(const std::string& oid, const std::string& marker,
   }
 
   for (auto& entry : params.op.lc_entry.list_entries) {
-    entries.push_back(std::make_unique<rgw::sal::StoreLifecycle::StoreLCEntry>(std::move(entry)));
+    entries.push_back(std::move(entry));
   }
 
 out:
   return ret;
 }
 
-int DB::rm_entry(const std::string& oid, rgw::sal::Lifecycle::LCEntry& entry)
+int DB::rm_entry(const std::string& oid, const rgw::sal::LCEntry& entry)
 {
   int ret = 0;
   const DoutPrefixProvider *dpp = get_def_dpp();
@@ -2115,7 +2102,7 @@ out:
   return ret;
 }
 
-int DB::get_head(const std::string& oid, std::unique_ptr<rgw::sal::Lifecycle::LCHead>* head)
+int DB::get_head(const std::string& oid, rgw::sal::LCHead& head)
 {
   int ret = 0;
   const DoutPrefixProvider *dpp = get_def_dpp();
@@ -2132,13 +2119,13 @@ int DB::get_head(const std::string& oid, std::unique_ptr<rgw::sal::Lifecycle::LC
     goto out;
   }
 
-  *head = std::make_unique<rgw::sal::StoreLifecycle::StoreLCHead>(params.op.lc_head.head);
+  head = std::move(params.op.lc_head.head);
 
 out:
   return ret;
 }
 
-int DB::put_head(const std::string& oid, rgw::sal::Lifecycle::LCHead& head)
+int DB::put_head(const std::string& oid, const rgw::sal::LCHead& head)
 {
   int ret = 0;
   const DoutPrefixProvider *dpp = get_def_dpp();
@@ -2202,12 +2189,11 @@ void *DB::GC::entry() {
 
     do {
       std::string& marker = bucket_marker;
-      rgw_user user;
-      user.id = user_marker;
+      std::string owner = user_marker;
       buckets.clear();
       is_truncated = false;
 
-      int r = db->list_buckets(dpp, "all", user, marker, string(),
+      int r = db->list_buckets(dpp, "all", owner, marker, string(),
                        max, false, &buckets, &is_truncated);
  
       if (r < 0) { //do nothing? retry later ?
@@ -2223,7 +2209,7 @@ void *DB::GC::entry() {
          ldpp_dout(dpp, 2) << " delete_stale_objs failed for bucket( " << bname <<")" << dendl;
         }
         bucket_marker = bname;
-        user_marker = user.id;
+        user_marker = owner;
 
         /* XXX: If using locks, unlock here and reacquire in the next iteration */
         cv.wait_for(lk, std::chrono::milliseconds(100));

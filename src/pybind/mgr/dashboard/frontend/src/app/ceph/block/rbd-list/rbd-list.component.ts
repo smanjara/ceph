@@ -1,6 +1,5 @@
 import { Component, OnInit, TemplateRef, ViewChild } from '@angular/core';
 
-import { NgbModalRef } from '@ng-bootstrap/ng-bootstrap';
 import _ from 'lodash';
 import { Observable, Subscriber } from 'rxjs';
 
@@ -24,7 +23,6 @@ import { DimlessBinaryPipe } from '~/app/shared/pipes/dimless-binary.pipe';
 import { DimlessPipe } from '~/app/shared/pipes/dimless.pipe';
 import { AuthStorageService } from '~/app/shared/services/auth-storage.service';
 import { CdTableServerSideService } from '~/app/shared/services/cd-table-server-side.service';
-import { ModalService } from '~/app/shared/services/modal.service';
 import { TaskListService } from '~/app/shared/services/task-list.service';
 import { TaskWrapperService } from '~/app/shared/services/task-wrapper.service';
 import { URLBuilderService } from '~/app/shared/services/url-builder.service';
@@ -32,7 +30,8 @@ import { RbdFormEditRequestModel } from '../rbd-form/rbd-form-edit-request.model
 import { RbdParentModel } from '../rbd-form/rbd-parent.model';
 import { RbdTrashMoveModalComponent } from '../rbd-trash-move-modal/rbd-trash-move-modal.component';
 import { RBDImageFormat, RbdModel } from './rbd-model';
-
+import { ModalCdsService } from '~/app/shared/services/modal-cds.service';
+import { RBDActionHelpers } from '../rbd-contants';
 const BASE_URL = 'block/rbd';
 
 @Component({
@@ -63,23 +62,26 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
   deleteTpl: TemplateRef<any>;
   @ViewChild('removingStatTpl', { static: true })
   removingStatTpl: TemplateRef<any>;
-  @ViewChild('provisionedNotAvailableTooltipTpl', { static: true })
-  provisionedNotAvailableTooltipTpl: TemplateRef<any>;
-  @ViewChild('totalProvisionedNotAvailableTooltipTpl', { static: true })
-  totalProvisionedNotAvailableTooltipTpl: TemplateRef<any>;
+  @ViewChild('forcePromoteConfirmation', { static: true })
+  forcePromoteConfirmation: TemplateRef<any>;
+  @ViewChild('usedTmpl', { static: true })
+  usedTmpl: TemplateRef<any>;
+  @ViewChild('totalUsedTmpl', { static: true })
+  totalUsedTmpl: TemplateRef<any>;
+  @ViewChild('imageUsageTpl', { static: true })
+  imageUsageTpl: TemplateRef<any>;
 
   permission: Permission;
   tableActions: CdTableAction[];
   images: any;
   columns: CdTableColumn[];
   retries: number;
-  tableStatus = new TableStatus('light');
+  tableStatus = new TableStatus('ghost');
   selection = new CdTableSelection();
   icons = Icons;
   count = 0;
   private tableContext: CdTableFetchDataContext = null;
-  modalRef: NgbModalRef;
-
+  errorMessage: string;
   builders = {
     'rbd/create': (metadata: object) =>
       this.createRbdFromTask(metadata['pool_name'], metadata['namespace'], metadata['image_name']),
@@ -120,11 +122,11 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
     private rbdService: RbdService,
     private dimlessBinaryPipe: DimlessBinaryPipe,
     private dimlessPipe: DimlessPipe,
-    private modalService: ModalService,
     private taskWrapper: TaskWrapperService,
     public taskListService: TaskListService,
     private urlBuilder: URLBuilderService,
-    public actionLabels: ActionLabelsI18n
+    public actionLabels: ActionLabelsI18n,
+    protected cdsModalService: ModalCdsService
   ) {
     super();
     this.permission = this.authStorageService.getPermissions().rbdImage;
@@ -155,7 +157,19 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
       icon: Icons.destroy,
       click: () => this.deleteRbdModal(),
       name: this.actionLabels.DELETE,
+      title: RBDActionHelpers.delete,
       disable: (selection: CdTableSelection) => this.getDeleteDisableDesc(selection)
+    };
+    const moveAction: CdTableAction = {
+      permission: 'delete',
+      icon: Icons.trash,
+      title: RBDActionHelpers.moveToTrash,
+      click: () => this.trashRbdModal(),
+      name: this.actionLabels.TRASH,
+      disable: (selection: CdTableSelection) =>
+        this.getRemovingStatusDesc(selection) ||
+        this.getInvalidNameDisable(selection) ||
+        selection.first().image_format === RBDImageFormat.V1
     };
     const resyncAction: CdTableAction = {
       permission: 'update',
@@ -173,7 +187,8 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
         !!selection.first().cdExecuting,
       icon: Icons.copy,
       routerLink: () => `/block/rbd/copy/${getImageUri()}`,
-      name: this.actionLabels.COPY
+      name: this.actionLabels.COPY,
+      title: RBDActionHelpers.copy
     };
     const flattenAction: CdTableAction = {
       permission: 'update',
@@ -184,18 +199,10 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
         !selection.first().parent,
       icon: Icons.flatten,
       click: () => this.flattenRbdModal(),
-      name: this.actionLabels.FLATTEN
+      name: this.actionLabels.FLATTEN,
+      title: RBDActionHelpers.flatten
     };
-    const moveAction: CdTableAction = {
-      permission: 'delete',
-      icon: Icons.trash,
-      click: () => this.trashRbdModal(),
-      name: this.actionLabels.TRASH,
-      disable: (selection: CdTableSelection) =>
-        this.getRemovingStatusDesc(selection) ||
-        this.getInvalidNameDisable(selection) ||
-        selection.first().image_format === RBDImageFormat.V1
-    };
+
     const removeSchedulingAction: CdTableAction = {
       permission: 'update',
       icon: Icons.edit,
@@ -211,14 +218,18 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
       icon: Icons.edit,
       click: () => this.actionPrimary(true),
       name: this.actionLabels.PROMOTE,
-      visible: () => this.selection.first() != null && !this.selection.first().primary
+      visible: () => this.selection.first() != null && !this.selection.first().primary,
+      disable: () =>
+        this.selection.first().mirror_mode === 'Disabled' ? RBDActionHelpers.enableMirroring : ''
     };
     const demoteAction: CdTableAction = {
       permission: 'update',
       icon: Icons.edit,
       click: () => this.actionPrimary(false),
       name: this.actionLabels.DEMOTE,
-      visible: () => this.selection.first() != null && this.selection.first().primary
+      visible: () => this.selection.first() != null && this.selection.first().primary,
+      disable: () =>
+        this.selection.first().mirror_mode === 'Disabled' ? RBDActionHelpers.enableMirroring : ''
     };
     this.tableActions = [
       addAction,
@@ -226,11 +237,11 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
       copyAction,
       flattenAction,
       resyncAction,
-      deleteAction,
-      moveAction,
       removeSchedulingAction,
       promoteAction,
-      demoteAction
+      demoteAction,
+      moveAction,
+      deleteAction
     ];
   }
 
@@ -261,6 +272,12 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
         pipe: this.dimlessBinaryPipe
       },
       {
+        name: $localize`Usage`,
+        prop: 'usage',
+        cellTemplate: this.imageUsageTpl,
+        flexGrow: 1.5
+      },
+      {
         name: $localize`Objects`,
         prop: 'num_objs',
         flexGrow: 1,
@@ -275,24 +292,6 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
         cellClass: 'text-right',
         sortable: false,
         pipe: this.dimlessBinaryPipe
-      },
-      {
-        name: $localize`Provisioned`,
-        prop: 'disk_usage',
-        cellClass: 'text-center',
-        flexGrow: 1,
-        pipe: this.dimlessBinaryPipe,
-        sortable: false,
-        cellTemplate: this.provisionedNotAvailableTooltipTpl
-      },
-      {
-        name: $localize`Total provisioned`,
-        prop: 'total_disk_usage',
-        cellClass: 'text-center',
-        flexGrow: 1,
-        pipe: this.dimlessBinaryPipe,
-        sortable: false,
-        cellTemplate: this.totalProvisionedNotAvailableTooltipTpl
       },
       {
         name: $localize`Parent`,
@@ -426,7 +425,7 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
     const imageName = this.selection.first().name;
     const imageSpec = new ImageSpec(poolName, namespace, imageName);
 
-    this.modalRef = this.modalService.show(CriticalConfirmationModalComponent, {
+    this.cdsModalService.show(CriticalConfirmationModalComponent, {
       itemDescription: 'RBD',
       itemNames: [imageSpec],
       bodyTemplate: this.deleteTpl,
@@ -450,7 +449,7 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
     const imageName = this.selection.first().name;
     const imageSpec = new ImageSpec(poolName, namespace, imageName);
 
-    this.modalRef = this.modalService.show(CriticalConfirmationModalComponent, {
+    this.cdsModalService.show(CriticalConfirmationModalComponent, {
       itemDescription: 'RBD',
       itemNames: [imageSpec],
       actionDescription: 'resync',
@@ -471,7 +470,7 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
       imageName: this.selection.first().name,
       hasSnapshots: this.hasSnapshots()
     };
-    this.modalRef = this.modalService.show(RbdTrashMoveModalComponent, initialState);
+    this.cdsModalService.show(RbdTrashMoveModalComponent, initialState);
   }
 
   flattenRbd(imageSpec: ImageSpec) {
@@ -484,7 +483,7 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
       })
       .subscribe({
         complete: () => {
-          this.modalRef.close();
+          this.cdsModalService.dismissAll();
         }
       });
   }
@@ -514,7 +513,7 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
       }
     };
 
-    this.modalRef = this.modalService.show(ConfirmationModalComponent, initialState);
+    this.cdsModalService.show(ConfirmationModalComponent, initialState);
   }
 
   editRequest() {
@@ -532,7 +531,7 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
       this.selection.first().name
     );
 
-    this.modalRef = this.modalService.show(CriticalConfirmationModalComponent, {
+    this.cdsModalService.show(CriticalConfirmationModalComponent, {
       actionDescription: 'remove scheduling on',
       itemDescription: $localize`image`,
       itemNames: [`${imageName}`],
@@ -548,7 +547,7 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
             .subscribe({
               error: (resp) => observer.error(resp),
               complete: () => {
-                this.modalRef.close();
+                this.cdsModalService.dismissAll();
               }
             });
         })
@@ -571,7 +570,32 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
         }),
         call: this.rbdService.update(imageSpec, request)
       })
-      .subscribe();
+      .subscribe(
+        () => {},
+        (error) => {
+          error.preventDefault();
+          if (primary) {
+            this.errorMessage = error.error['detail'].replace(/\[.*?\]\s*/, '');
+            request.force = true;
+            this.cdsModalService.show(ConfirmationModalComponent, {
+              titleText: $localize`Warning`,
+              buttonText: $localize`Enforce`,
+              warning: true,
+              bodyTpl: this.forcePromoteConfirmation,
+              onSubmit: () => {
+                this.rbdService.update(imageSpec, request).subscribe(
+                  () => {
+                    this.cdsModalService.dismissAll();
+                  },
+                  () => {
+                    this.cdsModalService.dismissAll();
+                  }
+                );
+              }
+            });
+          }
+        }
+      );
   }
 
   hasSnapshots() {
@@ -599,17 +623,23 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
     const first = selection.first();
 
     if (first && this.hasClonedSnapshots(first)) {
-      return $localize`This RBD has cloned snapshots. Please delete related RBDs before deleting this RBD.`;
+      return RBDActionHelpers.clonedSnapshot;
     }
-
-    return this.getInvalidNameDisable(selection) || this.hasClonedSnapshots(selection.first());
+    if (first && first.primary === false) {
+      return RBDActionHelpers.secondayImageDelete;
+    }
+    return (
+      this.getInvalidNameDisable(selection) ||
+      this.hasClonedSnapshots(selection.first()) ||
+      first.primary === false
+    );
   }
 
   getResyncDisableDesc(selection: CdTableSelection): string | boolean {
     const first = selection.first();
 
     if (first && this.imageIsPrimary(first)) {
-      return $localize`Primary RBD images cannot be resynced`;
+      return RBDActionHelpers.primaryImageResync;
     }
 
     return this.getInvalidNameDisable(selection);
@@ -622,7 +652,7 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
     const first = selection.first();
 
     if (first?.name?.match(/[@/]/)) {
-      return $localize`This RBD image has an invalid name and can't be managed by ceph.`;
+      return RBDActionHelpers.invalidNameDisable;
     }
 
     return !selection.first() || !selection.hasSingleSelection;
@@ -631,7 +661,7 @@ export class RbdListComponent extends ListWithDetails implements OnInit {
   getRemovingStatusDesc(selection: CdTableSelection): string | boolean {
     const first = selection.first();
     if (first?.source === 'REMOVING') {
-      return $localize`Action not possible for an RBD in status 'Removing'`;
+      return RBDActionHelpers.removingStatus;
     }
     return false;
   }

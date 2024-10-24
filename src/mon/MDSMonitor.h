@@ -20,6 +20,7 @@
 
 #include <map>
 #include <set>
+#include <vector>
 
 #include "include/types.h"
 #include "PaxosFSMap.h"
@@ -51,6 +52,8 @@ class MDSMonitor : public PaxosService, public PaxosFSMap, protected CommandHand
   bool preprocess_query(MonOpRequestRef op) override;  // true if processed.
   bool prepare_update(MonOpRequestRef op) override;
   bool should_propose(double& delay) override;
+  bool has_health_warnings(std::vector<mds_metric_t> warnings);
+  bool has_any_health_warning();
 
   bool should_print_status() const {
     auto& fs = get_fsmap();
@@ -115,8 +118,8 @@ class MDSMonitor : public PaxosService, public PaxosFSMap, protected CommandHand
 
   std::list<std::shared_ptr<FileSystemCommandHandler> > handlers;
 
-  bool maybe_promote_standby(FSMap& fsmap, Filesystem& fs);
-  bool maybe_resize_cluster(FSMap &fsmap, fs_cluster_id_t fscid);
+  bool maybe_promote_standby(FSMap& fsmap, const Filesystem& fs);
+  bool maybe_resize_cluster(FSMap &fsmap, const Filesystem& fs);
   bool drop_mds(FSMap &fsmap, mds_gid_t gid, const mds_info_t* rep_info, bool* osd_propose);
   bool check_health(FSMap &fsmap, bool* osd_propose);
   void tick() override;     // check state, take actions
@@ -128,6 +131,8 @@ class MDSMonitor : public PaxosService, public PaxosFSMap, protected CommandHand
   void remove_from_metadata(const FSMap &fsmap, MonitorDBStore::TransactionRef t);
   int load_metadata(std::map<mds_gid_t, Metadata>& m);
   void count_metadata(const std::string& field, ceph::Formatter *f);
+
+  void assign_quiesce_db_leader(FSMap &fsmap);
 
 public:
   void print_fs_summary(std::ostream& out) {

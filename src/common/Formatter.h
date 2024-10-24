@@ -7,11 +7,14 @@
 #include "include/buffer_fwd.h"
 
 #include <deque>
+#include <fstream>
 #include <list>
+#include <memory>
 #include <vector>
 #include <stdarg.h>
 #include <sstream>
 #include <map>
+#include <vector>
 
 namespace ceph {
 
@@ -62,9 +65,15 @@ namespace ceph {
     static Formatter *create(std::string_view type) {
       return create(type, "json-pretty", "");
     }
+    template <typename... Params>
+    static std::unique_ptr<Formatter> create_unique(Params &&...params)
+    {
+      return std::unique_ptr<Formatter>(
+	  Formatter::create(std::forward<Params>(params)...));
+    }
 
-    Formatter();
-    virtual ~Formatter();
+    Formatter() = default;
+    virtual ~Formatter() = default;
 
     virtual void enable_line_break() = 0;
     virtual void flush(std::ostream& os) = 0;
@@ -80,6 +89,7 @@ namespace ceph {
     virtual void open_object_section(std::string_view name) = 0;
     virtual void open_object_section_in_ns(std::string_view name, const char *ns) = 0;
     virtual void close_section() = 0;
+    virtual void dump_null(std::string_view name) = 0;
     virtual void dump_unsigned(std::string_view name, uint64_t u) = 0;
     virtual void dump_int(std::string_view name, int64_t s) = 0;
     virtual void dump_float(std::string_view name, double d) = 0;
@@ -121,21 +131,52 @@ namespace ceph {
     virtual void write_bin_data(const char* buff, int buf_len);
   };
 
-  class copyable_sstream : public std::stringstream {
-  public:
-    copyable_sstream() {}
-    copyable_sstream(const copyable_sstream& rhs) {
-      str(rhs.str());
-    }
-    copyable_sstream& operator=(const copyable_sstream& rhs) {
-      str(rhs.str());
-      return *this;
-    }
-  };
-
   class JSONFormatter : public Formatter {
   public:
-    explicit JSONFormatter(bool p = false);
+    explicit JSONFormatter(bool p = false) : m_pretty(p) {}
+    JSONFormatter(const JSONFormatter& f) :
+      m_pretty(f.m_pretty),
+      m_pending_name(f.m_pending_name),
+      m_stack(f.m_stack),
+      m_is_pending_string(f.m_is_pending_string),
+      m_line_break_enabled(f.m_line_break_enabled)
+    {
+      m_ss.str(f.m_ss.str());
+      m_pending_string.str(f.m_pending_string.str());
+    }
+    JSONFormatter(JSONFormatter&& f) :
+      m_pretty(f.m_pretty),
+      m_ss(std::move(f.m_ss)),
+      m_pending_string(std::move(f.m_pending_string)),
+      m_pending_name(f.m_pending_name),
+      m_stack(std::move(f.m_stack)),
+      m_is_pending_string(f.m_is_pending_string),
+      m_line_break_enabled(f.m_line_break_enabled)
+    {
+    }
+    JSONFormatter& operator=(const JSONFormatter& f)
+    {
+      m_pretty = f.m_pretty;
+      m_ss.str(f.m_ss.str());
+      m_pending_string.str(f.m_pending_string.str());
+      m_pending_name = f.m_pending_name;
+      m_stack = f.m_stack;
+      m_is_pending_string = f.m_is_pending_string;
+      m_line_break_enabled = f.m_line_break_enabled;
+      return *this;
+    }
+
+    JSONFormatter& operator=(JSONFormatter&& f)
+    {
+      m_pretty = f.m_pretty;
+      m_ss = std::move(f.m_ss);
+      m_pending_string = std::move(f.m_pending_string);
+      m_pending_name = f.m_pending_name;
+      m_stack = std::move(f.m_stack);
+      m_is_pending_string = f.m_is_pending_string;
+      m_line_break_enabled = f.m_line_break_enabled;
+      return *this;
+    }
 
     void set_status(int status, const char* status_name) override {};
     void output_header() override {};
@@ -149,6 +190,7 @@ namespace ceph {
     void open_object_section(std::string_view name) override;
     void open_object_section_in_ns(std::string_view name, const char *ns) override;
     void close_section() override;
+    void dump_null(std::string_view name) override;
     void dump_unsigned(std::string_view name, uint64_t u) override;
     void dump_int(std::string_view name, int64_t s) override;
     void dump_float(std::string_view name, double d) override;
@@ -158,7 +200,7 @@ namespace ceph {
     int get_len() const override;
     void write_raw_data(const char *data) override;
 
-  protected:
+protected:
     virtual bool handle_value(std::string_view name, std::string_view s, bool quoted) {
       return false; /* is handling done? */
     }
@@ -173,31 +215,76 @@ namespace ceph {
 
     int stack_size() { return m_stack.size(); }
 
-  private:
+    virtual std::ostream& get_ss() {
+      return m_ss;
+    }
 
+    void finish_pending_string();
+
+private:
     struct json_formatter_stack_entry_d {
-      int size;
-      bool is_array;
-      json_formatter_stack_entry_d() : size(0), is_array(false) { }
+      int size = 0;
+      bool is_array = false;
     };
 
-    bool m_pretty;
+    bool m_pretty = false;
     void open_section(std::string_view name, const char *ns, bool is_array);
     void print_quoted_string(std::string_view s);
     void print_name(std::string_view name);
     void print_comma(json_formatter_stack_entry_d& entry);
-    void finish_pending_string();
+    void add_value(std::string_view name, double val);
 
     template <class T>
     void add_value(std::string_view name, T val);
     void add_value(std::string_view name, std::string_view val, bool quoted);
 
-    copyable_sstream m_ss;
-    copyable_sstream m_pending_string;
+    mutable std::stringstream m_ss; // mutable for get_len
+    std::stringstream m_pending_string;
     std::string m_pending_name;
-    std::list<json_formatter_stack_entry_d> m_stack;
-    bool m_is_pending_string;
+    std::vector<json_formatter_stack_entry_d> m_stack;
+    bool m_is_pending_string = false;
     bool m_line_break_enabled = false;
+  };
+
+  class JSONFormatterFile : public JSONFormatter {
+public:
+    JSONFormatterFile(const std::string& path, bool pretty=false) :
+      JSONFormatter(pretty),
+      path(path),
+      file(path, std::ios::out | std::ios::trunc)
+    {
+    }
+    ~JSONFormatterFile() {
+      flush();
+    }
+
+    void flush(std::ostream& os) override {
+      flush();
+    }
+    void flush() {
+      JSONFormatter::finish_pending_string();
+      file.flush();
+    }
+
+    void reset() override {
+      JSONFormatter::reset();
+      file = std::ofstream(path, std::ios::out | std::ios::trunc);
+    }
+    int get_len() const override {
+      return file.tellp();
+    }
+    std::ofstream const& get_ofstream() const {
+      return file;
+    }
+
+protected:
+    std::ostream& get_ss() override {
+      return file;
+    }
+
+private:
+    std::string path;
+    mutable std::ofstream file; // mutable for get_len
   };
 
   template <class T>
@@ -221,6 +308,7 @@ namespace ceph {
     void open_object_section(std::string_view name) override;
     void open_object_section_in_ns(std::string_view name, const char *ns) override;
     void close_section() override;
+    void dump_null(std::string_view name) override;
     void dump_unsigned(std::string_view name, uint64_t u) override;
     void dump_int(std::string_view name, int64_t s) override;
     void dump_float(std::string_view name, double d) override;
@@ -242,6 +330,7 @@ namespace ceph {
     void print_spaces();
     void get_attrs_str(const FormatterAttrs *attrs, std::string& attrs_str);
     char to_lower_underscore(char c) const;
+    std::string get_xml_name(std::string_view name) const;
 
     std::stringstream m_ss, m_pending_string;
     std::deque<std::string> m_sections;
@@ -276,6 +365,7 @@ namespace ceph {
     void open_object_section_with_attrs(std::string_view name, const FormatterAttrs& attrs) override;
 
     void close_section() override;
+    void dump_null(std::string_view name) override;
     void dump_unsigned(std::string_view name, uint64_t u) override;
     void dump_int(std::string_view name, int64_t s) override;
     void dump_float(std::string_view name, double d) override;

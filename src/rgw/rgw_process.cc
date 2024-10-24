@@ -351,7 +351,7 @@ int process_request(const RGWProcessEnv& penv,
     goto done;
   }
   req->op = op;
-  ldpp_dout(op, 10) << "op=" << typeid(*op).name() << dendl;
+  ldpp_dout(op, 10) << "op=" << typeid(*op).name() << " " << dendl;
   s->op_type = op->get_type();
 
   try {
@@ -366,7 +366,13 @@ int process_request(const RGWProcessEnv& penv,
     /* FIXME: remove this after switching all handlers to the new authentication
      * infrastructure. */
     if (nullptr == s->auth.identity) {
-      s->auth.identity = rgw::auth::transform_old_authinfo(s);
+      auto result = rgw::auth::transform_old_authinfo(
+          op, yield, driver, s->user.get());
+      if (!result) {
+        abort_early(s, op, result.error(), handler, yield);
+        goto done;
+      }
+      s->auth.identity = std::move(result).value();
     }
 
     ldpp_dout(op, 2) << "normalizing buckets and tenants" << dendl;
@@ -383,11 +389,8 @@ int process_request(const RGWProcessEnv& penv,
       goto done;
     }
 
-
-    const auto trace_name = std::string(op->name()) + " " + s->trans_id;
-    s->trace = tracing::rgw::tracer.start_trace(trace_name, s->trace_enabled);
-    s->trace->SetAttribute(tracing::rgw::OP, op->name());
-    s->trace->SetAttribute(tracing::rgw::TYPE, tracing::rgw::REQUEST);
+    s->trace = tracing::rgw::tracer.start_trace(op->name(), s->trace_enabled);
+    s->trace->SetAttribute(tracing::rgw::TRANS_ID, s->trans_id);
 
     ret = rgw_process_authenticated(handler, op, req, s, yield, driver);
     if (ret < 0) {
@@ -402,7 +405,9 @@ int process_request(const RGWProcessEnv& penv,
 done:
   if (op) {
     if (s->trace) {
-      s->trace->SetAttribute(tracing::rgw::RETURN, op->get_ret());
+      s->trace->SetAttribute(tracing::rgw::OP_RESULT, op->get_ret());
+      s->trace->SetAttribute(tracing::rgw::HOST_ID, driver->get_host_id());
+
       if (!rgw::sal::User::empty(s->user)) {
         s->trace->SetAttribute(tracing::rgw::USER_ID, s->user->get_id().id);
       }
@@ -432,6 +437,8 @@ done:
   } catch (rgw::io::Exception& e) {
     dout(0) << "ERROR: client_io->complete_request() returned "
             << e.what() << dendl;
+    perfcounter->inc(l_rgw_qlen, -1);
+    perfcounter->inc(l_rgw_qactive, -1);
   }
   if (should_log) {
     rgw_log_op(rest, s, op, penv.olog);
@@ -453,20 +460,24 @@ done:
   } else {
     ldpp_dout(s, 2) << "http status=" << s->err.http_ret << dendl;
   }
-  if (handler)
-    handler->put_op(op);
-  rest->put_handler(handler);
 
   const auto lat = s->time_elapsed();
   if (latency) {
     *latency = lat;
   }
   dout(1) << "====== req done req=" << hex << req << dec
-	  << " op status=" << op_ret
-	  << " http_status=" << s->err.http_ret
-	  << " latency=" << lat
-	  << " ======"
-	  << dendl;
+          << " op=" << (op ? op->name() : "unknown")
+          << " bucket=" << s->bucket_name
+          << " status=" << op_ret
+          << " http_status=" << s->err.http_ret
+          << " latency=" << lat
+          << " request_id=" << s->trans_id
+          << " ======"
+          << dendl;
+
+  if (handler)
+    handler->put_op(op);
+  rest->put_handler(handler);
 
   return (ret < 0 ? ret : s->err.ret);
 } /* process_request */

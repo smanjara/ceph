@@ -9,7 +9,7 @@ License: LGPL-2.1 or LGPL-3 (see COPYING-LGPL2.1 and COPYING-LGPL3)
 
 Files: cmake/modules/FindPython*
 Copyright:
-    Copyright 2000-2020 Kitware, Inc. and Contributors
+    Copyright 2000-2023 Kitware, Inc. and Contributors
 License: BSD 3-clause
 
 Files: cmake/modules/FindLTTngUST.cmake
@@ -224,3 +224,7 @@ Files: src/script/backport-resolve-issue
 Copyright: 2015 Red Hat <contact@redhat.com>
            2018 SUSE LLC
 License: GNU Affero General Public License, Version 3
+
+Files: src/common/*s390x*
+Copyright: 2024 IBM <contact@ibm.com>
+License: Apache License, version 2.0

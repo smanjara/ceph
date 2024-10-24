@@ -13,8 +13,30 @@ import {
   NgbTooltipModule
 } from '@ng-bootstrap/ng-bootstrap';
 import { ClickOutsideModule } from 'ng-click-outside';
-import { ChartsModule } from 'ng2-charts';
+import { NgChartsModule } from 'ng2-charts';
 import { SimplebarAngularModule } from 'simplebar-angular';
+import {
+  UIShellModule,
+  ButtonModule,
+  NotificationModule,
+  IconModule,
+  IconService,
+  TooltipModule,
+  GridModule,
+  AccordionModule,
+  LoadingModule,
+  ModalModule,
+  InputModule,
+  CheckboxModule,
+  DatePickerModule,
+  TimePickerModule,
+  TimePickerSelectModule,
+  NumberModule,
+  DropdownModule,
+  SelectModule,
+  ComboBoxModule,
+  ProgressIndicatorModule
+} from 'carbon-components-angular';
 
 import { MotdComponent } from '~/app/shared/components/motd/motd.component';
 import { DirectivesModule } from '../directives/directives.module';
@@ -49,6 +71,18 @@ import { SubmitButtonComponent } from './submit-button/submit-button.component';
 import { TelemetryNotificationComponent } from './telemetry-notification/telemetry-notification.component';
 import { UsageBarComponent } from './usage-bar/usage-bar.component';
 import { WizardComponent } from './wizard/wizard.component';
+import { CardComponent } from './card/card.component';
+import { CardRowComponent } from './card-row/card-row.component';
+import { CodeBlockComponent } from './code-block/code-block.component';
+import { VerticalNavigationComponent } from './vertical-navigation/vertical-navigation.component';
+import { CardGroupComponent } from './card-group/card-group.component';
+import { HelpTextComponent } from './help-text/help-text.component';
+import { FormAdvancedFieldsetComponent } from './form-advanced-fieldset/form-advanced-fieldset.component';
+import { UpgradableComponent } from './upgradable/upgradable.component';
+import { ProgressComponent } from './progress/progress.component';
+
+// Icons
+import InfoIcon from '@carbon/icons/es/information/16';
 
 @NgModule({
   imports: [
@@ -59,7 +93,7 @@ import { WizardComponent } from './wizard/wizard.component';
     NgbPopoverModule,
     NgbProgressbarModule,
     NgbTooltipModule,
-    ChartsModule,
+    NgChartsModule,
     ReactiveFormsModule,
     PipesModule,
     DirectivesModule,
@@ -68,7 +102,26 @@ import { WizardComponent } from './wizard/wizard.component';
     SimplebarAngularModule,
     RouterModule,
     NgbDatepickerModule,
-    NgbTimepickerModule
+    NgbTimepickerModule,
+    UIShellModule,
+    ButtonModule,
+    NotificationModule,
+    IconModule,
+    TooltipModule,
+    GridModule,
+    AccordionModule,
+    LoadingModule,
+    ModalModule,
+    InputModule,
+    NumberModule,
+    CheckboxModule,
+    DatePickerModule,
+    TimePickerModule,
+    TimePickerSelectModule,
+    DropdownModule,
+    SelectModule,
+    ComboBoxModule,
+    ProgressIndicatorModule
   ],
   declarations: [
     SparklineComponent,
@@ -101,7 +154,16 @@ import { WizardComponent } from './wizard/wizard.component';
     WizardComponent,
     CustomLoginBannerComponent,
     CdLabelComponent,
-    ColorClassFromTextPipe
+    ColorClassFromTextPipe,
+    CardComponent,
+    CardRowComponent,
+    CodeBlockComponent,
+    VerticalNavigationComponent,
+    CardGroupComponent,
+    HelpTextComponent,
+    FormAdvancedFieldsetComponent,
+    UpgradableComponent,
+    ProgressComponent
   ],
   providers: [],
   exports: [
@@ -131,7 +193,20 @@ import { WizardComponent } from './wizard/wizard.component';
     MotdComponent,
     WizardComponent,
     CustomLoginBannerComponent,
-    CdLabelComponent
+    CdLabelComponent,
+    CardComponent,
+    CardRowComponent,
+    CodeBlockComponent,
+    VerticalNavigationComponent,
+    CardGroupComponent,
+    HelpTextComponent,
+    FormAdvancedFieldsetComponent,
+    UpgradableComponent,
+    ProgressComponent
   ]
 })
-export class ComponentsModule {}
+export class ComponentsModule {
+  constructor(private iconService: IconService) {
+    this.iconService.registerAll([InfoIcon]);
+  }
+}

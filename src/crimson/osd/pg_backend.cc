@@ -10,6 +10,7 @@
 #include <boost/range/algorithm/copy.hpp>
 #include <fmt/format.h>
 #include <fmt/ostream.h>
+#include "include/utime_fmt.h"
 #include <seastar/core/print.hh>
 
 #include "messages/MOSDOp.h"
@@ -17,16 +18,19 @@
 #include "common/Checksummer.h"
 #include "common/Clock.h"
 
+#include "crimson/common/coroutine.h"
 #include "crimson/common/exception.h"
 #include "crimson/common/tmap_helpers.h"
 #include "crimson/os/futurized_collection.h"
 #include "crimson/os/futurized_store.h"
 #include "crimson/osd/osd_operation.h"
 #include "crimson/osd/object_context_loader.h"
+#include "crimson/osd/pg.h"
 #include "replicated_backend.h"
 #include "replicated_recovery_backend.h"
 #include "ec_backend.h"
 #include "exceptions.h"
+#include "osd/object_state_fmt.h"
 
 namespace {
   seastar::logger& logger() {
@@ -43,18 +47,22 @@ std::unique_ptr<PGBackend>
 PGBackend::create(pg_t pgid,
 		  const pg_shard_t pg_shard,
 		  const pg_pool_t& pool,
+		  crimson::osd::PG& pg,
 		  crimson::os::CollectionRef coll,
 		  crimson::osd::ShardServices& shard_services,
-		  const ec_profile_t& ec_profile)
+		  const ec_profile_t& ec_profile,
+		  DoutPrefixProvider &dpp)
 {
   switch (pool.type) {
   case pg_pool_t::TYPE_REPLICATED:
-    return std::make_unique<ReplicatedBackend>(pgid, pg_shard,
-					       coll, shard_services);
+    return std::make_unique<ReplicatedBackend>(pgid, pg_shard, pg,
+					       coll, shard_services,
+					       dpp);
   case pg_pool_t::TYPE_ERASURE:
     return std::make_unique<ECBackend>(pg_shard.shard, coll, shard_services,
                                        std::move(ec_profile),
-                                       pool.stripe_width);
+                                       pool.stripe_width,
+				       dpp);
   default:
     throw runtime_error(seastar::format("unsupported pool type '{}'",
                                         pool.type));
@@ -63,10 +71,12 @@ PGBackend::create(pg_t pgid,
 
 PGBackend::PGBackend(shard_id_t shard,
                      CollectionRef coll,
-                     crimson::osd::ShardServices &shard_services)
+                     crimson::osd::ShardServices &shard_services,
+		     DoutPrefixProvider &dpp)
   : shard{shard},
     coll{coll},
     shard_services{shard_services},
+    dpp{dpp},
     store{&shard_services.get_store()}
 {}
 
@@ -74,10 +84,6 @@ PGBackend::load_metadata_iertr::future
   <PGBackend::loaded_object_md_t::ref>
 PGBackend::load_metadata(const hobject_t& oid)
 {
-  if (__builtin_expect(stopping, false)) {
-    throw crimson::common::system_shutdown_exception();
-  }
-
   return interruptor::make_interruptible(store->get_attrs(
     coll,
     ghobject_t{oid, ghobject_t::NO_GEN, shard})).safe_then_interruptible(
@@ -147,59 +153,6 @@ PGBackend::load_metadata(const hobject_t& oid)
       }));
 }
 
-PGBackend::rep_op_fut_t
-PGBackend::mutate_object(
-  std::set<pg_shard_t> pg_shards,
-  crimson::osd::ObjectContextRef &&obc,
-  ceph::os::Transaction&& txn,
-  osd_op_params_t&& osd_op_p,
-  epoch_t min_epoch,
-  epoch_t map_epoch,
-  std::vector<pg_log_entry_t>&& log_entries)
-{
-  logger().trace("mutate_object: num_ops={}", txn.get_num_ops());
-  if (obc->obs.exists) {
-#if 0
-    obc->obs.oi.version = ctx->at_version;
-    obc->obs.oi.prior_version = ctx->obs->oi.version;
-#endif
-
-    obc->obs.oi.prior_version = obc->obs.oi.version;
-    obc->obs.oi.version = osd_op_p.at_version;
-    if (osd_op_p.user_at_version > obc->obs.oi.user_version)
-      obc->obs.oi.user_version = osd_op_p.user_at_version;
-    obc->obs.oi.last_reqid = osd_op_p.req_id;
-    obc->obs.oi.mtime = osd_op_p.mtime;
-    obc->obs.oi.local_mtime = ceph_clock_now();
-
-    // object_info_t
-    {
-      ceph::bufferlist osv;
-      obc->obs.oi.encode_no_oid(osv, CEPH_FEATURES_ALL);
-      // TODO: get_osdmap()->get_features(CEPH_ENTITY_TYPE_OSD, nullptr));
-      txn.setattr(coll->get_cid(), ghobject_t{obc->obs.oi.soid}, OI_ATTR, osv);
-    }
-
-    // snapset
-    if (obc->obs.oi.soid.snap == CEPH_NOSNAP) {
-      logger().debug("final snapset {} in {}",
-        obc->ssc->snapset, obc->obs.oi.soid);
-      ceph::bufferlist bss;
-      encode(obc->ssc->snapset, bss);
-      txn.setattr(coll->get_cid(), ghobject_t{obc->obs.oi.soid}, SS_ATTR, bss);
-      obc->ssc->exists = true;
-    } else {
-      logger().debug("no snapset (this is a clone)");
-    }
-  } else {
-    // reset cached ObjectState without enforcing eviction
-    obc->obs.oi = object_info_t(obc->obs.oi.soid);
-  }
-  return _submit_transaction(
-    std::move(pg_shards), obc->obs.oi.soid, std::move(txn),
-    std::move(osd_op_p), min_epoch, map_epoch, std::move(log_entries));
-}
-
 static inline bool _read_verify_data(
   const object_info_t& oi,
   const ceph::bufferlist& data)
@@ -237,13 +190,19 @@ PGBackend::read(const ObjectState& os, OSDOp& osd_op,
       (op.extent.truncate_size < size)) {
     size = op.extent.truncate_size;
   }
-  if (offset >= size) {
-    // read size was trimmed to zero and it is expected to do nothing,
-    return read_errorator::now();
-  }
   if (!length) {
     // read the whole object if length is 0
     length = size;
+  }
+  if (offset >= size) {
+    // read size was trimmed to zero and it is expected to do nothing,
+    return read_errorator::now();
+  } else if (offset + length > size) {
+    length = size - op.extent.offset;
+    if (!length) {
+      // this is the second trimmed_read case
+      return read_errorator::now();
+    }
   }
   return _read(oi.soid, offset, length, op.flags).safe_then_interruptible_tuple(
     [&delta_stats, &oi, &osd_op](auto&& bl) -> read_errorator::future<> {
@@ -293,7 +252,7 @@ PGBackend::sparse_read(const ObjectState& os, OSDOp& osd_op,
     adjusted_length = adjusted_size - offset;
   }
   logger().trace("sparse_read: {} {}~{}",
-                 os.oi.soid, op.extent.offset, op.extent.length);
+                 os.oi.soid, (uint64_t)op.extent.offset, (uint64_t)op.extent.length);
   return interruptor::make_interruptible(store->fiemap(coll, ghobject_t{os.oi.soid},
     offset, adjusted_length)).safe_then_interruptible(
     [&delta_stats, &os, &osd_op, this](auto&& m) {
@@ -308,7 +267,7 @@ PGBackend::sparse_read(const ObjectState& os, OSDOp& osd_op,
           ceph::encode(extents, osd_op.outdata);
           encode_destructively(bl, osd_op.outdata);
           logger().trace("sparse_read got {} bytes from object {}",
-                         osd_op.op.extent.length, os.oi.soid);
+                         (uint64_t)osd_op.op.extent.length, os.oi.soid);
          delta_stats.num_rd++;
          delta_stats.num_rd_kb += shift_round_up(osd_op.op.extent.length, 10);
           return read_errorator::make_ready_future<>();
@@ -337,8 +296,6 @@ namespace {
     auto init_value_p = init_value_bl.cbegin();
     try {
       decode(init_value, init_value_p);
-      // chop off the consumed part
-      init_value_bl.splice(0, init_value_p.get_off());
     } catch (const ceph::buffer::end_of_buffer&) {
       logger().warn("{}: init value not provided", __func__);
       return crimson::ct_error::invarg::make();
@@ -392,7 +349,7 @@ PGBackend::checksum(const ObjectState& os, OSDOp& osd_op)
     auto& checksum = osd_op.op.checksum;
     if (read_bl.length() != checksum.length) {
       logger().warn("checksum: bytes read {} != {}",
-                        read_bl.length(), checksum.length);
+                        read_bl.length(), (uint64_t)checksum.length);
       return crimson::ct_error::invarg::make();
     }
     // calculate its checksum and put the result in outdata
@@ -505,7 +462,9 @@ PGBackend::write_iertr::future<> PGBackend::_writefull(
       coll->get_cid(), ghobject_t{os.oi.soid}, 0, bl.length(),
       bl, flags);
     update_size_and_usage(
-      delta_stats, os.oi, 0,
+      delta_stats,
+      osd_op_params.modified_ranges,
+      os.oi, 0,
       bl.length(), true);
     osd_op_params.clean_regions.mark_data_region_dirty(
       0,
@@ -542,7 +501,9 @@ PGBackend::write_iertr::future<> PGBackend::_truncate(
       coll->get_cid(),
       ghobject_t{os.oi.soid}, offset);
     if (os.oi.size > offset) {
-      // TODO: modified_ranges.union_of(trim);
+      interval_set<uint64_t> trim;
+      trim.insert(offset, os.oi.size - offset);
+      osd_op_params.modified_ranges.union_of(trim);
       osd_op_params.clean_regions.mark_data_region_dirty(
         offset,
 	os.oi.size - offset);
@@ -580,9 +541,19 @@ bool PGBackend::maybe_create_new_object(
 }
 
 void PGBackend::update_size_and_usage(object_stat_sum_t& delta_stats,
+  interval_set<uint64_t>& modified,
   object_info_t& oi, uint64_t offset,
   uint64_t length, bool write_full)
 {
+  interval_set<uint64_t> ch;
+  if (write_full) {
+    if (oi.size) {
+      ch.insert(0, oi.size);
+    }
+  } else if (length) {
+    ch.insert(offset, length);
+  }
+  modified.union_of(ch);
   if (write_full ||
       (offset + length > oi.size && length)) {
     uint64_t new_size = offset + length;
@@ -680,12 +651,14 @@ PGBackend::write_iertr::future<> PGBackend::write(
                    ghobject_t{os.oi.soid}, op.extent.truncate_size);
       if (op.extent.truncate_size != os.oi.size) {
         os.oi.size = length;
-        if (op.extent.truncate_size > os.oi.size) {
-          osd_op_params.clean_regions.mark_data_region_dirty(os.oi.size,
-              op.extent.truncate_size - os.oi.size);
-        } else {
-          osd_op_params.clean_regions.mark_data_region_dirty(op.extent.truncate_size,
-              os.oi.size - op.extent.truncate_size);
+        if (op.extent.truncate_size < os.oi.size) {
+          interval_set<uint64_t> trim;
+          trim.insert(op.extent.truncate_size,
+            os.oi.size - op.extent.truncate_size);
+          osd_op_params.modified_ranges.union_of(trim);
+          osd_op_params.clean_regions.mark_data_region_dirty(
+            op.extent.truncate_size, os.oi.size - op.extent.truncate_size);
+          os.oi.clear_data_digest();
         }
       }
       truncate_update_size_and_usage(delta_stats, os.oi, op.extent.truncate_size);
@@ -704,10 +677,12 @@ PGBackend::write_iertr::future<> PGBackend::write(
   } else {
     txn.write(coll->get_cid(), ghobject_t{os.oi.soid},
 	      offset, length, std::move(buf), op.flags);
-    update_size_and_usage(delta_stats, os.oi, offset, length);
+    update_size_and_usage(delta_stats, osd_op_params.modified_ranges,
+                          os.oi, offset, length);
   }
   osd_op_params.clean_regions.mark_data_region_dirty(op.extent.offset,
 						     op.extent.length);
+  logger().debug("{} clean_regions modified", __func__);
 
   return seastar::now();
 }
@@ -737,7 +712,8 @@ PGBackend::interruptible_future<> PGBackend::write_same(
   txn.write(coll->get_cid(), ghobject_t{os.oi.soid},
             op.writesame.offset, len,
             std::move(repeated_indata), op.flags);
-  update_size_and_usage(delta_stats, os.oi, op.writesame.offset, len);
+  update_size_and_usage(delta_stats, osd_op_params.modified_ranges,
+                        os.oi, op.writesame.offset, len);
   osd_op_params.clean_regions.mark_data_region_dirty(op.writesame.offset, len);
   return seastar::now();
 }
@@ -769,12 +745,14 @@ PGBackend::write_iertr::future<> PGBackend::writefull(
 
 PGBackend::rollback_iertr::future<> PGBackend::rollback(
   ObjectState& os,
+  const SnapSet &ss,
   const OSDOp& osd_op,
   ceph::os::Transaction& txn,
   osd_op_params_t& osd_op_params,
   object_stat_sum_t& delta_stats,
   crimson::osd::ObjectContextRef head,
-  crimson::osd::ObjectContextLoader& obc_loader)
+  crimson::osd::ObjectContextLoader& obc_loader,
+  const SnapContext &snapc)
 {
   const ceph_osd_op& op = osd_op.op;
   snapid_t snapid = (uint64_t)op.snap.snapid;
@@ -783,31 +761,62 @@ PGBackend::rollback_iertr::future<> PGBackend::rollback(
                   __func__, os.oi.soid ,snapid);
   hobject_t target_coid = os.oi.soid;
   target_coid.snap = snapid;
-  return obc_loader.with_clone_obc_only<RWState::RWREAD>(
+  return obc_loader.with_clone_obc_only<RWState::RWWRITE>(
     head, target_coid,
-    [this, &os, &txn, &delta_stats, &osd_op_params]
-    (auto clone_obc) {
+    [this, &os, &txn, &delta_stats, &osd_op_params, snapid]
+    (auto head_obc, auto resolved_obc) {
+    if (resolved_obc->obs.oi.soid.is_head()) {
+      // no-op: The resolved oid returned the head object
+      logger().debug("PGBackend::rollback: loaded head_obc: {}"
+                     " do nothing",
+                     resolved_obc->obs.oi.soid);
+      return rollback_iertr::now();
+    }
+    /* TODO: https://tracker.ceph.com/issues/59114 This implementation will not
+     * behave correctly for a rados operation consisting of a mutation followed
+     * by a rollback to a snapshot since the last mutation of the object.
+     * The correct behavior would be for the rollback to undo the mutation
+     * earlier in the operation by resolving to the clone created at the start
+     * of the operation (see resolve_oid).
+     * Instead, it will select HEAD leaving that mutation intact since the SnapSet won't
+     * yet contain that clone. This behavior exists in classic as well.
+     */
     logger().debug("PGBackend::rollback: loaded clone_obc: {}",
-                   clone_obc->obs.oi.soid);
+                   resolved_obc->obs.oi.soid);
     // 1) Delete current head
     if (os.exists) {
       txn.remove(coll->get_cid(), ghobject_t{os.oi.soid,
                                   ghobject_t::NO_GEN, shard});
     }
     // 2) Clone correct snapshot into head
-    txn.clone(coll->get_cid(), ghobject_t{clone_obc->obs.oi.soid},
+    txn.clone(coll->get_cid(), ghobject_t{resolved_obc->obs.oi.soid},
                                ghobject_t{os.oi.soid});
     //    Copy clone obc.os.oi to os.oi
     os.oi.clear_flag(object_info_t::FLAG_WHITEOUT);
-    os.oi.copy_user_bits(clone_obc->obs.oi);
+    os.oi.copy_user_bits(resolved_obc->obs.oi);
     delta_stats.num_bytes -= os.oi.size;
-    delta_stats.num_bytes += clone_obc->obs.oi.size;
+    delta_stats.num_bytes += resolved_obc->obs.oi.size;
     osd_op_params.clean_regions.mark_data_region_dirty(0,
-      std::max(os.oi.size, clone_obc->obs.oi.size));
+      std::max(os.oi.size, resolved_obc->obs.oi.size));
     osd_op_params.clean_regions.mark_omap_dirty();
-    // TODO: 3) Calculate clone_overlaps by following overlaps
-    //          forward from rollback snapshot
-    //          https://tracker.ceph.com/issues/58263
+
+    // 3) Calculate clone_overlaps by following overlaps
+    const auto& clone_overlap =
+      head_obc->ssc->snapset.clone_overlap;
+    auto iter = clone_overlap.lower_bound(snapid);
+    ceph_assert(iter != clone_overlap.end());
+    interval_set<uint64_t> overlaps = iter->second;
+    for (const auto&i: clone_overlap) {
+      overlaps.intersection_of(i.second);
+    }
+
+    if (os.oi.size > 0) {
+      interval_set<uint64_t> modified;
+      modified.insert(0, os.oi.size);
+      overlaps.intersection_of(modified);
+      modified.subtract(overlaps);
+      osd_op_params.modified_ranges.union_of(modified);
+    }
     return rollback_iertr::now();
   }).safe_then_interruptible([] {
     logger().debug("PGBackend::rollback succefully");
@@ -816,12 +825,13 @@ PGBackend::rollback_iertr::future<> PGBackend::rollback(
     // if there's no snapshot, we delete the object;
     // otherwise, do nothing.
     crimson::ct_error::enoent::handle(
-    [this, &os, &snapid, &txn, &delta_stats] {
+    [this, &os, snapid, &txn, &delta_stats, &snapc, &ss, &osd_op_params] {
       logger().debug("PGBackend::rollback: deleting head on {}"
                      " with snap_id of {}"
                      " because got ENOENT|whiteout on obc lookup",
                      os.oi.soid, snapid);
-      return remove(os, txn, delta_stats, false);
+      return remove(os, txn, osd_op_params, delta_stats,
+                    should_whiteout(ss, snapc), os.oi.size);
     }),
     rollback_ertr::pass_further{},
     crimson::ct_error::assert_all{"unexpected error in rollback"}
@@ -844,8 +854,9 @@ PGBackend::append_ierrorator::future<> PGBackend::append(
     txn.write(coll->get_cid(), ghobject_t{os.oi.soid},
               os.oi.size /* offset */, op.extent.length,
               std::move(osd_op.indata), op.flags);
-    update_size_and_usage(delta_stats, os.oi, os.oi.size,
-      op.extent.length);
+    update_size_and_usage(delta_stats,
+                          osd_op_params.modified_ranges,
+                          os.oi, os.oi.size, op.extent.length);
     osd_op_params.clean_regions.mark_data_region_dirty(os.oi.size,
                                                        op.extent.length);
   }
@@ -902,7 +913,9 @@ PGBackend::write_iertr::future<> PGBackend::zero(
            ghobject_t{os.oi.soid},
            op.extent.offset,
            op.extent.length);
-  // TODO: modified_ranges.union_of(zeroed);
+  interval_set<uint64_t> ch;
+  ch.insert(op.extent.offset, op.extent.length);
+  osd_op_params.modified_ranges.union_of(ch);
   osd_op_params.clean_regions.mark_data_region_dirty(op.extent.offset,
 						     op.extent.length);
   delta_stats.num_wr++;
@@ -916,6 +929,7 @@ PGBackend::create_iertr::future<> PGBackend::create(
   ceph::os::Transaction& txn,
   object_stat_sum_t& delta_stats)
 {
+  logger().debug("{} obc existed: {}, osd_op {}", __func__, os, osd_op);
   if (os.exists && !os.oi.is_whiteout() &&
       (osd_op.op.flags & CEPH_OSD_OP_FLAG_EXCL)) {
     // this is an exclusive create
@@ -933,8 +947,6 @@ PGBackend::create_iertr::future<> PGBackend::create(
     }
   }
   maybe_create_new_object(os, txn, delta_stats);
-  txn.create(coll->get_cid(),
-             ghobject_t{os.oi.soid, ghobject_t::NO_GEN, shard});
   return seastar::now();
 }
 
@@ -956,7 +968,10 @@ PGBackend::remove(ObjectState& os, ceph::os::Transaction& txn)
 
 PGBackend::remove_iertr::future<>
 PGBackend::remove(ObjectState& os, ceph::os::Transaction& txn,
-  object_stat_sum_t& delta_stats, bool whiteout)
+  osd_op_params_t& osd_op_params,
+  object_stat_sum_t& delta_stats,
+  bool whiteout,
+  int num_bytes)
 {
   if (!os.exists) {
     return crimson::ct_error::enoent::make();
@@ -972,11 +987,28 @@ PGBackend::remove(ObjectState& os, ceph::os::Transaction& txn,
   }
   txn.remove(coll->get_cid(),
 	     ghobject_t{os.oi.soid, ghobject_t::NO_GEN, shard});
-  delta_stats.num_bytes -= os.oi.size;
+
+  if (os.oi.is_omap()) {
+    os.oi.clear_flag(object_info_t::FLAG_OMAP);
+    delta_stats.num_objects_omap--;
+  }
+
+  if (os.oi.size > 0) {
+    interval_set<uint64_t> ch;
+    ch.insert(0, os.oi.size);
+    osd_op_params.modified_ranges.union_of(ch);
+    osd_op_params.clean_regions.mark_data_region_dirty(0, os.oi.size);
+  }
+
+  osd_op_params.clean_regions.mark_omap_dirty();
+  delta_stats.num_wr++;
+  // num_bytes of the removed clone or head object
+  delta_stats.num_bytes -= num_bytes;
   os.oi.size = 0;
   os.oi.new_object();
 
-  // todo: clone_overlap
+  // todo: update watchers
+
   if (whiteout) {
     logger().debug("{} setting whiteout on {} ",__func__, os.oi.soid);
     os.oi.set_flag(object_info_t::FLAG_WHITEOUT);
@@ -985,48 +1017,49 @@ PGBackend::remove(ObjectState& os, ceph::os::Transaction& txn,
                ghobject_t{os.oi.soid, ghobject_t::NO_GEN, shard});
     return seastar::now();
   }
-  // todo: update watchers
+
+  // delete the head
+  delta_stats.num_objects--;
+  if (os.oi.soid.is_snap()) {
+    delta_stats.num_object_clones--;
+  }
   if (os.oi.is_whiteout()) {
+    logger().debug("{} deleting whiteout on {}", __func__, os.oi.soid);
     os.oi.clear_flag(object_info_t::FLAG_WHITEOUT);
     delta_stats.num_whiteouts--;
   }
-  delta_stats.num_objects--;
   os.exists = false;
   return seastar::now();
 }
 
 PGBackend::interruptible_future<std::tuple<std::vector<hobject_t>, hobject_t>>
-PGBackend::list_objects(const hobject_t& start, uint64_t limit) const
+PGBackend::list_objects(
+  const hobject_t& start, const hobject_t &end, uint64_t limit) const
 {
-  if (__builtin_expect(stopping, false)) {
-    throw crimson::common::system_shutdown_exception();
-  }
-
   auto gstart = start.is_min() ? ghobject_t{} : ghobject_t{start, 0, shard};
-  return interruptor::make_interruptible(store->list_objects(coll,
-					 gstart,
-					 ghobject_t::get_max(),
-					 limit))
-    .then_interruptible([](auto ret) {
-      auto& [gobjects, next] = ret;
-      std::vector<hobject_t> objects;
-      boost::copy(gobjects |
-        boost::adaptors::filtered([](const ghobject_t& o) {
-          if (o.is_pgmeta()) {
-            return false;
-          } else if (o.hobj.is_temp()) {
-            return false;
-          } else {
-            return o.is_no_gen();
-          }
-        }) |
-        boost::adaptors::transformed([](const ghobject_t& o) {
-          return o.hobj;
-        }),
-        std::back_inserter(objects));
-      return seastar::make_ready_future<std::tuple<std::vector<hobject_t>, hobject_t>>(
-        std::make_tuple(objects, next.hobj));
-    });
+  auto gend = end.is_max() ? ghobject_t::get_max() : ghobject_t{end, 0, shard};
+  auto [gobjects, next] = co_await interruptor::make_interruptible(
+    store->list_objects(coll, gstart, gend, limit));
+
+  std::vector<hobject_t> objects;
+  boost::copy(
+    gobjects |
+    boost::adaptors::filtered([](const ghobject_t& o) {
+      if (o.is_pgmeta()) {
+	return false;
+      } else if (o.hobj.is_temp()) {
+	return false;
+      } else if (o.is_internal_pg_local()) {
+	return false;
+      } else {
+	return o.is_no_gen();
+      }
+    }) |
+    boost::adaptors::transformed([](const ghobject_t& o) {
+      return o.hobj;
+    }),
+    std::back_inserter(objects));
+  co_return std::make_tuple(objects, next.hobj);
 }
 
 PGBackend::setxattr_ierrorator::future<> PGBackend::setxattr(
@@ -1090,10 +1123,6 @@ PGBackend::getxattr(
   const hobject_t& soid,
   std::string_view key) const
 {
-  if (__builtin_expect(stopping, false)) {
-    throw crimson::common::system_shutdown_exception();
-  }
-
   return store->get_attr(coll, ghobject_t{soid}, key);
 }
 
@@ -1102,9 +1131,6 @@ PGBackend::getxattr(
   const hobject_t& soid,
   std::string&& key) const
 {
-  if (__builtin_expect(stopping, false)) {
-    throw crimson::common::system_shutdown_exception();
-  }
   return seastar::do_with(key, [this, &soid](auto &key) {
     return store->get_attr(coll, ghobject_t{soid}, key);
   });
@@ -1115,9 +1141,6 @@ PGBackend::get_attr_ierrorator::future<> PGBackend::get_xattrs(
   OSDOp& osd_op,
   object_stat_sum_t& delta_stats) const
 {
-  if (__builtin_expect(stopping, false)) {
-    throw crimson::common::system_shutdown_exception();
-  }
   return store->get_attrs(coll, ghobject_t{os.oi.soid}).safe_then(
     [&delta_stats, &osd_op](auto&& attrs) {
     std::vector<std::pair<std::string, bufferlist>> user_xattrs;
@@ -1249,9 +1272,6 @@ PGBackend::rm_xattr(
   const OSDOp& osd_op,
   ceph::os::Transaction& txn)
 {
-  if (__builtin_expect(stopping, false)) {
-    throw crimson::common::system_shutdown_exception();
-  }
   if (!os.exists || os.oi.is_whiteout()) {
     logger().debug("{}: {} DNE", __func__, os.oi.soid);
     return crimson::ct_error::enoent::make();
@@ -1269,7 +1289,7 @@ void PGBackend::clone(
   const ObjectState& d_os,
   ceph::os::Transaction& txn)
 {
-  // See OpsExecutor::execute_clone documentation
+  // See OpsExecuter::execute_clone documentation
   txn.clone(coll->get_cid(), ghobject_t{os.oi.soid}, ghobject_t{d_os.oi.soid});
   {
     ceph::bufferlist bv;
@@ -1280,7 +1300,7 @@ void PGBackend::clone(
 }
 
 using get_omap_ertr =
-  crimson::os::FuturizedStore::read_errorator::extend<
+  crimson::os::FuturizedStore::Shard::read_errorator::extend<
     crimson::ct_error::enodata>;
 using get_omap_iertr =
   ::crimson::interruptible::interruptible_errorator<
@@ -1288,9 +1308,9 @@ using get_omap_iertr =
     get_omap_ertr>;
 static
 get_omap_iertr::future<
-  crimson::os::FuturizedStore::omap_values_t>
+  crimson::os::FuturizedStore::Shard::omap_values_t>
 maybe_get_omap_vals_by_keys(
-  crimson::os::FuturizedStore* store,
+  crimson::os::FuturizedStore::Shard* store,
   const crimson::os::CollectionRef& coll,
   const object_info_t& oi,
   const std::set<std::string>& keys_to_get)
@@ -1304,9 +1324,9 @@ maybe_get_omap_vals_by_keys(
 
 static
 get_omap_iertr::future<
-  std::tuple<bool, crimson::os::FuturizedStore::omap_values_t>>
+  std::tuple<bool, crimson::os::FuturizedStore::Shard::omap_values_t>>
 maybe_get_omap_vals(
-  crimson::os::FuturizedStore* store,
+  crimson::os::FuturizedStore::Shard* store,
   const crimson::os::CollectionRef& coll,
   const object_info_t& oi,
   const std::string& start_after)
@@ -1338,13 +1358,19 @@ PGBackend::omap_get_header(
   OSDOp& osd_op,
   object_stat_sum_t& delta_stats) const
 {
-  return omap_get_header(coll, ghobject_t{os.oi.soid}).safe_then_interruptible(
-    [&delta_stats, &osd_op] (ceph::bufferlist&& header) {
-      osd_op.outdata = std::move(header);
-      delta_stats.num_rd_kb += shift_round_up(osd_op.outdata.length(), 10);
-      delta_stats.num_rd++;
-      return seastar::now();
-    });
+  if (os.oi.is_omap()) {
+    return omap_get_header(coll, ghobject_t{os.oi.soid}).safe_then_interruptible(
+      [&delta_stats, &osd_op] (ceph::bufferlist&& header) {
+        osd_op.outdata = std::move(header);
+        delta_stats.num_rd_kb += shift_round_up(osd_op.outdata.length(), 10);
+        delta_stats.num_rd++;
+        return seastar::now();
+      });
+  } else {
+    // no omap? return empty data but not ENOENT. This is imporant for
+    // the case when the object is being creating due to to may_write().
+    return seastar::now();
+  }
 }
 
 PGBackend::ll_read_ierrorator::future<>
@@ -1353,9 +1379,6 @@ PGBackend::omap_get_keys(
   OSDOp& osd_op,
   object_stat_sum_t& delta_stats) const
 {
-  if (__builtin_expect(stopping, false)) {
-    throw crimson::common::system_shutdown_exception();
-  }
   if (!os.exists || os.oi.is_whiteout()) {
     logger().debug("{}: object does not exist: {}", os.oi.soid);
     return crimson::ct_error::enoent::make();
@@ -1478,10 +1501,6 @@ PGBackend::omap_get_vals(
   OSDOp& osd_op,
   object_stat_sum_t& delta_stats) const
 {
-  if (__builtin_expect(stopping, false)) {
-    throw crimson::common::system_shutdown_exception();
-  }
-
   if (!os.exists || os.oi.is_whiteout()) {
     logger().debug("{}: object does not exist: {}", os.oi.soid);
     return crimson::ct_error::enoent::make();
@@ -1548,9 +1567,6 @@ PGBackend::omap_get_vals_by_keys(
   OSDOp& osd_op,
   object_stat_sum_t& delta_stats) const
 {
-  if (__builtin_expect(stopping, false)) {
-    throw crimson::common::system_shutdown_exception();
-  }
   if (!os.exists || os.oi.is_whiteout()) {
     logger().debug("{}: object does not exist: {}", __func__, os.oi.soid);
     return crimson::ct_error::enoent::make();
@@ -1567,7 +1583,7 @@ PGBackend::omap_get_vals_by_keys(
   delta_stats.num_rd++;
   return maybe_get_omap_vals_by_keys(store, coll, os.oi, keys_to_get)
   .safe_then_interruptible(
-    [&osd_op] (crimson::os::FuturizedStore::omap_values_t&& vals) {
+    [&osd_op] (crimson::os::FuturizedStore::Shard::omap_values_t&& vals) {
       encode(vals, osd_op.outdata);
       return ll_read_errorator::now();
     }).handle_error_interruptible(
@@ -1603,7 +1619,10 @@ PGBackend::omap_set_vals(
   osd_op_params.clean_regions.mark_omap_dirty();
   delta_stats.num_wr++;
   delta_stats.num_wr_kb += shift_round_up(to_set_bl.length(), 10);
-  os.oi.set_flag(object_info_t::FLAG_OMAP);
+  if (!os.oi.is_omap()) {
+    os.oi.set_flag(object_info_t::FLAG_OMAP);
+    delta_stats.num_objects_omap++;
+  }
   os.oi.clear_omap_digest();
   return seastar::now();
 }
@@ -1620,7 +1639,10 @@ PGBackend::omap_set_header(
   txn.omap_setheader(coll->get_cid(), ghobject_t{os.oi.soid}, osd_op.indata);
   osd_op_params.clean_regions.mark_omap_dirty();
   delta_stats.num_wr++;
-  os.oi.set_flag(object_info_t::FLAG_OMAP);
+  if (!os.oi.is_omap()) {
+    os.oi.set_flag(object_info_t::FLAG_OMAP);
+    delta_stats.num_objects_omap++;
+  }
   os.oi.clear_omap_digest();
   return seastar::now();
 }
@@ -1673,9 +1695,6 @@ PGBackend::omap_clear(
   osd_op_params_t& osd_op_params,
   object_stat_sum_t& delta_stats)
 {
-  if (__builtin_expect(stopping, false)) {
-    throw crimson::common::system_shutdown_exception();
-  }
   if (!os.exists || os.oi.is_whiteout()) {
     logger().debug("{}: object does not exist: {}", os.oi.soid);
     return crimson::ct_error::enoent::make();
@@ -1814,9 +1833,5 @@ PGBackend::read_ierrorator::future<> PGBackend::tmapget(
       return read_errorator::future<>{crimson::ct_error::object_corrupted::make()};
     }),
     read_errorator::pass_further{});
-}
-
-void PGBackend::on_activate_complete() {
-  peering.reset();
 }
 

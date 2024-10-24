@@ -1,8 +1,8 @@
 /* You can add global styles to this file, and also import other style files */
 @use './src/styles/defaults' as *;
-
+@import './src/styles/carbon-defaults.scss';
 // Angular2-Tree Component
-@import '~@circlon/angular-tree-component/css/angular-tree-component.css';
+@import '@circlon/angular-tree-component/css/angular-tree-component.css';
 
 // Fork-Awesome
 $fa-font-path: '~fork-awesome/fonts';
@@ -23,9 +23,10 @@ $grid-breakpoints: (
   2xl: 1450px
 );
 
-@import '~bootstrap/scss/bootstrap';
-@import '~fork-awesome/scss/fork-awesome';
+@import 'bootstrap/scss/bootstrap';
+@import 'fork-awesome/scss/fork-awesome';
 @import 'app/ceph/dashboard/info-card/info-card-popover.scss';
+@import 'app/ceph/rgw/rgw-overview-dashboard/rgw-overview-card-popover.scss';
 @import './src/styles/bootstrap-extends';
 
 @import './src/styles/ceph-custom/basics';
@@ -163,12 +164,6 @@ tags-input .tags {
   pointer-events: none;
 }
 
-a {
-  &:hover {
-    text-decoration: underline;
-  }
-}
-
 .clickable,
 a {
   cursor: pointer;
@@ -182,7 +177,7 @@ a.btn-light {
 
 // Overrides the badge to rounded-pill
 .badge {
-  @extend .badge, .rounded-pill, .mb-1;
+  @extend .badge, .mb-1;
 }
 
 // Overriding badges to match the class name of badges in Bootstrap v5
@@ -218,11 +213,7 @@ a.btn-light {
   @extend .badge, .bg-dark;
 }
 
-json-schema-form {
-  .help-block {
-    @extend .invalid-feedback;
-  }
-
+formly-form {
   .ng-touched.ng-invalid {
     @extend .is-invalid;
   }
@@ -230,4 +221,21 @@ json-schema-form {
   .ng-touched.ng-valid {
     @extend .is-valid;
   }
+
+  .form-label {
+    @extend .cd-col-form-label;
+    text-align: start;
+    white-space: nowrap;
+    width: fit-content;
+
+    span[aria-hidden='true'] {
+      color: $danger;
+    }
+  }
+}
+
+// Overriding legend css due to change in bootstrap v5 and setting it to none;
+legend {
+  float: none;
+  margin-top: 1rem;
 }
