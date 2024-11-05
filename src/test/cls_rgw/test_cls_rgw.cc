@@ -70,15 +70,9 @@ void test_stats(librados::IoCtx& ioctx, const string& oid, RGWObjCategory catego
   ASSERT_EQ(num_entries, entries);
 }
 
-<<<<<<< HEAD
-void index_prepare(librados::IoCtx& ioctx, const string& oid, RGWModifyOp index_op,
-                   const string& tag, const cls_rgw_obj_key& key, const string& loc,
-                   uint16_t bi_flags = 0, bool log_op = true)
-=======
 void index_prepare(librados::IoCtx& ioctx, const string& oid, RGWModifyOp index_op,
                    const string& tag, const cls_rgw_obj_key& key, const string& loc,
                    uint16_t bi_flags = 0)
->>>>>>> 38357d4c5ed (cls/rgw, rgw: drop the unused log_op from rgw_cls_obj_prepare_op.)
 {
   ObjectWriteOperation op;
   rgw_zone_set zones_trace;
