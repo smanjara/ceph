@@ -3076,6 +3076,7 @@ int RGWRados::swift_versioning_restore(RGWObjectCtx& obj_ctx,
 int RGWRados::Object::Write::_do_write_meta(uint64_t size, uint64_t accounted_size,
                                            map<string, bufferlist>& attrs,
                                            bool assume_noent, bool modify_tail,
+                                           RGWObjState *state,
                                            void *_index_op, const req_context& rctx,
                                            jspan_context& trace, bool log_op)
 {
@@ -3094,11 +3095,6 @@ int RGWRados::Object::Write::_do_write_meta(uint64_t size, uint64_t accounted_si
   }
 #endif
 
-  RGWObjState *state;
-  RGWObjManifest *manifest = nullptr;
-  int r = target->get_state(rctx.dpp, &state, &manifest, false, rctx.y, assume_noent);
-  if (r < 0)
-    return r;
 
   rgw_obj& obj = target->get_obj();
 
@@ -3108,7 +3104,7 @@ int RGWRados::Object::Write::_do_write_meta(uint64_t size, uint64_t accounted_si
   }
 
   rgw_rados_ref ref;
-  r = store->get_obj_head_ref(rctx.dpp, target->get_meta_placement_rule(), obj, &ref);
+  int r = store->get_obj_head_ref(rctx.dpp, target->get_meta_placement_rule(), obj, &ref);
   if (r < 0)
     return r;
 
@@ -3262,14 +3258,6 @@ int RGWRados::Object::Write::_do_write_meta(uint64_t size, uint64_t accounted_si
     index_op->set_bilog_flags(RGW_BILOG_FLAG_VERSIONED_OP);
   }
 
-  if (!index_op->is_prepared()) {
-    tracepoint(rgw_rados, prepare_enter, req_id.c_str());
-    r = index_op->prepare(rctx.dpp, CLS_RGW_OP_ADD, &state->write_tag, rctx.y);
-    tracepoint(rgw_rados, prepare_exit, req_id.c_str());
-    if (r < 0)
-      return r;
-  }
-
   auto& ioctx = ref.ioctx;
 
   tracepoint(rgw_rados, operate_enter, req_id.c_str());
@@ -3398,15 +3386,32 @@ int RGWRados::Object::Write::write_meta(uint64_t size, uint64_t accounted_size,
   index_op.set_zones_trace(meta.zones_trace);
   
   bool assume_noent = (meta.if_match == NULL && meta.if_nomatch == NULL);
-  int r;
+
+  RGWObjState *state;
+  RGWObjManifest *manifest = nullptr;
+  int r = target->get_state(rctx.dpp, &state, &manifest, false, rctx.y, assume_noent);
+  if (r < 0) {
+    return r;
+  }
+
+  //tracepoint(rgw_rados, prepare_enter, req_id.c_str());
+  r = index_op.prepare(rctx.dpp, CLS_RGW_OP_ADD, &state->write_tag, rctx.y);
+  //tracepoint(rgw_rados, prepare_exit, req_id.c_str());
+  if (r < 0)
+    return r;
+
   if (assume_noent) {
-    r = _do_write_meta(size, accounted_size, attrs, assume_noent, meta.modify_tail, (void *)&index_op, rctx, trace, log_op);
+    r = _do_write_meta(size, accounted_size, attrs, assume_noent, meta.modify_tail, state, (void *)&index_op, rctx, trace, log_op);
     if (r == -EEXIST) {
       assume_noent = false;
+      r = target->get_state(rctx.dpp, &state, &manifest, false, rctx.y, assume_noent);
+      if (r < 0) {
+        return r;
+      }
     }
   }
   if (!assume_noent) {
-    r = _do_write_meta(size, accounted_size, attrs, assume_noent, meta.modify_tail, (void *)&index_op, rctx, trace, log_op);
+    r = _do_write_meta(size, accounted_size, attrs, assume_noent, meta.modify_tail, state, (void *)&index_op, rctx, trace, log_op);
   }
   return r;
 }
@@ -7273,12 +7278,8 @@ int RGWRados::Bucket::UpdateIndex::prepare(const DoutPrefixProvider *dpp, RGWMod
   int r = guard_reshard(dpp, obj, nullptr, [&](BucketShard *bs) -> int {
 				   return store->cls_obj_prepare_op(dpp, *bs, op, optag, obj, y, zones_trace);
 				 }, y);
-  if (r < 0) {
-    return r;
-  }
 
-  prepared = true;
-  return 0;
+  return r < 0 ? r : 0;
 }
 
 int RGWRados::Bucket::UpdateIndex::complete(const DoutPrefixProvider *dpp, int64_t poolid, uint64_t epoch,

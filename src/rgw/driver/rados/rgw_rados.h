@@ -824,7 +824,8 @@ public:
 
       int _do_write_meta(uint64_t size, uint64_t accounted_size,
                      std::map<std::string, bufferlist>& attrs,
-                     bool modify_tail, bool assume_noent,
+                     bool assume_noent, bool modify_tail,
+                     RGWObjState *state,
                      void *index_op, const req_context& rctx,
                      jspan_context& trace,
                      bool log_op = true);
@@ -930,7 +931,6 @@ public:
       BucketShard bs;
       bool bs_initialized{false};
       bool blind;
-      bool prepared{false};
       rgw_zone_set *zones_trace{nullptr};
 
       int init_bs(const DoutPrefixProvider *dpp, optional_yield y) {
@@ -1004,7 +1004,6 @@ public:
 
       const std::string *get_optag() { return &optag; }
 
-      bool is_prepared() { return prepared; }
     }; // class RGWRados::Bucket::UpdateIndex
 
     class List {
