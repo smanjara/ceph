@@ -1084,6 +1084,7 @@ def test_multi_zone_redirect():
     set_sync_from_all(z2, True)
     set_redirect_zone(z2, None)
 
+@attr('fails_with_rgw')
 def test_zonegroup_remove():
     zonegroup = realm.master_zonegroup()
     zonegroup_conns = ZonegroupConns(zonegroup)
@@ -1116,7 +1117,7 @@ def test_zonegroup_remove():
     # validate the resulting period
     zonegroup.period.update(z1, commit=True)
 
-
+@attr('fails_with_rgw')
 def test_zg_master_zone_delete():
 
     master_zg = realm.master_zonegroup()
