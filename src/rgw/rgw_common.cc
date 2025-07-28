@@ -2847,8 +2847,8 @@ void RGWUserInfo::dump(Formatter *f) const
   encode_json_map("subusers", NULL, "subuser", NULL, user_info_dump_subuser,(void *)this, subusers, f);
   encode_json_map("keys", NULL, "key", NULL, user_info_dump_key,(void *)this, access_keys, f);
   encode_json_map("swift_keys", NULL, "key", NULL, user_info_dump_swift_key,(void *)this, swift_keys, f);
-
   encode_json("caps", caps, f);
+  encode_json("master_key", master_key, f);
 
   char buf[256];
   op_type_to_str(op_mask, buf, sizeof(buf));
@@ -2916,6 +2916,7 @@ void RGWUserInfo::decode_json(JSONObj *obj)
   JSONDecoder::decode_json("subusers", subusers, decode_subusers, obj);
 
   JSONDecoder::decode_json("caps", caps, obj);
+  JSONDecoder::decode_json("master_key", master_key, obj);
 
   string mask_str;
   JSONDecoder::decode_json("op_mask", mask_str, obj);

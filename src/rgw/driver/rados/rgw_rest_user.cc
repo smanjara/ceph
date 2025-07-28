@@ -20,6 +20,13 @@
 
 using namespace std;
 
+void decode_access_keys(map<string, RGWAccessKey>& m, JSONObj *o)
+{
+  RGWAccessKey k;
+  k.decode_json(o);
+  m[k.id] = k;
+}
+
 int fetch_access_keys_from_master(const DoutPrefixProvider* dpp, req_state* s,
                                   std::map<std::string, RGWAccessKey>& keys,
                                   ceph::real_time& create_date,
@@ -719,9 +726,6 @@ void RGWOp_Key_Create::execute(optional_yield y)
     op_state.access_key_active = active;
   }
 
-  if (gen_key)
-    op_state.set_generate_key();
-
   if (!key_type_str.empty()) {
     int32_t key_type = KEY_TYPE_UNDEFINED;
     if (key_type_str.compare("swift") == 0)
@@ -730,6 +734,45 @@ void RGWOp_Key_Create::execute(optional_yield y)
       key_type = KEY_TYPE_S3;
 
     op_state.set_key_type(key_type);
+  }
+/*
+  if (!s->penv.site->is_meta_master()) {
+    bufferlist data;
+    JSONParser jp;
+    int ret = rgw_forward_request_to_master(this, *s->penv.site, s->user->get_id(),
+                                            &data, &jp, s->info, s->err, y);
+    if (ret < 0) {
+      ldpp_dout(this, 0) << "forward_request_to_master returned ret=" << ret << dendl;
+      return;
+    }
+
+    ldpp_dout(this, 20) << "NOTICE: finished sending request to master" << dendl;
+    map<std::string, RGWAccessKey> keys;
+    JSONDecoder::decode_json("keys", keys, decode_access_keys, &jp);
+    op_state.op_access_keys = std::move(keys);
+
+    ldpp_dout(this, 20) << "NOTICE: decoded json" << dendl;
+
+    // set_generate_key() is not set if keys have already been fetched from master zone
+    gen_key = false;
+    op_state.key_op = false;
+  }
+*/
+
+  if (!s->penv.site->is_meta_master()) {
+    op_state.create_date.emplace();
+    op_ret = fetch_access_keys_from_master(this, s, op_state.op_access_keys,
+                                           *op_state.create_date, y);
+    if (op_ret < 0) {
+      return;
+    }
+    // set_generate_key() is not set if keys have already been fetched from master zone
+    gen_key = false;
+//    op_state.existing_user = true;
+  }
+
+  if (gen_key) {
+    op_state.set_generate_key();
   }
 
   op_ret = RGWUserAdminOp_Key::create(s, driver, op_state, flusher, y);
@@ -777,6 +820,13 @@ void RGWOp_Key_Remove::execute(optional_yield y)
       key_type = KEY_TYPE_S3;
 
     op_state.set_key_type(key_type);
+  }
+
+  op_ret = rgw_forward_request_to_master(this, *s->penv.site, s->user->get_id(),
+                                         nullptr, nullptr, s->info, s->err, y);
+  if (op_ret < 0) {
+    ldpp_dout(this, 0) << "forward_request_to_master returned ret=" << op_ret << dendl;
+    return;
   }
 
   op_ret = RGWUserAdminOp_Key::remove(s, driver, op_state, flusher, y);

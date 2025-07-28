@@ -84,6 +84,23 @@ static void dump_access_keys_info(Formatter *f, RGWUserInfo &info)
   f->close_section();
 }
 
+
+static void dump_master_key(Formatter *f, RGWUserInfo &info)
+{
+  f->open_array_section("keys");
+  RGWAccessKey& k = info.master_key;
+  const char *sep = (k.subuser.empty() ? "" : ":");
+  const char *subuser = (k.subuser.empty() ? "" : k.subuser.c_str());
+  string s;
+  info.user_id.to_str(s);
+  f->dump_format("user", "%s%s%s", s.c_str(), sep, subuser);
+  f->dump_string("access_key", k.id);
+  f->dump_string("secret_key", k.key);
+  f->dump_bool("active", k.active);
+  f->close_section();
+}
+
+
 static void dump_swift_keys_info(Formatter *f, RGWUserInfo &info)
 {
   map<string, RGWAccessKey>::iterator kiter;
@@ -123,6 +140,7 @@ static void dump_user_info(Formatter *f, RGWUserInfo &info,
   if (dump_keys) {
     dump_access_keys_info(f, info);
     dump_swift_keys_info(f, info);
+//    dump_master_key(f, info);
   }
 
   encode_json("caps", info.caps, f);
@@ -237,6 +255,7 @@ int RGWAccessKeyPool::init(RGWUserAdminOpState& op_state)
 
   swift_keys = op_state.get_swift_keys();
   access_keys = op_state.get_access_keys();
+  master_key = op_state.get_master_key();
 
   keys_allowed = true;
 
@@ -315,6 +334,11 @@ map<std::string, RGWAccessKey>* RGWUserAdminOpState::get_swift_keys()
 map<std::string, RGWAccessKey>* RGWUserAdminOpState::get_access_keys()
 {
   return &user->get_info().access_keys;
+}
+
+RGWAccessKey *RGWUserAdminOpState::get_master_key()
+{
+  return &user->get_info().master_key;
 }
 
 map<std::string, RGWSubUser>* RGWUserAdminOpState::get_subusers()
@@ -574,6 +598,7 @@ int RGWAccessKeyPool::generate_key(const DoutPrefixProvider *dpp, RGWUserAdminOp
 
   if (key_type == KEY_TYPE_S3) {
     access_keys->emplace(id, new_key);
+    *master_key = new_key;
   } else if (key_type == KEY_TYPE_SWIFT) {
     swift_keys->emplace(id, new_key);
   }
@@ -681,8 +706,9 @@ int RGWAccessKeyPool::execute_add(const DoutPrefixProvider *dpp,
   }
 
   // store the updated info
-  if (!defer_user_update)
+  if (!defer_user_update) {
     ret = user->update(dpp, op_state, err_msg, y);
+  }
 
   if (ret < 0)
     return ret;
@@ -1817,7 +1843,7 @@ int RGWUser::execute_add(const DoutPrefixProvider *dpp, RGWUserAdminOpState& op_
     if (ret < 0) {
       set_err_msg(err_msg, "unable to create access key, " + subprocess_msg);
       return ret;
-    }
+        }
   }
 
   // see if we need to add some caps
@@ -2548,8 +2574,10 @@ int RGWUserAdminOp_Key::create(const DoutPrefixProvider *dpp,
     if (key_type == KEY_TYPE_SWIFT)
       dump_swift_keys_info(formatter, info);
 
-    else if (key_type == KEY_TYPE_S3)
-      dump_access_keys_info(formatter, info);
+    else if (key_type == KEY_TYPE_S3) {
+//      dump_access_keys_info(formatter, info);
+      dump_master_key(formatter, info);
+    }
 
     flusher.flush();
   }
