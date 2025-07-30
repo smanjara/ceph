@@ -42,7 +42,13 @@ int fetch_access_keys_from_master(const DoutPrefixProvider* dpp, req_state* s,
   }
 
   RGWUserInfo ui;
-  ui.decode_json(&jp);
+  try {
+    ui.decode_json(&jp);
+  } catch (const JSONDecoder::err& e) {
+    cout << "failed to decode JSON input: " << e.what() << std::endl;
+    return -EINVAL;
+  }
+
   keys = std::move(ui.access_keys);
   create_date = ui.create_date;
   return 0;
@@ -735,7 +741,7 @@ void RGWOp_Key_Create::execute(optional_yield y)
 
     op_state.set_key_type(key_type);
   }
-/*
+
   if (!s->penv.site->is_meta_master()) {
     bufferlist data;
     JSONParser jp;
@@ -746,30 +752,20 @@ void RGWOp_Key_Create::execute(optional_yield y)
       return;
     }
 
-    ldpp_dout(this, 20) << "NOTICE: finished sending request to master" << dendl;
-    map<std::string, RGWAccessKey> keys;
-    JSONDecoder::decode_json("keys", keys, decode_access_keys, &jp);
-    op_state.op_access_keys = std::move(keys);
-
-    ldpp_dout(this, 20) << "NOTICE: decoded json" << dendl;
-
-    // set_generate_key() is not set if keys have already been fetched from master zone
-    gen_key = false;
-    op_state.key_op = false;
-  }
-*/
-
-  if (!s->penv.site->is_meta_master()) {
-    op_state.create_date.emplace();
-    op_ret = fetch_access_keys_from_master(this, s, op_state.op_access_keys,
-                                           *op_state.create_date, y);
-    if (op_ret < 0) {
+    RGWAccessKey key;
+    try {
+      key.decode_json(&jp);
+    } catch (const JSONDecoder::err& e) {
+      cout << "failed to decode JSON input: " << e.what() << std::endl;
+      ret = -EINVAL;
       return;
     }
+    op_state.op_master_key = std::move(key);
+
     // set_generate_key() is not set if keys have already been fetched from master zone
     gen_key = false;
-//    op_state.existing_user = true;
   }
+
 
   if (gen_key) {
     op_state.set_generate_key();
