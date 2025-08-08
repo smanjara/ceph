@@ -15,6 +15,7 @@
 #include "services/svc_zone.h"
 #include "services/svc_sys_obj.h"
 #include "rgw_zone.h"
+#include "common/ceph_json.h"
 
 #define dout_subsys ceph_subsys_rgw
 
@@ -52,6 +53,27 @@ int fetch_access_keys_from_master(const DoutPrefixProvider* dpp, req_state* s,
   keys = std::move(ui.access_keys);
   create_date = ui.create_date;
   return 0;
+}
+
+void decode_access_keys(map<string, RGWAccessKey>& m, JSONObj *o)
+{
+  RGWAccessKey k;
+  k.decode_json(o);
+  m[k.id] = k;
+}
+
+static void dump_access_keys(Formatter *f, std::vector<RGWAccessKey>& access_keys)
+{
+  f->open_array_section("keys");
+  for (auto& k : access_keys) {
+    const char *sep = (k.subuser.empty() ? "" : ":");
+    const char *subuser = (k.subuser.empty() ? "" : k.subuser.c_str());
+    f->dump_string("access_key", k.id);
+    f->dump_string("secret_key", k.key);
+    f->dump_bool("active", k.active);
+    encode_json("create_date", k.create_date, f);
+  }
+  f->close_section();
 }
 
 class RGWOp_User_List : public RGWRESTOp {
@@ -515,6 +537,13 @@ public:
   const char* name() const override { return "create_subuser"; }
 };
 
+void decode_subusers(map<string, RGWSubUser>& m, JSONObj *o)
+{
+  RGWSubUser u;
+  u.decode_json(o);
+  m[u.name] = u;
+}
+
 void RGWOp_Subuser_Create::execute(optional_yield y)
 {
   std::string uid_str;
@@ -567,12 +596,32 @@ void RGWOp_Subuser_Create::execute(optional_yield y)
   }
   op_state.set_key_type(key_type);
 
-  op_ret = rgw_forward_request_to_master(this, *s->penv.site, s->user->get_id(),
-                                         nullptr, nullptr, s->info, s->err, y);
-  if (op_ret < 0) {
-    ldpp_dout(this, 0) << "forward_request_to_master returned ret=" << op_ret << dendl;
+  if (!s->penv.site->is_meta_master()) {
+    JSONParser jp;
+    op_ret = rgw_forward_request_to_master(this, *s->penv.site, s->user->get_id(),
+                                          nullptr, &jp, s->info, s->err, y);
+    if (op_ret < 0) {
+      ldpp_dout(this, 0) << "forward_request_to_master returned ret=" << op_ret << dendl;
+      return;
+    }
+  }
+
+  string outstring = "[{\"id\":\"admin:sub-test3\",\"permissions\":\"<none>\"},{\"id\":\"admin:sub-test4\",\"permissions\":\"<none>\"},{\"id\":\"admin:sub-test5\",\"permissions\":\"<none>\"},{\"id\":\"admin:sub-test6\",\"permissions\":\"<none>\"}]";
+
+  JSONParser parser;
+  std::map<std::string, RGWSubUser> subusers;
+
+  if (!parser.parse(outstring.c_str(), outstring.size())) {
+    ldpp_dout(this, 0) << "failed parsing response" << dendl;
+  }
+
+  try {
+    JSONDecoder::decode_json("subusers", subusers, decode_subusers, &parser);
+  } catch (const JSONDecoder::err& e) {
     return;
   }
+
+
   op_ret = RGWUserAdminOp_Subuser::create(s, driver, op_state, flusher, y);
 }
 
@@ -742,7 +791,7 @@ void RGWOp_Key_Create::execute(optional_yield y)
     op_state.set_key_type(key_type);
   }
 
-  if (!s->penv.site->is_meta_master()) {
+  if (!s->penv.site->is_meta_master() && gen_key) {
     bufferlist data;
     JSONParser jp;
     int ret = rgw_forward_request_to_master(this, *s->penv.site, s->user->get_id(),
@@ -752,18 +801,33 @@ void RGWOp_Key_Create::execute(optional_yield y)
       return;
     }
 
+    Formatter *formatter = flusher.get_formatter();
     RGWAccessKey key;
+    std::vector<RGWAccessKey> access_keys;
     try {
       key.decode_json(&jp);
     } catch (const JSONDecoder::err& e) {
-      cout << "failed to decode JSON input: " << e.what() << std::endl;
-      ret = -EINVAL;
+      ldpp_dout(this, 0) << "failed to decode JSON input: " << e.what() << dendl;
+      try {
+      //  JSONDecoder::decode_json("", access_keys, decode_access_keys, &jp);
+        decode_json_obj(access_keys, &jp);
+      } catch (const JSONDecoder::err& e) {
+        return;
+      }
+      dump_access_keys(formatter, access_keys);
       return;
     }
+
+
     op_state.op_master_key = std::move(key);
 
+    ldpp_dout(this, 10) << "decoded json" << dendl;
     // set_generate_key() is not set if keys have already been fetched from master zone
     gen_key = false;
+  }
+  
+  if (s->penv.site->is_meta_master()) {
+    op_state.dump_access_keys = true;
   }
 
 

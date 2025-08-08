@@ -55,10 +55,7 @@ static void dump_subusers_info(Formatter *f, RGWUserInfo &info)
     f->open_object_section("user");
     string s;
     info.user_id.to_str(s);
-    f->dump_format("id", "%s:%s", s.c_str(), u.name.c_str());
-    char buf[256];
-    rgw_perm_to_str(u.perm_mask, buf, sizeof(buf));
-    f->dump_string("permissions", buf);
+    u.dump(f, s);
     f->close_section();
   }
   f->close_section();
@@ -75,16 +72,11 @@ static void dump_access_keys_info(Formatter *f, RGWUserInfo &info)
     f->open_object_section("key");
     string s;
     info.user_id.to_str(s);
-    f->dump_format("user", "%s%s%s", s.c_str(), sep, subuser);
-    f->dump_string("access_key", k.id);
-    f->dump_string("secret_key", k.key);
-    f->dump_bool("active", k.active);
-    encode_json("create_date", k.create_date, f);
+    k.dump(f, s, false);
     f->close_section();
   }
   f->close_section();
 }
-
 
 static void dump_master_key(Formatter *f, RGWUserInfo &info)
 {
@@ -2392,6 +2384,7 @@ int RGWUserAdminOp_User::create(const DoutPrefixProvider *dpp,
     return ret;
   }
 
+
   ret = user.info(info, NULL);
   if (ret < 0)
     return ret;
@@ -2581,7 +2574,11 @@ int RGWUserAdminOp_Key::create(const DoutPrefixProvider *dpp,
       dump_swift_keys_info(formatter, info);
 
     else if (key_type == KEY_TYPE_S3) {
-      dump_master_key(formatter, info);
+      if (op_state.dump_access_keys) {
+        dump_access_keys_info(formatter, info);
+      } else {
+        dump_master_key(formatter, info);
+      }
     }
 
     flusher.flush();
