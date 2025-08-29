@@ -117,7 +117,7 @@ int RGWPeriodPuller::pull(const DoutPrefixProvider *dpp, const std::string& peri
     }
     // reflect period objects if this is the latest version
     if (svc.zone->get_realm().get_current_period() == period_id) {
-      r = rgw::reflect_period(dpp, y, cfgstore, period);
+      r = rgw::reflect_period(dpp, y, cfgstore, nullptr, period);
       if (r < 0) {
         return r;
       }

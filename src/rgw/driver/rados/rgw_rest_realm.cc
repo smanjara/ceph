@@ -234,7 +234,7 @@ void RGWOp_Period_Post::execute(optional_yield y)
     return;
   }
   // reflect the period into our local objects
-  op_ret = rgw::reflect_period(this, y, s->penv.cfgstore, period);
+  op_ret = rgw::reflect_period(this, y, s->penv.cfgstore, driver, period);
   if (op_ret < 0) {
     ldpp_dout(this, -1) << "failed to update local objects: "
         << cpp_strerror(-op_ret) << dendl;

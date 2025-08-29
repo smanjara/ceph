@@ -747,7 +747,9 @@ int realm_set_current_period(const DoutPrefixProvider* dpp, optional_yield y,
 /// Overwrite the local zonegroup and period config objects with the new
 /// configuration contained in the given period.
 int reflect_period(const DoutPrefixProvider* dpp, optional_yield y,
-                   sal::ConfigStore* cfgstore, const RGWPeriod& info);
+                   sal::ConfigStore* cfgstore,
+                   sal::Driver* driver,
+                   const RGWPeriod& info);
 
 /// Return the staging period id for the given realm.
 std::string get_staging_period_id(std::string_view realm_id);

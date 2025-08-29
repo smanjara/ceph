@@ -1105,17 +1105,36 @@ int realm_set_current_period(const DoutPrefixProvider* dpp, optional_yield y,
   }
 
   // reflect the zonegroup and period config
-  (void) reflect_period(dpp, y, cfgstore, period);
+  (void) reflect_period(dpp, y, cfgstore, nullptr, period);
   return 0;
 }
 
+static std::string zonegroup_name_oid(std::string_view zonegroup_id)
+{
+  return string_cat_reserve(zonegroup_names_oid_prefix, zonegroup_id);
+}
+
 int reflect_period(const DoutPrefixProvider* dpp, optional_yield y,
-                   sal::ConfigStore* cfgstore, const RGWPeriod& info)
+                   sal::ConfigStore* cfgstore,
+                   sal::Driver* driver,
+                   const RGWPeriod& info)
 {
   // overwrite the local period config and zonegroup objects
   constexpr bool exclusive = false;
+  int r = 0;
+  rgw::sal::ListResult<std::string> listing;
+  std::array<std::string, 1000> zonegroups; // list in pages of 1000
+  do {
+    r = cfgstore->list_zonegroup_names(dpp, null_yield, listing.next,
+                                          zonegroups, listing);
+    if (r < 0) {
+      std::cerr << "failed to list zonegroups: " << cpp_strerror(-r) << std::endl;
+      return -r;
+    }
+  } while (!listing.next.empty());
 
-  int r = cfgstore->write_period_config(dpp, y, exclusive, info.realm_id,
+
+  r = cfgstore->write_period_config(dpp, y, exclusive, info.realm_id,
                                         info.period_config);
   if (r < 0) {
     ldpp_dout(dpp, -1) << __func__ << " failed to store period config for realm id="
@@ -1139,6 +1158,43 @@ int reflect_period(const DoutPrefixProvider* dpp, optional_yield y,
             << zonegroup.name << " as the default" << dendl;
       }
     }
+  }
+
+  rgw::sal::RadosStore* rados_store = static_cast<rgw::sal::RadosStore*>(driver);
+  std::vector<std::string> zonegroups_to_be_deleted;
+  for (auto& iter: zonegroups) {
+    if (info.period_map.zonegroups.find(iter) == info.period_map.zonegroups.end()) {
+      zonegroups_to_be_deleted.push_back(iter);
+    }
+  }
+
+  for (auto& iter: zonegroups_to_be_deleted) {
+    std::string pool_name;
+    std::string default_pool = "rgw.root";
+    if (!dpp->get_cct()->_conf->rgw_zonegroup_root_pool.empty()) {
+      pool_name = dpp->get_cct()->_conf->rgw_zonegroup_root_pool;
+    } else {
+      pool_name = default_pool;
+    }
+
+    const rgw_pool& pool{std::string(pool_name)};
+    ldpp_dout(dpp, 0) << "pool name is " << pool_name << dendl;
+    librados::IoCtx ioctx;
+    r = rgw_init_ioctx(dpp, rados_store->getRados()->get_rados_handle(), pool, ioctx, true, false);
+    if (r < 0) {
+      return r;
+    }
+/*
+    librados::ObjectWriteOperation op;
+    op.remove();
+
+    const auto zg_oid = zonegroup_name_oid(iter);
+    r = rgw_rados_operate(dpp, ioctx, zg_oid, std::move(op), y);
+    if (r < 0) {
+      ldpp_dout(dpp, -1) << "ERROR: rgw_rados_operate(oid=" << zg_oid << ") returned ret=" << r << dendl;
+      return r;
+    }
+*/
   }
   return 0;
 }
@@ -1312,7 +1368,7 @@ int commit_period(const DoutPrefixProvider* dpp, optional_yield y,
     ldpp_dout(dpp, 0) << "failed to store period: " << cpp_strerror(r) << dendl;
     return r;
   }
-  r = reflect_period(dpp, y, cfgstore, info);
+  r = reflect_period(dpp, y, cfgstore, driver, info);
   if (r < 0) {
     ldpp_dout(dpp, 0) << "failed to update local objects: " << cpp_strerror(r) << dendl;
     return r;

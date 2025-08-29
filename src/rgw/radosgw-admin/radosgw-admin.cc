@@ -2084,7 +2084,7 @@ static int commit_period(rgw::sal::ConfigStore* cfgstore,
         << cpp_strerror(ret) << std::endl;
     return ret;
   }
-  ret = rgw::reflect_period(dpp(), null_yield, cfgstore, period);
+  ret = rgw::reflect_period(dpp(), null_yield, cfgstore, driver, period);
   if (ret < 0) {
     cerr << "Error updating local objects: " << cpp_strerror(ret) << std::endl;
     return ret;
