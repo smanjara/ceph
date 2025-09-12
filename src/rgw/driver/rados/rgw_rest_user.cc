@@ -1128,6 +1128,13 @@ void RGWOp_Quota_Set::execute(optional_yield y)
     }
   }
 
+  op_ret = rgw_forward_request_to_master(this, *s->penv.site, s->user->get_id(),
+                                        nullptr, nullptr, s->info, s->err, y);
+  if (op_ret < 0) {
+    ldpp_dout(this, 0) << "forward_request_to_master returned ret=" << op_ret << dendl;
+    return;
+  }
+
   string err;
   op_ret = user.modify(s, op_state, y, &err);
   if (op_ret < 0) {

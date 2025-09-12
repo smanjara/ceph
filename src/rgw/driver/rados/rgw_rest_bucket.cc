@@ -324,6 +324,13 @@ void RGWOp_Set_Bucket_Quota::execute(optional_yield y)
   op_state.set_bucket_name(bucket_name);
   op_state.set_quota(quota);
 
+  op_ret = rgw_forward_request_to_master(this, *s->penv.site, s->user->get_id(),
+                                         nullptr, nullptr, s->info, s->err, y);
+  if (op_ret < 0) {
+    ldpp_dout(this, 0) << "forward_request_to_master returned ret=" << op_ret << dendl;
+    return;
+  }
+
   op_ret = RGWBucketAdminOp::set_quota(driver, op_state, s, y);
 }
 
