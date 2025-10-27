@@ -405,14 +405,13 @@ int RGWSI_BILog_RADOS_InIndex::log_get_max_marker(const DoutPrefixProvider *dpp,
 }
 
 // FIFO interface
-
 void RGWSI_BILog_RADOS_FIFO::init(RGWSI_BucketIndex_RADOS *bi_rados_svc)
 {
   svc.bi = bi_rados_svc;
 }
 
 std::unique_ptr<RGWBILogFIFO>
-RGWSI_BILog_RADOS_FIFO::create_bilog_fifo(const DoutPrefixProvider *dpp,
+RGWSI_BILog_RADOS_FIFO::get_or_create_fifo(const DoutPrefixProvider *dpp,
                                           const RGWBucketInfo& bucket_info) const {
   librados::IoCtx index_pool;
   std::string bucket_oid;
@@ -475,7 +474,7 @@ RGWSI_BILog_RADOS_FIFO::log_trim(const DoutPrefixProvider *dpp,
   }
   ceph_assert(shard_id == 0 || shard_id == -1);
 
-  auto bilog_fifo = create_bilog_fifo(dpp, bucket_info);
+  auto bilog_fifo = get_or_create_fifo(dpp, bucket_info);
   co_return co_await bilog_fifo->trim(dpp, marker);
 }
 
@@ -493,7 +492,7 @@ RGWSI_BILog_RADOS_FIFO::log_list(const DoutPrefixProvider *dpp,
   }
   ceph_assert(shard_id == 0 || shard_id == -1);
 
-  auto bilog_fifo = create_bilog_fifo(dpp, bucket_info);
+  auto bilog_fifo = get_or_create_fifo(dpp, bucket_info);
   co_return co_await bilog_fifo->list(dpp, marker, max_entries);
 }
 
@@ -507,7 +506,7 @@ RGWSI_BILog_RADOS_FIFO::log_get_max_marker(const DoutPrefixProvider *dpp,
   }
   ceph_assert(shard_id == 0 || shard_id == -1);
   
-  auto bilog_fifo = create_bilog_fifo(dpp, bucket_info);
+  auto bilog_fifo = get_or_create_fifo(dpp, bucket_info);
   co_return co_await bilog_fifo->get_max_marker(dpp);
 }
 
@@ -547,7 +546,7 @@ int RGWSI_BILog_RADOS_FIFO::log_trim(const DoutPrefixProvider *dpp, optional_yie
   ceph_assert(shard_id == 0 || shard_id == -1);
 
   try {
-    auto bilog_fifo = create_bilog_fifo(dpp, bucket_info);
+    auto bilog_fifo = get_or_create_fifo(dpp, bucket_info);
     
     if (y) {
       bilog_fifo->trim(dpp, marker, y.get_yield_context());
@@ -583,7 +582,7 @@ int RGWSI_BILog_RADOS_FIFO::log_list(const DoutPrefixProvider *dpp, optional_yie
   ceph_assert(shard_id == 0 || shard_id == -1);
 
   try {
-    auto bilog_fifo = create_bilog_fifo(dpp, bucket_info);
+    auto bilog_fifo = get_or_create_fifo(dpp, bucket_info);
     
     std::vector<rgw_bi_log_entry> entries;
     std::string out_marker;
@@ -633,7 +632,7 @@ int RGWSI_BILog_RADOS_FIFO::log_get_max_marker(const DoutPrefixProvider *dpp,
   ceph_assert(shard_id == 0 || shard_id == -1);
   
   try {
-    auto bilog_fifo = create_bilog_fifo(dpp, bucket_info);
+    auto bilog_fifo = get_or_create_fifo(dpp, bucket_info);
     
     std::string marker;
     if (y) {

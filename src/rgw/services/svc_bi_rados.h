@@ -82,7 +82,7 @@ public:
 
   void init(RGWSI_Zone *zone_svc,
             librados::Rados* rados_,
-            RGWSI_BILog_RADOS_InIndex *bilog_svc,
+            RGWSI_BILog_RADOS_BackendDispatcher *bilog_svc,
             RGWDataChangesLog *datalog_rados_svc);
 
   static int shards_max() {
