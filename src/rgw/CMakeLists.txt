@@ -201,6 +201,7 @@ list(APPEND librgw_rados_srcs
   driver/rados/groups.cc
   driver/rados/rgw_bucket.cc
   driver/rados/rgw_bl_rados.cc
+  driver/rados/rgw_bilog.cc
   driver/rados/rgw_cr_rados.cc
   driver/rados/rgw_cr_tools.cc
   driver/rados/rgw_d3n_datacache.cc
