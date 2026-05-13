@@ -352,6 +352,16 @@ target_include_directories(unittest_rgw_object_ctx
 )
 target_link_libraries(unittest_rgw_object_ctx ${rgw_libs})
 
+# ceph_test_rgw_shard_io_rados: integration test for the aio_dispatch/slot.clear()
+add_executable(ceph_test_rgw_shard_io_rados test_rgw_shard_io_rados.cc)
+target_include_directories(ceph_test_rgw_shard_io_rados
+  SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/src/rgw"
+  SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/src/rgw/driver/rados")
+target_link_libraries(ceph_test_rgw_shard_io_rados
+  ${rgw_libs}
+  ${UNITTEST_LIBS})
+install(TARGETS ceph_test_rgw_shard_io_rados DESTINATION ${CMAKE_INSTALL_BINDIR})
+
 add_ceph_test(test-ceph-diff-sorted.sh
   ${CMAKE_CURRENT_SOURCE_DIR}/test-ceph-diff-sorted.sh)
 
