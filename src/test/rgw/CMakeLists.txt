@@ -537,6 +537,11 @@ add_executable(unittest_rgw_rest_conn test_rgw_rest_conn.cc)
 add_ceph_unittest(unittest_rgw_rest_conn)
 target_link_libraries(unittest_rgw_rest_conn
   rgw_common ${rgw_libs} ${UNITTEST_LIBS})
+# unittest_yield_completion
+add_executable(unittest_yield_completion test_yield_completion.cc)
+add_ceph_unittest(unittest_yield_completion)
+target_link_libraries(unittest_yield_completion
+  rgw_common ${rgw_libs} ${UNITTEST_LIBS})
 
 if(WITH_RADOSGW_FDB)
  list(APPEND rgw_incs "${CMAKE_BINARY_DIR}/_deps/zpp_bits-src/")
