@@ -8,10 +8,8 @@
 
 #include <boost/system/system_error.hpp>
 
-#include "common/async/blocked_completion.h"
 #include "common/dout.h"
 #include "common/errno.h"
-#include "rgw_asio_thread.h"
 #include "services/svc_bi_rados.h"
 
 #define dout_subsys ceph_subsys_rgw
@@ -43,7 +41,7 @@ RGWBILogFIFO::push(const DoutPrefixProvider* dpp,
 void RGWBILogFIFO::push(const DoutPrefixProvider* dpp,
                    int shard_id,
                    ceph::buffer::list entry,
-                   asio::yield_context y)
+                   optional_yield y)
 {
   fifos[shard_id].push(dpp, std::move(entry), y);
 }
@@ -57,16 +55,6 @@ RGWBILogFIFO::list(const DoutPrefixProvider* dpp,
   co_return co_await fifos[shard_id].list(dpp, std::move(marker), entries);
 }
 
-std::tuple<std::span<fifo::entry>, std::optional<std::string>>
-RGWBILogFIFO::list(const DoutPrefixProvider* dpp,
-                   int shard_id,
-                   std::string marker,
-                   std::span<fifo::entry> entries,
-                   asio::yield_context y)
-{
-  return fifos[shard_id].list(dpp, std::move(marker), entries, y);
-}
-
 asio::awaitable<void>
 RGWBILogFIFO::trim(const DoutPrefixProvider* dpp,
                    int shard_id,
@@ -74,15 +62,6 @@ RGWBILogFIFO::trim(const DoutPrefixProvider* dpp,
                    bool exclusive)
 {
   co_return co_await fifos[shard_id].trim(dpp, std::move(marker), exclusive);
-}
-
-void RGWBILogFIFO::trim(const DoutPrefixProvider* dpp,
-                   int shard_id,
-                   std::string marker,
-                   bool exclusive,
-                   asio::yield_context y)
-{
-  fifos[shard_id].trim(dpp, std::move(marker), exclusive, y);
 }
 
 std::string_view RGWBILogFIFO::max_marker()
@@ -173,7 +152,7 @@ void RGWBILogUpdateBatch::add_maybe_flush(RGWModifyOp op,
   stage(shard_of(list_state.key), std::move(entry));
 }
 
-int RGWBILogUpdateBatch::do_flush(asio::yield_context y)
+int RGWBILogUpdateBatch::do_flush(optional_yield y)
 {
   if (!fifo_) {
     pending.clear();
@@ -197,28 +176,10 @@ int RGWBILogUpdateBatch::do_flush(asio::yield_context y)
   return 0;
 }
 
-int RGWBILogUpdateBatch::do_flush()
-{
-  if (!fifo_) {
-    pending.clear();
-    return 0;
-  }
-  maybe_warn_about_blocking(dpp);
-  int ret = 0;
-  asio::spawn(rados_.get_executor(),
-              [this, &ret](asio::yield_context y) { ret = do_flush(y); },
-              ceph::async::use_blocked);
-  return ret;
-}
-
 int RGWBILogUpdateBatch::flush(optional_yield y)
 {
   if (!pending.empty()) {
-    if (y) {
-      return do_flush(y.get_yield_context());
-    } else {
-      return do_flush();
-    }
+    return do_flush(y);
   }
   return 0;
 }
@@ -250,18 +211,10 @@ asio::awaitable<int> RGWBILogUpdateBatch::co_flush()
   co_return 0;
 }
 
-int RGWBILogUpdateBatch::flush()
-{
-  if (!pending.empty()) {
-    return do_flush();
-  }
-  return 0;
-}
-
 RGWBILogUpdateBatch::~RGWBILogUpdateBatch()
 {
   if (!pending.empty()) {
-    int r = do_flush();
+    int r = do_flush(null_yield);
     if (r < 0) {
       ldpp_dout(dpp, 0) << "ERROR: " << __func__
                         << ": failed to flush pending bilog entries: "
