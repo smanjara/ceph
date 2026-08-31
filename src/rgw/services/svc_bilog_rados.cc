@@ -463,17 +463,7 @@ int RGWSI_BILog_RADOS_FIFO::log_start(
     const std::string fifo_oid = bilog_fifo_oid(bucket_id, log_gen, sid);
     LazyFIFO lf(*rados_neo, fifo_oid, neo_loc);
     try {
-      if (y) {
-        lf.push(dpp, bl, y.get_yield_context());
-      } else {
-        maybe_warn_about_blocking(dpp);
-        asio::spawn(
-            rados_neo->get_executor(),
-            [&](asio::yield_context inner_y) {
-              lf.push(dpp, bl, inner_y);
-            },
-            ceph::async::use_blocked);
-      }
+      lf.push(dpp, bl, y);
     } catch (const boost::system::system_error& e) {
       ldpp_dout(dpp, 1) << __func__ << ": FIFO push RESYNC on " << fifo_oid
                         << " shard=" << sid << " failed: " << e.what() << dendl;
@@ -520,17 +510,7 @@ int RGWSI_BILog_RADOS_FIFO::log_stop(
     const std::string fifo_oid = bilog_fifo_oid(bucket_id, log_gen, sid);
     LazyFIFO lf(*rados_neo, fifo_oid, neo_loc);
     try {
-      if (y) {
-        lf.push(dpp, bl, y.get_yield_context());
-      } else {
-        maybe_warn_about_blocking(dpp);
-        asio::spawn(
-            rados_neo->get_executor(),
-            [&](asio::yield_context inner_y) {
-              lf.push(dpp, bl, inner_y);
-            },
-            ceph::async::use_blocked);
-      }
+      lf.push(dpp, bl, y);
     } catch (const boost::system::system_error& e) {
       ldpp_dout(dpp, 1) << __func__ << ": FIFO push SYNCSTOP on " << fifo_oid
                         << " shard=" << sid << " failed: " << e.what() << dendl;
@@ -596,17 +576,7 @@ int RGWSI_BILog_RADOS_FIFO::log_trim(
     const std::string fifo_oid = bilog_fifo_oid(bucket_id, log_gen, sid);
     LazyFIFO lf(*rados_neo, fifo_oid, neo_loc);
     try {
-      if (y) {
-        lf.trim(dpp, shard_end, false /* inclusive */, y.get_yield_context());
-      } else {
-        maybe_warn_about_blocking(dpp);
-        asio::spawn(
-            rados_neo->get_executor(),
-            [&](asio::yield_context inner_y) {
-              lf.trim(dpp, shard_end, false /* inclusive */, inner_y);
-            },
-            ceph::async::use_blocked);
-      }
+      lf.trim(dpp, shard_end, false /* inclusive */, y);
     } catch (const boost::system::system_error& e) {
       // log and continue trimming remaining shards; trim is best-effort and
       // the trim cycle will retry any skipped shards on its next iteration.
@@ -753,20 +723,8 @@ int RGWSI_BILog_RADOS_FIFO::log_list(
     std::span<fifo::entry> got;
 
     try {
-      if (y) {
-        std::tie(got, next_marker) =
-            lf.list(dpp, shard_marker, std::span{entries_buf},
-                    y.get_yield_context());
-      } else {
-        maybe_warn_about_blocking(dpp);
-        asio::spawn(
-            rados_neo->get_executor(),
-            [&](asio::yield_context inner_y) {
-              std::tie(got, next_marker) =
-                  lf.list(dpp, shard_marker, std::span{entries_buf}, inner_y);
-            },
-            ceph::async::use_blocked);
-      }
+      std::tie(got, next_marker) =
+          lf.list(dpp, shard_marker, std::span{entries_buf}, y);
     } catch (const boost::system::system_error& e) {
       ldpp_dout(dpp, 5) << __func__ << ": FIFO list on " << fifo_oid
                         << " failed: " << e.what() << dendl;
@@ -861,22 +819,7 @@ int RGWSI_BILog_RADOS_FIFO::get_log_status(
     const std::string& fifo_oid = oid;  // oid is already bilog_fifo_oid(bucket_id, log_gen, sid)
     LazyFIFO lf(*rados_neo, fifo_oid, neo_loc);
     try {
-      auto get_info = [&]() -> std::tuple<std::string, ceph::real_time> {
-        if (y) {
-          return lf.last_entry_info(dpp, y.get_yield_context());
-        } else {
-          maybe_warn_about_blocking(dpp);
-          std::tuple<std::string, ceph::real_time> result;
-          asio::spawn(
-              rados_neo->get_executor(),
-              [&](asio::yield_context inner_y) {
-                result = lf.last_entry_info(dpp, inner_y);
-              },
-              ceph::async::use_blocked);
-          return result;
-        }
-      };
-      (*markers)[sid] = std::get<0>(get_info());
+      (*markers)[sid] = std::get<0>(lf.last_entry_info(dpp, y));
     } catch (const boost::system::system_error& e) {
       ldpp_dout(dpp, 5) << __func__ << ": FIFO last_entry_info on "
                         << fifo_oid << " failed: " << e.what() << dendl;

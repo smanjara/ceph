@@ -65,11 +65,11 @@ public:
                              int shard_id,
                              ceph::buffer::list entry);
 
-  // append a single bilog entry to shard_id (yield_context).
+  // append a single bilog entry to shard_id (optional_yield — yields or blocks).
   void push(const DoutPrefixProvider* dpp,
             int shard_id,
             ceph::buffer::list entry,
-            asio::yield_context y);
+            optional_yield y);
 
   // list up to entries.size() entries from shard_id starting after marker.
   asio::awaitable<std::tuple<std::span<fifo::entry>, std::optional<std::string>>>
@@ -78,25 +78,12 @@ public:
        std::string marker,
        std::span<fifo::entry> entries);
 
-  std::tuple<std::span<fifo::entry>, std::optional<std::string>>
-  list(const DoutPrefixProvider* dpp,
-       int shard_id,
-       std::string marker,
-       std::span<fifo::entry> entries,
-       asio::yield_context y);
-
   // trim shard_id up to and including marker.
   // exclusive=true leaves the entry at marker; exclusive=false removes it.
   asio::awaitable<void> trim(const DoutPrefixProvider* dpp,
                              int shard_id,
                              std::string marker,
                              bool exclusive);
-
-  void trim(const DoutPrefixProvider* dpp,
-            int shard_id,
-            std::string marker,
-            bool exclusive,
-            asio::yield_context y);
 
   static std::string_view max_marker();
 };
@@ -119,8 +106,7 @@ class RGWBILogUpdateBatch {
   // append an entry to the pending list.
   void stage(int shard, rgw_bi_log_entry entry);
   // encode and push all pending entries to their respective FIFO shards.
-  int do_flush(asio::yield_context y);
-  int do_flush();
+  int do_flush(optional_yield y);
 
 public:
   // fifo may be null (error-path batch — silently drops all entries).
@@ -147,7 +133,6 @@ public:
                        rgw_zone_set zones_trace);
 
   int flush(optional_yield y);
-  int flush();
   // awaitable variant — use from coroutine contexts (avoids use_blocked).
   asio::awaitable<int> co_flush();
 

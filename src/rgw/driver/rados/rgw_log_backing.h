@@ -28,6 +28,8 @@
 
 #include "neorados/cls/fifo.h"
 
+#include "yield_completion.h"
+
 namespace container = boost::container;
 namespace sys = boost::system;
 namespace asio = boost::asio;
@@ -281,23 +283,18 @@ class LazyFIFO {
     co_return;
   }
 
-  void lazy_init(const DoutPrefixProvider *dpp, asio::yield_context y) {
+  void lazy_init(const DoutPrefixProvider *dpp, optional_yield y) {
     std::unique_lock l(m);
     if (fifo) {
       return;
-    } else {
-      l.unlock();
-      // FIFO supports multiple clients by design, so it's safe to
-      // race to create them.
-      auto fifo_tmp = fifo::FIFO::create(dpp, r, oid, loc, y);
-      l.lock();
-      if (!fifo) {
-	// We won the race
-	fifo = std::move(fifo_tmp);
-      }
     }
     l.unlock();
-    return;
+    auto fifo_tmp = fifo::FIFO::create(dpp, r, oid, loc, rgw::oyc(dpp, y));
+    l.lock();
+    if (!fifo) {
+      fifo = std::move(fifo_tmp);
+    }
+    l.unlock();
   }
 
 public:
@@ -318,20 +315,20 @@ public:
     co_return co_await fifo->push(dpp, std::move(entry), asio::use_awaitable);
   }
 
-  // push a single entry (yield_context)
+  // push a single entry (optional_yield — yields when y is non-empty, blocks otherwise)
   void push(const DoutPrefixProvider *dpp,
 	    ceph::buffer::list entry,
-	    asio::yield_context y) {
+	    optional_yield y) {
     lazy_init(dpp, y);
-    fifo->push(dpp, std::move(entry), y);
+    fifo->push(dpp, std::move(entry), rgw::oyc(dpp, y));
   }
 
-  // push a batch of entries (yield_context)
+  // push a batch of entries (optional_yield)
   void push(const DoutPrefixProvider *dpp,
 	    std::deque<ceph::buffer::list> entries,
-	    asio::yield_context y) {
+	    optional_yield y) {
     lazy_init(dpp, y);
-    fifo->push(dpp, std::move(entries), y);
+    fifo->push(dpp, std::move(entries), rgw::oyc(dpp, y));
   }
 
   // list entries (awaitable)
@@ -346,12 +343,12 @@ public:
                               : std::optional<std::string>{std::move(next)}};
   }
 
-  // list entries (yield_context)
+  // list entries (optional_yield)
   std::tuple<std::span<fifo::entry>, std::optional<std::string>>
   list(const DoutPrefixProvider *dpp, std::string markstr,
-       std::span<fifo::entry> entries, asio::yield_context y) {
+       std::span<fifo::entry> entries, optional_yield y) {
     lazy_init(dpp, y);
-    auto [cur, next] = fifo->list(dpp, markstr, entries, y);
+    auto [cur, next] = fifo->list(dpp, markstr, entries, rgw::oyc(dpp, y));
     return {cur, next.empty()
                  ? std::nullopt
                  : std::optional<std::string>{std::move(next)}};
@@ -364,12 +361,12 @@ public:
     co_return co_await fifo->trim(dpp, markstr, exclusive, asio::use_awaitable);
   }
 
-  // trim up to markstr (yield_context)
+  // trim up to markstr (optional_yield)
   void trim(const DoutPrefixProvider *dpp,
 	    std::string markstr, bool exclusive,
-	    asio::yield_context y) {
+	    optional_yield y) {
     lazy_init(dpp, y);
-    fifo->trim(dpp, markstr, exclusive, y);
+    fifo->trim(dpp, markstr, exclusive, rgw::oyc(dpp, y));
   }
 
   asio::awaitable<std::tuple<std::string, ceph::real_time>>
@@ -379,8 +376,8 @@ public:
   }
 
   std::tuple<std::string, ceph::real_time>
-  last_entry_info(const DoutPrefixProvider *dpp, asio::yield_context y) {
+  last_entry_info(const DoutPrefixProvider *dpp, optional_yield y) {
     lazy_init(dpp, y);
-    return fifo->last_entry_info(dpp, y);
+    return fifo->last_entry_info(dpp, rgw::oyc(dpp, y));
   }
 };
