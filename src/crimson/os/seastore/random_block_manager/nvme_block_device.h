@@ -1,5 +1,5 @@
-//-*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+//-*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -43,13 +43,26 @@ struct nvme_identify_command_t {
   static const uint8_t CNS_CONTROLLER = 0x01;
 };
 
+struct nvme_format_nvm_command_t {
+  uint32_t common_dw[10];
+
+  uint8_t lbaf : 4;
+  uint8_t mset : 1;
+  uint8_t pi : 3;
+  uint8_t pil : 1;
+  
+  static const uint8_t PROTECT_INFORMATION_TYPE_2 = 2;
+};
+
 struct nvme_admin_command_t {
   union {
     nvme_passthru_cmd common;
     nvme_identify_command_t identify;
+    nvme_format_nvm_command_t format;
   };
 
   static const uint8_t OPCODE_IDENTIFY = 0x06;
+  static const uint8_t OPCODE_FORMAT_NVM = 0x80;
 };
 
 // Optional Admin Command Support (OACS)
@@ -111,22 +124,32 @@ struct lbaf_t {
   uint32_t reserved : 6;
 };
 
+struct flbas_t {
+  uint8_t lba_index : 4;
+  uint8_t ms_transferred :1;
+  uint8_t reserved : 3;
+};
+
 struct nvme_identify_namespace_data_t {
   union {
     struct {
       uint8_t unused[24];   // [23:0]
       nsfeat_t nsfeat;      // [24]
-      uint8_t unused2[3];   // [27:25]
+      uint8_t nlbaf;      // [25]
+      flbas_t flbas;      // [26]
+      uint8_t unused2;   // [27]
       dpc_t dpc;            // [28]
       dps_t dps;            // [29]
       uint8_t unused3[34];  // [63:30]
       uint16_t npwg;        // [65:64]
       uint16_t npwa;        // [67:66]
       uint8_t unused4[60];  // [127:68]
-      lbaf_t lbaf0;         // [131:128]
+      lbaf_t lbaf[64];         // [383:128]
     };
     uint8_t raw[4096];
   };
+  // meta size value to use device-level checksum
+  static const uint8_t METASIZE_FOR_CHECKSUM_OFFLOAD = 8; 
 };
 
 struct nvme_rw_command_t {
@@ -147,6 +170,11 @@ struct nvme_rw_command_t {
   uint32_t dspec : 16;
 
   static const uint32_t DTYPE_STREAM = 1;
+
+  static const uint8_t PROTECT_INFORMATION_ACTION_ENABLE = 1;
+  static const uint8_t PROTECT_INFORMATION_CHECK_GUARD = 4;
+  static const uint8_t PROTECT_INFORMATION_CHECK_APPLICATION_TAG = 2;
+  static const uint8_t PROTECT_INFORMATION_CHECK_LOGICAL_REFERENCE_TAG = 1;
 };
 
 struct nvme_io_command_t {
@@ -155,7 +183,7 @@ struct nvme_io_command_t {
     nvme_rw_command_t rw;
   };
   static const uint8_t OPCODE_WRITE = 0x01;
-  static const uint8_t OPCODE_READ = 0x01;
+  static const uint8_t OPCODE_READ = 0x02;
 };
 
 /*
@@ -184,7 +212,9 @@ public:
    * atomic_write_unit does not require fsync().
    */
 
-  NVMeBlockDevice(std::string device_path) : device_path(device_path) {}
+  NVMeBlockDevice(std::string device_path, store_index_t store_index = 0)
+    : RBMDevice(store_index),
+      device_path(device_path) {}
   ~NVMeBlockDevice() = default;
 
   open_ertr::future<> open(
@@ -193,13 +223,21 @@ public:
 
   write_ertr::future<> write(
     uint64_t offset,
-    bufferptr &bptr,
+    bufferptr bptr,
     uint16_t stream = 0) override;
 
   using RBMDevice::read;
   read_ertr::future<> read(
     uint64_t offset,
     bufferptr &bptr) final;
+  read_ertr::future<> _readv(
+    uint64_t offset,
+    std::vector<bufferptr> ptrs) final;
+
+  read_ertr::future<> nvme_read(
+    uint64_t offset, size_t len, void *buffer_ptr);
+  read_ertr::future<> nvme_readv(
+    uint64_t offset, std::vector<bufferptr> ptrs);
 
   close_ertr::future<> close() override;
 
@@ -207,24 +245,55 @@ public:
     uint64_t offset,
     uint64_t len) override;
 
-  mount_ret mount() final {
-    return mount_ertr::now();
-  }
+  mount_ret mount() final;
+
+  nvme_command_ertr::future<> initialize_nvme_features() final;
+
+  mkfs_ret mkfs(device_config_t config) final;
 
   write_ertr::future<> writev(
     uint64_t offset,
     ceph::bufferlist bl,
     uint16_t stream = 0) final;
 
+  write_ertr::future<> nvme_write(
+    uint64_t offset, size_t len, void *buffer_ptr);
+
   stat_device_ret stat_device() final {
-    return seastar::file_stat(device_path, seastar::follow_symlink::yes
-    ).then([](auto stat) {
-      return stat_device_ret(
-	  read_ertr::ready_future_marker{},
-	  stat
-      );
+    auto stat = co_await seastar::file_stat(
+      device_path, seastar::follow_symlink::yes
+    ).handle_exception([](auto e) -> stat_device_ret {
+      return crimson::ct_error::input_output_error::make();
     });
+
+    auto file = co_await seastar::open_file_dma(device_path,
+	seastar::open_flags::rw | seastar::open_flags::dsync);
+
+    auto size = co_await file.size();
+    stat.size = size;
+    auto id_ns_data = co_await identify_namespace(file);
+    if (id_ns_data) {
+      // LBA format provides LBA size which is power of 2. LBA is the
+      // minimum size of read and write.
+      stat.block_size = (1 << (*id_ns_data).lbaf[0].lbads);
+    } 
+    if (stat.block_size < RBM_SUPERBLOCK_SIZE) {
+      stat.block_size = RBM_SUPERBLOCK_SIZE;
+    } 
+
+    co_await file.close();
+    co_return std::move(stat);
   }
+
+  std::string get_device_path() const final {
+    return device_path;
+  }
+
+  seastar::future<> start(uint32_t shard_nums) final;
+
+  seastar::future<> stop() final;
+
+  Device& get_sharded_device(store_index_t store_index = 0) final;
 
   uint64_t get_preffered_write_granularity() const { return write_granularity; }
   uint64_t get_preffered_write_alignment() const { return write_alignment; }
@@ -237,7 +306,7 @@ public:
    * protection is enabled, checksum is calculated on every write and used to
    * verify data on every read.
    */
-   bool is_data_protection_enabled() const { return data_protection_enabled; }
+  nvme_command_ertr::future<> try_enable_end_to_end_protection();
 
   /*
    * Data Health
@@ -267,12 +336,11 @@ public:
    * Caller can construct and execute its own nvme command
    */
   nvme_command_ertr::future<int> pass_admin(
-    nvme_admin_command_t& admin_cmd);
+    nvme_admin_command_t& admin_cmd, seastar::file f);
   nvme_command_ertr::future<int> pass_through_io(
     nvme_io_command_t& io_cmd);
 
   bool support_multistream = false;
-  uint8_t data_protection_type = 0;
 
   /*
    * Predictable Latency
@@ -284,9 +352,11 @@ public:
 private:
   // identify_controller/namespace are used to get SSD internal information such
   // as supported features, NPWG and NPWA
-  nvme_command_ertr::future<nvme_identify_controller_data_t> identify_controller();
-  nvme_command_ertr::future<nvme_identify_namespace_data_t> identify_namespace();
-  nvme_command_ertr::future<int> get_nsid();
+  seastar::future<std::optional<nvme_identify_controller_data_t>>
+    identify_controller(seastar::file f);
+  seastar::future<std::optional<nvme_identify_namespace_data_t>>
+    identify_namespace(seastar::file f);
+  nvme_command_ertr::future<int> get_nsid(seastar::file f);
   open_ertr::future<> open_for_io(
     const std::string& in_path,
     seastar::open_flags mode);
@@ -301,8 +371,10 @@ private:
   uint64_t write_alignment = 4096;
   uint32_t atomic_write_unit = 4096;
 
-  bool data_protection_enabled = false;
+  int namespace_id; // TODO: multi namespaces
   std::string device_path;
+
+  seastar::sharded<MultiShardDevices<NVMeBlockDevice>> shard_devices;
 };
 
 }

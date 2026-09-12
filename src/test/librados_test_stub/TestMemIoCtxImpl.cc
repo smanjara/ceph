@@ -1,11 +1,13 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "test/librados_test_stub/TestMemIoCtxImpl.h"
 #include "test/librados_test_stub/TestMemRadosClient.h"
 #include "common/Clock.h"
 #include "include/err.h"
+#include "include/types.h" // for operator<<(std::vector)
 #include <functional>
+#include <shared_mutex> // for std::shared_lock
 #include <boost/algorithm/string/predicate.hpp>
 #include <errno.h>
 #include <include/compat.h>
@@ -479,7 +481,7 @@ int TestMemIoCtxImpl::selfmanaged_snap_rollback(const std::string& oid,
   for (TestMemCluster::FileSnapshots::reverse_iterator it = snaps.rbegin();
       it != snaps.rend(); ++it) {
     TestMemCluster::SharedFile file = *it;
-    if (file->snap_id < get_snap_read()) {
+    if (file->snap_id < snapid) {
       if (versions == 0) {
         // already at the snapshot version
         return 0;

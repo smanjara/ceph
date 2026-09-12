@@ -8,7 +8,7 @@ import json
 import logging
 import os
 import yaml
-from io import BytesIO
+from io import BytesIO, StringIO
 
 from tarfile import ReadError
 from tasks.ceph_manager import CephManager
@@ -223,22 +223,26 @@ def ceph_log(ctx, config):
             """
             args = [
                 'sudo',
-                'egrep', pattern,
+                'grep -E', pattern,
                 f'{log_dir}/ceph.log',
             ]
             if excludes:
                 for exclude in excludes:
-                    args.extend([run.Raw('|'), 'egrep', '-v', exclude])
+                    args.extend([run.Raw('|'), 'grep -E', '-v', exclude])
             args.extend([
                 run.Raw('|'), 'head', '-n', '1',
             ])
             r = ctx.rook[cluster_name].remote.run(
                 stdout=BytesIO(),
                 args=args,
+                stderr=StringIO(),
             )
             stdout = r.stdout.getvalue().decode()
             if stdout:
                 return stdout
+            stderr = r.stderr.getvalue()
+            if stderr:
+                return stderr
             return None
 
         if first_in_ceph_log('\[ERR\]|\[WRN\]|\[SEC\]',
@@ -263,6 +267,7 @@ def ceph_log(ctx, config):
             run.wait(
                 ctx.cluster.run(
                     args=[
+                        'time',
                         'sudo',
                         'find',
                         log_dir,
@@ -272,10 +277,15 @@ def ceph_log(ctx, config):
                         run.Raw('|'),
                         'sudo',
                         'xargs',
+                        '--max-args=1',
+                        '--max-procs=0',
+                        '--verbose',
                         '-0',
                         '--no-run-if-empty',
                         '--',
                         'gzip',
+                        '-5',
+                        '--verbose',
                         '--',
                     ],
                     wait=False,
@@ -542,6 +552,8 @@ def ceph_config_keyring(ctx, config):
 def ceph_clients(ctx, config):
     cluster_name = config['cluster']
 
+    client_key_type = config.get('client_key_type', None)
+
     log.info('Setting up client nodes...')
     clients = ctx.cluster.only(teuthology.is_type('client', cluster_name))
     for remote, roles_for_host in clients.remotes.items():
@@ -550,15 +562,19 @@ def ceph_clients(ctx, config):
             name = teuthology.ceph_role(role)
             client_keyring = '/etc/ceph/{0}.{1}.keyring'.format(cluster_name,
                                                                 name)
+
+            args = ['ceph', 'auth', 'get-or-create']
+            if client_key_type is not None:
+                args.append(f'--key-type={client_key_type}')
+            args.extend([
+                name,
+                'mon', 'allow *',
+                'osd', 'allow *',
+                'mds', 'allow *',
+                'mgr', 'allow *',
+            ])
             r = _shell(ctx, config,
-                args=[
-                    'ceph', 'auth',
-                    'get-or-create', name,
-                    'mon', 'allow *',
-                    'osd', 'allow *',
-                    'mds', 'allow *',
-                    'mgr', 'allow *',
-                ],
+                args=args,
                 stdout=BytesIO(),
             )
             keyring = r.stdout.getvalue()
@@ -616,7 +632,7 @@ def task(ctx, config):
         sha1 = config.get('sha1')
         flavor = config.get('flavor', 'default')
         if sha1:
-            if flavor == "crimson":
+            if flavor == "crimson-debug" or flavor == "crimson-release":
                 ctx.rook[cluster_name].image = container_image_name + ':' + sha1 + '-' + flavor
             else:
                 ctx.rook[cluster_name].image = container_image_name + ':' + sha1

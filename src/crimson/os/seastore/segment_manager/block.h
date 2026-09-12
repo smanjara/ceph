@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -92,12 +92,12 @@ class BlockSegment final : public Segment {
 public:
   BlockSegment(BlockSegmentManager &manager, segment_id_t id);
 
-  segment_id_t get_segment_id() const final { return id; }
-  segment_off_t get_write_capacity() const final;
-  segment_off_t get_write_ptr() const final { return write_pointer; }
-  close_ertr::future<> close() final;
-  write_ertr::future<> write(segment_off_t offset, ceph::bufferlist bl) final;
-  write_ertr::future<> advance_wp(segment_off_t offset) final;
+  segment_id_t get_segment_id() const override { return id; }
+  segment_off_t get_write_capacity() const override;
+  segment_off_t get_write_ptr() const override { return write_pointer; }
+  close_ertr::future<> close() override;
+  write_ertr::future<> write(segment_off_t offset, ceph::bufferlist bl) override;
+  write_ertr::future<> advance_wp(segment_off_t offset) override;
 
   ~BlockSegment() {}
 };
@@ -110,30 +110,52 @@ public:
  * state analagous to that of the segments of a zns device.
  */
 class BlockSegmentManager final : public SegmentManager {
+// interfaces used by Device
 public:
-  mount_ret mount() final;
+  seastar::future<> start(uint32_t shard_nums) override;
 
-  mkfs_ret mkfs(device_config_t) final;
+  seastar::future<> stop() override;
 
+  Device& get_sharded_device(store_index_t store_index = 0) override;
+
+  mount_ret mount() override;
+
+  mkfs_ret mkfs(device_config_t) override;
+// interfaces used by each shard device
+public:
   close_ertr::future<> close();
 
   BlockSegmentManager(
-    const std::string &path)
-  : device_path(path) {}
+    const std::string &path,
+    device_type_t dtype,
+    store_index_t store_index = 0)
+  : device_path(path),
+    store_index(store_index) {
+    ceph_assert(get_device_type() == device_type_t::NONE);
+    superblock.config.spec.dtype = dtype;
+  }
 
   ~BlockSegmentManager();
 
-  open_ertr::future<SegmentRef> open(segment_id_t id) final;
+  open_ertr::future<SegmentRef> open(segment_id_t id) override;
 
-  release_ertr::future<> release(segment_id_t id) final;
+  release_ertr::future<> release(segment_id_t id) override;
 
   read_ertr::future<> read(
     paddr_t addr,
     size_t len,
-    ceph::bufferptr &out) final;
+    ceph::bufferptr &out) override;
 
-  size_t get_available_size() const final {
-    return superblock.size;
+  read_ertr::future<> readv(
+    paddr_t addr, std::vector<bufferptr> vecs) override;
+
+  read_ertr::future<uint32_t> get_shard_nums() override;
+
+  device_type_t get_device_type() const override {
+    return superblock.config.spec.dtype;
+  }
+  size_t get_available_size() const override {
+    return shard_info.size;
   }
   extent_len_t get_block_size() const {
     return superblock.block_size;
@@ -142,11 +164,11 @@ public:
     return superblock.segment_size;
   }
 
-  device_id_t get_device_id() const final {
+  device_id_t get_device_id() const override {
     assert(device_id <= DEVICE_ID_MAX_VALID);
     return device_id;
   }
-  secondary_device_set_t& get_secondary_devices() final {
+  secondary_device_set_t& get_secondary_devices() override {
     return superblock.config.secondary_devices;
   }
   // public so tests can bypass segment interface when simpler
@@ -155,7 +177,7 @@ public:
     ceph::bufferlist bl,
     bool ignore_check=false);
 
-  magic_t get_magic() const final {
+  magic_t get_magic() const override {
     return superblock.config.spec.magic;
   }
 
@@ -193,12 +215,13 @@ private:
     }
   } stats;
 
-  void register_metrics();
+  void register_metrics(store_index_t store_index);
   seastar::metrics::metric_group metrics;
 
   std::string device_path;
   std::unique_ptr<SegmentStateTracker> tracker;
-  block_sm_superblock_t superblock;
+  device_shard_info_t shard_info;
+  device_superblock_t superblock;
   seastar::file device;
 
   void set_device_id(device_id_t id) {
@@ -211,7 +234,7 @@ private:
 
   size_t get_offset(paddr_t addr) {
     auto& seg_addr = addr.as_seg_paddr();
-    return superblock.first_segment_offset +
+    return shard_info.first_segment_offset +
       (seg_addr.get_segment_id().device_segment_id() * superblock.segment_size) +
       seg_addr.get_segment_off();
   }
@@ -226,6 +249,39 @@ private:
 
   Segment::close_ertr::future<> segment_close(
       segment_id_t id, segment_off_t write_pointer);
+
+private:
+  // shard 0 mkfs
+  mkfs_ret primary_mkfs(device_config_t);
+  // all shards mkfs
+  mkfs_ret shard_mkfs();
+  // all shards mount
+  mount_ret shard_mount();
+
+  uint32_t device_shard_nums = 0;
+  store_index_t store_index = 0;
+  bool shard_status = true;
+
+  class MultiShardDevices {
+    public:
+      std::vector<std::unique_ptr<BlockSegmentManager>> mshard_devices;
+
+    public:
+    MultiShardDevices(size_t count,
+                      const std::string path,
+                      device_type_t dtype)
+    : mshard_devices() {
+      mshard_devices.reserve(count);
+      for (size_t store_index = 0; store_index < count; ++store_index) {
+        mshard_devices.emplace_back(std::make_unique<BlockSegmentManager>(
+          path, dtype, store_index));
+      }
+    }
+    ~MultiShardDevices() {
+     mshard_devices.clear();
+    }
+  };
+  seastar::sharded<MultiShardDevices> shard_devices;
 };
 
 }

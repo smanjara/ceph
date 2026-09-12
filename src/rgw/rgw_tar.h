@@ -1,8 +1,7 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
-#ifndef CEPH_RGW_TAR_H
-#define CEPH_RGW_TAR_H
+#pragma once
 
 #include <algorithm>
 #include <array>
@@ -14,10 +13,12 @@
 #include <boost/optional.hpp>
 #include <boost/range/adaptor/reversed.hpp>
 
+#include "include/buffer.h"
+
 namespace rgw {
 namespace tar {
 
-static constexpr size_t BLOCK_SIZE = 512;
+static constexpr size_t TAR_BLOCK_SIZE = 512;
 
 
 static inline std::pair<class StatusIndicator,
@@ -83,8 +84,8 @@ protected:
     char __padding[355];
   } *header;
 
-  static_assert(sizeof(*header) == BLOCK_SIZE,
-                "The TAR header must be exactly BLOCK_SIZE length");
+  static_assert(sizeof(*header) == TAR_BLOCK_SIZE,
+                "The TAR header must be exactly TAR_BLOCK_SIZE length");
 
   /* The label is far more important from what the code really does. */
   static size_t pos2len(const size_t pos) {
@@ -92,7 +93,7 @@ protected:
   }
 
 public:
-  explicit HeaderView(const char (&header)[BLOCK_SIZE])
+  explicit HeaderView(const char (&header)[TAR_BLOCK_SIZE])
     : header(reinterpret_cast<const header_t*>(header)) {
   }
 
@@ -139,11 +140,11 @@ public:
 static inline std::pair<StatusIndicator,
                         boost::optional<HeaderView>>
 interpret_block(const StatusIndicator& status, ceph::bufferlist& bl) {
-  static constexpr std::array<char, BLOCK_SIZE> zero_block = {0, };
-  const char (&block)[BLOCK_SIZE] = \
-    reinterpret_cast<const char (&)[BLOCK_SIZE]>(*bl.c_str());
+  static constexpr std::array<char, TAR_BLOCK_SIZE> zero_block = {0, };
+  const char (&block)[TAR_BLOCK_SIZE] = \
+    reinterpret_cast<const char (&)[TAR_BLOCK_SIZE]>(*bl.c_str());
 
-  if (std::memcmp(zero_block.data(), block, BLOCK_SIZE) == 0) {
+  if (std::memcmp(zero_block.data(), block, TAR_BLOCK_SIZE) == 0) {
     return std::make_pair(StatusIndicator(status, true), boost::none);
   } else {
     return std::make_pair(StatusIndicator(status, false), HeaderView(block));
@@ -152,5 +153,3 @@ interpret_block(const StatusIndicator& status, ceph::bufferlist& bl) {
 
 } /* namespace tar */
 } /* namespace rgw */
-
-#endif /* CEPH_RGW_TAR_H */

@@ -1,9 +1,8 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include "svc_sys_obj.h"
 #include "svc_sys_obj_core.h"
-#include "svc_rados.h"
 #include "svc_zone.h"
 
 #include "rgw_zone.h"
@@ -40,6 +39,7 @@ int RGWSI_SysObj::Obj::ROp::read(const DoutPrefixProvider *dpp,
   return svc->read(dpp, *state,
                    objv_tracker,
                    obj, bl, ofs, end,
+                   lastmod, obj_size,
                    attrs,
 		   raw_attrs,
                    cache_info,

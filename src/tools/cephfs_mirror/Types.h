@@ -1,12 +1,15 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPHFS_MIRROR_TYPES_H
 #define CEPHFS_MIRROR_TYPES_H
 
+#include <map>
 #include <set>
-#include <iostream>
+#include <iosfwd>
+#include <string>
 #include <string_view>
+#include <variant>
 
 #include "include/rados/librados.hpp"
 #include "include/cephfs/libcephfs.h"
@@ -16,8 +19,9 @@ namespace cephfs {
 namespace mirror {
 
 static const std::string CEPHFS_MIRROR_OBJECT("cephfs_mirror");
+static const std::string CEPHFS_MIRROR_SYNC_STAT_OMAP_PREFIX("sync_stat");
 
-typedef boost::variant<bool, uint64_t, std::string> AttributeValue;
+typedef std::variant<bool, uint64_t, std::string> AttributeValue;
 typedef std::map<std::string, AttributeValue> Attributes;
 
 // distinct filesystem identifier
@@ -81,6 +85,8 @@ typedef std::shared_ptr<librados::IoCtx> IoCtxRef;
 // not a shared_ptr since the type is incomplete
 typedef ceph_mount_info *MountRef;
 
+using clock = ceph::coarse_mono_clock;
+using monotime = ceph::coarse_mono_time;
 } // namespace mirror
 } // namespace cephfs
 

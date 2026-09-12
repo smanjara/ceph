@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -18,6 +19,8 @@
 #include "osd/osd_types.h"
 #include "common/TrackedOp.h"
 #include "common/tracer.h"
+#include "osd/Coroutines.h"
+
 /**
  * The OpRequest takes in a Message* and takes over a single reference
  * to it, which it puts() when destroyed.
@@ -29,12 +32,16 @@ private:
   OpInfo op_info;
 
 public:
+  std::optional<CoroHandles> coro_handles = std::nullopt;
+
   int maybe_init_op_info(const OSDMap &osdmap);
 
   auto get_flags() const { return op_info.get_flags(); }
   bool op_info_needs_init() const { return op_info.get_flags() == 0; }
   bool check_rmw(int flag) const { return op_info.check_rmw(flag); }
   bool may_read() const { return op_info.may_read(); }
+  bool may_read_data() const { return op_info.may_read_data(); }
+  bool may_read_data_for_ec() const { return op_info.may_read_data_for_ec(); }
   bool may_write() const { return op_info.may_write(); }
   bool may_cache() const { return op_info.may_cache(); }
   bool rwordered_forced() const { return op_info.rwordered_forced(); }
@@ -46,6 +53,10 @@ public:
   bool need_skip_handle_cache() const { return op_info.need_skip_handle_cache(); }
   bool need_skip_promote() const { return op_info.need_skip_promote(); }
   bool allows_returnvec() const { return op_info.allows_returnvec(); }
+  bool ec_direct_read() const { return op_info.ec_direct_read(); }
+  void set_ec_direct_read() { return op_info.set_ec_direct_read(); }
+  bool ec_sync_read() const { return op_info.ec_sync_read(); }
+  void set_ec_sync_read() { return op_info.set_ec_sync_read(); }
 
   std::vector<OpInfo::ClassInfo> classes() const {
     return op_info.get_classes();
@@ -54,7 +65,11 @@ public:
   void _dump(ceph::Formatter *f) const override;
 
   bool has_feature(uint64_t f) const {
+#ifdef WITH_CRIMSON
+    ceph_abort("In crimson, conn is independently maintained outside Message");
+#else
     return request->get_connection()->has_feature(f);
+#endif
   }
 
 private:
@@ -63,6 +78,7 @@ private:
   entity_inst_t req_src_inst;
   uint8_t hit_flag_points;
   uint8_t latest_flag_point;
+  const char* last_event_detail = nullptr;
   utime_t dequeued_time;
   static const uint8_t flag_queued_for_pg=1 << 0;
   static const uint8_t flag_reached_pg =  1 << 1;
@@ -74,7 +90,7 @@ private:
   OpRequest(Message *req, OpTracker *tracker);
 
 protected:
-  void _dump_op_descriptor_unlocked(std::ostream& stream) const override;
+  void _dump_op_descriptor(std::ostream& stream) const override;
   void _unregistered() override;
   bool filter_out(const std::set<std::string>& filters) override;
 
@@ -88,7 +104,7 @@ public:
   epoch_t min_epoch = 0;      ///< min epoch needed to handle this msg
 
   bool hitset_inserted;
-  jspan osd_parent_span;
+  jspan_ptr osd_parent_span;
 
   template<class T>
   const T* get_req() const { return static_cast<const T*>(request); }
@@ -107,11 +123,11 @@ public:
     return latest_flag_point;
   }
 
-  std::string_view state_string() const override {
+  std::string _get_state_string() const override {
     switch(latest_flag_point) {
     case flag_queued_for_pg: return "queued for pg";
     case flag_reached_pg: return "reached pg";
-    case flag_delayed: return "delayed";
+    case flag_delayed: return last_event_detail;
     case flag_started: return "started";
     case flag_sub_op_sent: return "waiting for sub ops";
     case flag_commit_sent: return "commit sent; apply or cleanup";
@@ -152,8 +168,8 @@ public:
   void mark_reached_pg() {
     mark_flag_point(flag_reached_pg, "reached_pg");
   }
-  void mark_delayed(const std::string& s) {
-    mark_flag_point_string(flag_delayed, s);
+  void mark_delayed(const char* s) {
+    mark_flag_point(flag_delayed, s);
   }
   void mark_started() {
     mark_flag_point(flag_started, "started");

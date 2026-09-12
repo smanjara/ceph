@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -18,15 +19,15 @@
 #define CEPH_MSG_ASYNCCONNECTION_H
 
 #include <atomic>
-#include <pthread.h>
 #include <climits>
+#include <deque>
 #include <list>
 #include <mutex>
 #include <map>
+#include <set>
 #include <functional>
 #include <optional>
 
-#include "auth/AuthSessionHandler.h"
 #include "common/ceph_time.h"
 #include "common/perf_counters.h"
 #include "include/buffer.h"
@@ -77,7 +78,7 @@ class AsyncConnection : public Connection {
    */
   class DelayedDelivery : public EventCallback {
     std::set<uint64_t> register_time_events; // need to delete it if stop
-    std::deque<Message*> delay_queue;
+    std::deque<MessageRef> delay_queue;
     std::mutex delay_lock;
     AsyncMessenger *msgr;
     EventCenter *center;
@@ -96,9 +97,9 @@ class AsyncConnection : public Connection {
     }
     void set_center(EventCenter *c) { center = c; }
     void do_request(uint64_t id) override;
-    void queue(double delay_period, Message *m) {
+    void queue(double delay_period, MessageRef&& m) {
       std::lock_guard<std::mutex> l(delay_lock);
-      delay_queue.push_back(m);
+      delay_queue.push_back(std::move(m));
       register_time_events.insert(center->create_time_event(delay_period*1000000, this));
     }
     void discard();
@@ -126,7 +127,6 @@ public:
   void accept(ConnectedSocket socket,
 	      const entity_addr_t &listen_addr,
 	      const entity_addr_t &peer_addr);
-  int send_message(Message *m) override;
 
   void send_keepalive() override;
   void mark_down() override;
@@ -156,6 +156,7 @@ public:
     STATE_CONNECTING_RE,
     STATE_ACCEPTING,
     STATE_CONNECTION_ESTABLISHED,
+    STATE_SHUTTING_DOWN,
     STATE_CLOSED
   };
 
@@ -166,6 +167,7 @@ public:
                                         "STATE_CONNECTING_RE",
                                         "STATE_ACCEPTING",
                                         "STATE_CONNECTION_ESTABLISHED",
+                                        "STATE_SHUTTING_DOWN",
                                         "STATE_CLOSED"};
       return statenames[state];
   }
@@ -173,11 +175,14 @@ public:
   AsyncMessenger *async_msgr;
   uint64_t conn_id;
   PerfCounters *logger;
+  PerfCounters *labeled_logger;
   int state;
   ConnectedSocket cs;
   int port;
 public:
   Messenger::Policy policy;
+protected:
+  int send_msg(MessageRef&& m) override;
 private:
 
   DispatchQueue *dispatch_queue;
@@ -202,6 +207,7 @@ private:
   ceph::coarse_mono_clock::time_point last_connect_started;
   ceph::coarse_mono_clock::time_point last_active;
   ceph::mono_clock::time_point recv_start_time;
+  ceph::coarse_mono_clock::time_point shutdown_start;
   uint64_t last_tick_id = 0;
   const uint64_t connect_timeout_us;
   const uint64_t inactive_timeout_us;
@@ -222,7 +228,7 @@ private:
 
   std::unique_ptr<Protocol> protocol;
 
-  std::optional<std::function<void(ssize_t)>> writeCallback;
+  std::function<void(ssize_t)> writeCallback;
   std::function<void(char *, ssize_t)> readCallback;
   std::optional<unsigned> pendingReadLen;
   char *read_buffer;
@@ -234,6 +240,7 @@ private:
   void process();
   void wakeup_from(uint64_t id);
   void tick(uint64_t id);
+  void shutdown() override;
   void stop(bool queue_reset);
   void cleanup();
   PerfCounters *get_perf_counter() {
@@ -241,6 +248,11 @@ private:
   }
 
   bool is_msgr2() const override;
+  bool is_shutdown() const {
+    return state == STATE_SHUTTING_DOWN;
+  }
+
+  void dump(Formatter* f, bool tcp_info);
 
   friend class Protocol;
   friend class ProtocolV1;

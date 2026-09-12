@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -53,6 +54,8 @@ const char* osd_error_category::message(int ev, char* buf,
     return "ORDERSNAP flag set; writer has old snapc";
   case osd_errc::blocklisted:
     return "Blocklisted";
+  case osd_errc::cmpext_mismatch:
+    return "CmpExt mismatch";
   }
 
   if (len) {
@@ -72,6 +75,8 @@ std::string osd_error_category::message(int ev) const {
     return "ORDERSNAP flag set; writer has old snapc";
   case osd_errc::blocklisted:
     return "Blocklisted";
+  case osd_errc::cmpext_mismatch:
+    return "CmpExt mismatch";
   }
 
   return cpp_strerror(ev);
@@ -79,7 +84,8 @@ std::string osd_error_category::message(int ev) const {
 
 boost::system::error_condition osd_error_category::default_error_condition(int ev) const noexcept {
   if (ev == static_cast<int>(osd_errc::old_snapc) ||
-      ev == static_cast<int>(osd_errc::blocklisted))
+      ev == static_cast<int>(osd_errc::blocklisted) ||
+      ev == static_cast<int>(osd_errc::cmpext_mismatch))
     return { ev, *this };
   else
     return { ev, boost::system::generic_category() };
@@ -91,6 +97,8 @@ bool osd_error_category::equivalent(int ev, const boost::system::error_condition
       return c == boost::system::errc::invalid_argument;
   case osd_errc::blocklisted:
       return c == boost::system::errc::operation_not_permitted;
+  case osd_errc::cmpext_mismatch:
+      return c == boost::system::errc::operation_canceled;
   }
   return default_error_condition(ev) == c;
 }

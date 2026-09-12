@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "osd/osd_op_util.h"
 
@@ -16,6 +16,7 @@ bool OpInfo::check_rmw(int flag) const {
   ceph_assert(rmw_flags != 0);
   return rmw_flags & flag;
 }
+// Returns true if op performs a read (including of the object_info).
 bool OpInfo::may_read() const {
   return need_read_cap() || check_rmw(CEPH_OSD_RMW_FLAG_CLASS_READ);
 }
@@ -51,6 +52,27 @@ bool OpInfo::need_skip_promote() const {
 bool OpInfo::allows_returnvec() const {
   return check_rmw(CEPH_OSD_RMW_FLAG_RETURNVEC);
 }
+bool OpInfo::ec_direct_read() const {
+  return check_rmw(CEPH_OSD_RMW_FLAG_EC_DIRECT_READ);
+}
+bool OpInfo::ec_sync_read() const {
+  return check_rmw(CEPH_OSD_RMW_FLAG_EC_SYNC_READ);
+}
+/**
+ * may_read_data()
+ * 
+ * Returns true if op reads information other than the object_info. Requires that the
+ * osd flush any prior writes prior to servicing this op. Includes any information not
+ * cached by the osd in the object_info or snapset.
+ */
+bool OpInfo::may_read_data() const {
+  return check_rmw(CEPH_OSD_RMW_FLAG_READ_DATA);
+}
+
+bool OpInfo::may_read_data_for_ec() const
+{
+  return check_rmw(CEPH_OSD_RMW_FLAG_CLASS_READ_DATA);
+}
 
 void OpInfo::set_rmw_flags(int flags) {
   rmw_flags |= flags;
@@ -58,7 +80,13 @@ void OpInfo::set_rmw_flags(int flags) {
 
 void OpInfo::set_read() { set_rmw_flags(CEPH_OSD_RMW_FLAG_READ); }
 void OpInfo::set_write() { set_rmw_flags(CEPH_OSD_RMW_FLAG_WRITE); }
-void OpInfo::set_class_read() { set_rmw_flags(CEPH_OSD_RMW_FLAG_CLASS_READ); }
+void OpInfo::set_class_read(const bool is_erasure) {
+  int flags = CEPH_OSD_RMW_FLAG_CLASS_READ;
+  if (is_erasure) {
+    flags |= CEPH_OSD_RMW_FLAG_CLASS_READ_DATA;
+  }
+  set_rmw_flags(flags); 
+}
 void OpInfo::set_class_write() { set_rmw_flags(CEPH_OSD_RMW_FLAG_CLASS_WRITE); }
 void OpInfo::set_pg_op() { set_rmw_flags(CEPH_OSD_RMW_FLAG_PGOP); }
 void OpInfo::set_cache() { set_rmw_flags(CEPH_OSD_RMW_FLAG_CACHE); }
@@ -67,6 +95,9 @@ void OpInfo::set_skip_handle_cache() { set_rmw_flags(CEPH_OSD_RMW_FLAG_SKIP_HAND
 void OpInfo::set_skip_promote() { set_rmw_flags(CEPH_OSD_RMW_FLAG_SKIP_PROMOTE); }
 void OpInfo::set_force_rwordered() { set_rmw_flags(CEPH_OSD_RMW_FLAG_RWORDERED); }
 void OpInfo::set_returnvec() { set_rmw_flags(CEPH_OSD_RMW_FLAG_RETURNVEC); }
+void OpInfo::set_read_data() { set_rmw_flags(CEPH_OSD_RMW_FLAG_READ_DATA); }
+void OpInfo::set_ec_direct_read() { set_rmw_flags(CEPH_OSD_RMW_FLAG_EC_DIRECT_READ); }
+void OpInfo::set_ec_sync_read() { set_rmw_flags(CEPH_OSD_RMW_FLAG_EC_SYNC_READ); }
 
 
 int OpInfo::set_from_op(
@@ -108,12 +139,12 @@ int OpInfo::set_from_op(
       if (ceph_osd_op_mode_modify(iter->op.op))
 	set_write();
     }
-    if (ceph_osd_op_mode_read(iter->op.op))
+    if (ceph_osd_op_mode_read(iter->op.op)) {
       set_read();
-
-    // set READ flag if there are src_oids
-    if (iter->soid.oid.name.length())
-      set_read();
+      if (iter->op.op != CEPH_OSD_OP_STAT) {
+        set_read_data();
+      }
+    }
 
     // set PGOP flag if there are PG ops
     if (ceph_osd_op_type_pg(iter->op.op))
@@ -186,8 +217,10 @@ int OpInfo::set_from_op(
 	is_write = flags & CLS_METHOD_WR;
         bool is_promote = flags & CLS_METHOD_PROMOTE;
 
-	if (is_read)
-	  set_class_read();
+	if (is_read) {
+	  const bool is_erasure = pool && pool->is_erasure();
+	  set_class_read(is_erasure);
+	}
 	if (is_write)
 	  set_class_write();
         if (is_promote)
@@ -202,6 +235,7 @@ int OpInfo::set_from_op(
       // watch state (and may return early if the watch exists) or, in
       // the case of ping, is simply a read op.
       set_read();
+      set_read_data();
       // fall through
     case CEPH_OSD_OP_NOTIFY:
     case CEPH_OSD_OP_NOTIFY_ACK:

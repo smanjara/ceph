@@ -8,7 +8,8 @@ import { TableStatusViewCache } from '~/app/shared/classes/table-status-view-cac
 @Component({
   selector: 'cd-mirroring-images',
   templateUrl: './image-list.component.html',
-  styleUrls: ['./image-list.component.scss']
+  styleUrls: ['./image-list.component.scss'],
+  standalone: false
 })
 export class ImageListComponent implements OnInit, OnDestroy {
   @ViewChild('stateTmpl', { static: true })
@@ -17,6 +18,8 @@ export class ImageListComponent implements OnInit, OnDestroy {
   syncTmpl: TemplateRef<any>;
   @ViewChild('progressTmpl', { static: true })
   progressTmpl: TemplateRef<any>;
+  @ViewChild('entriesBehindPrimaryTpl', { static: true })
+  entriesBehindPrimaryTpl: TemplateRef<any>;
 
   subs: Subscription;
 
@@ -60,13 +63,18 @@ export class ImageListComponent implements OnInit, OnDestroy {
         flexGrow: 1
       },
       {
-        prop: 'progress',
+        prop: 'syncing_percent',
         name: $localize`Progress`,
         cellTemplate: this.progressTmpl,
         flexGrow: 2
       },
       { prop: 'bytes_per_second', name: $localize`Bytes per second`, flexGrow: 2 },
-      { prop: 'entries_behind_primary', name: $localize`Entries behind primary`, flexGrow: 2 }
+      {
+        prop: 'entries_behind_primary',
+        name: $localize`Entries behind primary`,
+        cellTemplate: this.entriesBehindPrimaryTpl,
+        flexGrow: 2
+      }
     ];
 
     this.image_ready.columns = [

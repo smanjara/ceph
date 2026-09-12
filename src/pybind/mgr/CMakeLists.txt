@@ -4,7 +4,8 @@ set(mgr_module_install_excludes
   PATTERN "tox.ini" EXCLUDE
   PATTERN "requirements*.txt" EXCLUDE
   PATTERN "constraints*.txt" EXCLUDE
-  PATTERN "tests/*" EXCLUDE)
+  PATTERN "tests" EXCLUDE
+  PATTERN "ci" EXCLUDE)
 
 add_subdirectory(dashboard)
 
@@ -13,7 +14,7 @@ if(WITH_MGR_ROOK_CLIENT)
 endif()
 if(WITH_TESTS)
   include(AddCephTest)
-  add_tox_test(mgr ${CMAKE_CURRENT_SOURCE_DIR} TOX_ENVS py3 py37 mypy flake8 jinjalint nooptional)
+  add_tox_test(mgr ${CMAKE_CURRENT_SOURCE_DIR} TOX_ENVS __tox_defaults__)
 endif()
 
 # Location needs to match default setting for mgr_module_path, currently:
@@ -22,11 +23,13 @@ set(mgr_modules
   alerts
   balancer
   cephadm
+  cli_api
   crash
   # dashboard (optional)
   devicehealth
   diskprediction_local
   # hello is an example for developers, not for user
+  nvmeof
   influx
   insights
   iostat
@@ -42,9 +45,10 @@ set(mgr_modules
   progress
   prometheus
   rbd_support
-  restful
+  rgw
   # rook (optional)
   selftest
+  smb
   snap_schedule
   stats
   status
@@ -52,11 +56,10 @@ set(mgr_modules
   telemetry
   # tests (for testing purpose only)
   test_orchestrator
-  volumes
-  zabbix)
+  volumes)
 
 install(DIRECTORY ${mgr_modules}
   DESTINATION ${CEPH_INSTALL_DATADIR}/mgr
   ${mgr_module_install_excludes})
-install(FILES mgr_module.py mgr_util.py object_format.py
+install(FILES mgr_module.py mgr_util.py object_format.py cherrypy_mgr.py ceph_secrets_client.py ceph_secrets_types.py
   DESTINATION ${CEPH_INSTALL_DATADIR}/mgr)

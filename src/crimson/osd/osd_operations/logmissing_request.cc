@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "logmissing_request.h"
 
@@ -16,11 +16,13 @@ namespace {
   }
 }
 
+SET_SUBSYS(osd);
+
 namespace crimson::osd {
 
 LogMissingRequest::LogMissingRequest(crimson::net::ConnectionRef&& conn,
 		       Ref<MOSDPGUpdateLogMissing> &&req)
-  : conn{std::move(conn)},
+  : RemoteOperation{std::move(conn)},
     req{std::move(req)}
 {}
 
@@ -46,23 +48,71 @@ void LogMissingRequest::dump_detail(Formatter *f) const
 
 ConnectionPipeline &LogMissingRequest::get_connection_pipeline()
 {
-  return get_osd_priv(conn.get()).replicated_request_conn_pipeline;
+  return get_osd_priv(&get_local_connection()
+         ).replicated_request_conn_pipeline;
 }
 
-RepRequest::PGPipeline &LogMissingRequest::pp(PG &pg)
+PerShardPipeline &LogMissingRequest::get_pershard_pipeline(
+    ShardServices &shard_services)
 {
-  return pg.replicated_request_pg_pipeline;
+  return shard_services.get_replicated_request_pipeline();
+}
+
+PGRepopPipeline &LogMissingRequest::repop_pipeline(PG &pg)
+{
+  return pg.repop_pipeline;
+}
+
+LogMissingRequest::interruptible_future<>
+LogMissingRequest::with_pg_interruptible(
+  ShardServices &shard_services, Ref<PG> pg)
+{
+  LOG_PREFIX(LogMissingRequest::with_pg_interruptible);
+  DEBUGI("{}: pg present", *this);
+
+  // acquire throttle BEFORE entering exclusive process stage
+  // shared with RepRequest -- don't block it while waiting for slot
+  // uses immediate class so wait is instantaneous (high_priority queue)
+  auto throttle = co_await interruptor::make_interruptible(
+    shard_services.get_throttle(
+      scheduler::params_t{
+        1,
+        static_cast<unsigned>(req->get_priority()),
+        0,
+        SchedulerClass::immediate}));
+
+  co_await this->template enter_stage<interruptor>(
+    repop_pipeline(*pg).process);
+
+  co_await interruptor::make_interruptible(
+  this->template with_blocking_event<
+    PG_OSDMapGate::OSDMapBlocker::BlockingEvent
+  >([this, pg](auto &&trigger) {
+    return pg->osdmap_gate.wait_for_map(
+      std::move(trigger), req->min_epoch);
+  }));
+  co_await pg->do_update_log_missing(req, get_remote_connection());
+  logger().debug("{}: complete", *this);
+  co_await interruptor::make_interruptible(handle.complete());
+  // throttle destructs here
 }
 
 seastar::future<> LogMissingRequest::with_pg(
   ShardServices &shard_services, Ref<PG> pg)
 {
-  logger().debug("{}: LogMissingRequest::with_pg", *this);
+  LOG_PREFIX(LogMissingRequest::with_pg);
+  DEBUGI("{}: LogMissingRequest::with_pg", *this);
 
   IRef ref = this;
-  return interruptor::with_interruption([this, pg] {
-    return pg->do_update_log_missing(req);
-  }, [ref](std::exception_ptr) { return seastar::now(); }, pg);
+  return interruptor::with_interruption
+    ([this, pg, &shard_services] {
+      return with_pg_interruptible(shard_services, pg);
+  }, [](std::exception_ptr) {
+    return seastar::now();
+  }, pg, pg->get_osdmap_epoch()).finally([this, ref=std::move(ref)] {
+    logger().debug("{}: exit", *this);
+    handle.exit();
+  });
 }
 
 }

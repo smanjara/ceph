@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -14,6 +14,7 @@
 
 #include "common/ceph_argparse.h"
 #include "include/expected.hpp"
+#include "include/random.h"
 
 namespace crimson::osd {
 
@@ -21,14 +22,7 @@ void usage(const char* prog);
 
 inline uint64_t get_nonce()
 {
-  if (auto pid = getpid(); pid == 1 || std::getenv("CEPH_USE_RANDOM_NONCE")) {
-    // we're running in a container; use a random number instead!
-    std::random_device rd;
-    std::default_random_engine rng{rd()};
-    return std::uniform_int_distribution<uint64_t>{}(rng);
-  } else {
-    return pid;
-  }
+  return ceph::util::generate_random_number<uint64_t>();
 }
 
 seastar::future<> populate_config_from_mon();
@@ -41,8 +35,14 @@ struct early_config_t {
   std::string conf_file_list;
   CephInitParameters init_params{CEPH_ENTITY_TYPE_OSD};
 
-  /// Returned vector must not outlive in
-  auto to_ptr_vector(const std::vector<std::string> &in) {
+  std::vector<const char *> get_early_args() {
+    return to_ptr_vector(early_args);
+  }
+
+private:
+  /// Returned pointers are valid only as long as \p in is alive.
+  static std::vector<const char *> to_ptr_vector(
+    const std::vector<std::string> &in) {
     std::vector<const char *> ret;
     ret.reserve(in.size());
     std::transform(
@@ -52,13 +52,7 @@ struct early_config_t {
     return ret;
   }
 
-  std::vector<const char *> get_early_args() {
-    return to_ptr_vector(early_args);
-  }
-
-  std::vector<const char *> get_ceph_args() {
-    return to_ptr_vector(ceph_args);
-  }
+public:
 
   void encode(ceph::buffer::list& bl) const {
     ENCODE_START(1, 1, bl);

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #pragma once
 #define TIME_BUF_SIZE 128
@@ -36,28 +36,21 @@ public:
 };
 
 class RGWListBuckets_ObjStore_SWIFT : public RGWListBuckets_ObjStore {
-  bool need_stats;
-  bool wants_reversed;
+  bool need_stats{true};
+  bool wants_reversed{false};
   std::string prefix;
-  std::vector<rgw::sal::BucketList> reverse_buffer;
+  std::deque<RGWBucketEnt> reverse_buffer;
 
   uint64_t get_default_max() const override {
     return 0;
   }
 
 public:
-  RGWListBuckets_ObjStore_SWIFT()
-    : need_stats(true),
-      wants_reversed(false) {
-  }
-  ~RGWListBuckets_ObjStore_SWIFT() override {}
-
   int get_params(optional_yield y) override;
-  void handle_listing_chunk(rgw::sal::BucketList&& buckets) override;
+  void handle_listing_chunk(std::span<RGWBucketEnt> buckets) override;
   void send_response_begin(bool has_buckets) override;
-  void send_response_data(rgw::sal::BucketList& buckets) override;
-  void send_response_data_reversed(rgw::sal::BucketList& buckets);
-  void dump_bucket_entry(const rgw::sal::Bucket& obj);
+  void send_response_data(std::span<const RGWBucketEnt> buckets) override;
+  void dump_bucket_entry(const RGWBucketEnt& ent);
   void send_response_end() override;
 
   bool should_get_stats() override { return need_stats; }
@@ -93,6 +86,7 @@ public:
   RGWStatBucket_ObjStore_SWIFT() {}
   ~RGWStatBucket_ObjStore_SWIFT() override {}
 
+  int get_params(optional_yield y) override { return 0; }
   void send_response() override;
 };
 
@@ -245,6 +239,7 @@ public:
 
   void execute(optional_yield y) override;
   void send_response() override;
+  static void list_bulk_delete(Formatter& formatter, const ConfigProxy& config, rgw::sal::Driver* driver);
   static void list_swift_data(Formatter& formatter, const ConfigProxy& config, rgw::sal::Driver* driver);
   static void list_tempauth_data(Formatter& formatter, const ConfigProxy& config, rgw::sal::Driver* driver);
   static void list_tempurl_data(Formatter& formatter, const ConfigProxy& config, rgw::sal::Driver* driver);
@@ -260,8 +255,7 @@ class RGWFormPost : public RGWPostObj_ObjStore {
   bool is_next_file_to_upload() override;
   bool is_integral();
   bool is_non_expired();
-  void get_owner_info(const req_state* s,
-                      RGWUserInfo& owner_info) const;
+  std::unique_ptr<rgw::sal::User> get_owner_info(const req_state* s) const;
 
   parts_collection_t ctrl_parts;
   boost::optional<post_form_part> current_data_part;
@@ -269,6 +263,8 @@ class RGWFormPost : public RGWPostObj_ObjStore {
   bool stream_done = false;
 
   class SignatureHelper;
+  using BadSignatureHelper = SignatureHelper;
+  template<typename HASHFLAVOR, rgw::auth::swift::SignatureFlavor SIGNATUREFLAVOR> class SignatureHelper_x;
 public:
   RGWFormPost() = default;
   ~RGWFormPost() = default;
@@ -279,68 +275,11 @@ public:
 
   int get_params(optional_yield y) override;
   int get_data(ceph::bufferlist& bl, bool& again) override;
+  int error_handler(int err_no, std::string *error_content, optional_yield y) override;
   void send_response() override;
 
   static bool is_formpost_req(req_state* const s);
 };
-
-class RGWFormPost::SignatureHelper
-{
-private:
-  static constexpr uint32_t output_size =
-    CEPH_CRYPTO_HMACSHA1_DIGESTSIZE * 2 + 1;
-
-  unsigned char dest[CEPH_CRYPTO_HMACSHA1_DIGESTSIZE]; // 20
-  char dest_str[output_size];
-
-public:
-  SignatureHelper() = default;
-
-  const char* calc(const std::string& key,
-                   const std::string_view& path_info,
-                   const std::string_view& redirect,
-                   const std::string_view& max_file_size,
-                   const std::string_view& max_file_count,
-                   const std::string_view& expires) {
-    using ceph::crypto::HMACSHA1;
-    using UCHARPTR = const unsigned char*;
-
-    HMACSHA1 hmac((UCHARPTR) key.data(), key.size());
-
-    hmac.Update((UCHARPTR) path_info.data(), path_info.size());
-    hmac.Update((UCHARPTR) "\n", 1);
-
-    hmac.Update((UCHARPTR) redirect.data(), redirect.size());
-    hmac.Update((UCHARPTR) "\n", 1);
-
-    hmac.Update((UCHARPTR) max_file_size.data(), max_file_size.size());
-    hmac.Update((UCHARPTR) "\n", 1);
-
-    hmac.Update((UCHARPTR) max_file_count.data(), max_file_count.size());
-    hmac.Update((UCHARPTR) "\n", 1);
-
-    hmac.Update((UCHARPTR) expires.data(), expires.size());
-
-    hmac.Final(dest);
-
-    buf_to_hex((UCHARPTR) dest, sizeof(dest), dest_str);
-
-    return dest_str;
-  }
-
-  const char* get_signature() const {
-    return dest_str;
-  }
-
-  bool is_equal_to(const std::string& rhs) const {
-    /* never allow out-of-range exception */
-    if (rhs.size() < (output_size - 1)) {
-      return false;
-    }
-    return rhs.compare(0 /* pos */,  output_size, dest_str) == 0;
-  }
-
-}; /* RGWFormPost::SignatureHelper */
 
 
 class RGWSwiftWebsiteHandler {
@@ -435,9 +374,7 @@ public:
   using RGWHandler_REST_SWIFT::RGWHandler_REST_SWIFT;
   ~RGWHandler_REST_Bucket_SWIFT() override = default;
 
-  int error_handler(int err_no, std::string *error_content, optional_yield y) override {
-    return website_handler->error_handler(err_no, error_content, y);
-  }
+  int error_handler(int err_no, std::string *error_content, optional_yield y) override;
 
   int retarget(RGWOp* op, RGWOp** new_op, optional_yield) override {
     return website_handler->retarget_bucket(op, new_op);
@@ -473,10 +410,7 @@ public:
   using RGWHandler_REST_SWIFT::RGWHandler_REST_SWIFT;
   ~RGWHandler_REST_Obj_SWIFT() override = default;
 
-  int error_handler(int err_no, std::string *error_content,
-		    optional_yield y) override {
-    return website_handler->error_handler(err_no, error_content, y);
-  }
+  int error_handler(int err_no, std::string *error_content, optional_yield y) override;
 
   int retarget(RGWOp* op, RGWOp** new_op, optional_yield) override {
     return website_handler->retarget_object(op, new_op);
@@ -493,7 +427,7 @@ public:
 class RGWRESTMgr_SWIFT : public RGWRESTMgr {
 protected:
   RGWRESTMgr* get_resource_mgr_as_default(req_state* const s,
-                                          const std::string& uri,
+                                          std::string_view uri,
                                           std::string* const out_uri) override {
     return this->get_resource_mgr(s, uri, out_uri);
   }
@@ -565,7 +499,7 @@ public:
 class RGWRESTMgr_SWIFT_CrossDomain : public RGWRESTMgr {
 protected:
   RGWRESTMgr *get_resource_mgr(req_state* const s,
-                               const std::string& uri,
+                               std::string_view uri,
                                std::string* const out_uri) override {
     return this;
   }
@@ -622,7 +556,7 @@ public:
 class RGWRESTMgr_SWIFT_HealthCheck : public RGWRESTMgr {
 protected:
   RGWRESTMgr *get_resource_mgr(req_state* const s,
-                               const std::string& uri,
+                               std::string_view uri,
                                std::string* const out_uri) override {
     return this;
   }

@@ -1,17 +1,21 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <sys/mman.h>
 #include <string.h>
 
+#include <boost/range/irange.hpp>
+
 #include <fmt/format.h>
 
 #include <seastar/core/metrics.hh>
+#include <seastar/util/defer.hh>
 
 #include "include/buffer.h"
 
 #include "crimson/common/config_proxy.h"
-#include "crimson/common/errorator-loop.h"
+#include "crimson/common/errorator-utils.h"
+#include "crimson/common/coroutine.h"
 
 #include "crimson/os/seastore/logging.h"
 #include "crimson/os/seastore/segment_manager/block.h"
@@ -33,7 +37,7 @@ using segment_state_t = crimson::os::seastore::Segment::segment_state_t;
 template <> struct fmt::formatter<segment_state_t>: fmt::formatter<std::string_view> {
   // parse is inherited from formatter<string_view>.
   template <typename FormatContext>
-  auto format(segment_state_t s, FormatContext& ctx) {
+  auto format(segment_state_t s, FormatContext& ctx) const {
     std::string_view name = "unknown";
     switch (s) {
     case segment_state_t::EMPTY:
@@ -60,7 +64,7 @@ static write_ertr::future<> do_write(
 {
   LOG_PREFIX(block_do_write);
   auto len = bptr.length();
-  TRACE("{} poffset={}~{} ...",
+  TRACE("{} poffset=0x{:x}~0x{:x} ...",
         device_id_printer_t{device_id}, offset, len);
   return device.dma_write(
     offset,
@@ -68,16 +72,16 @@ static write_ertr::future<> do_write(
     len
   ).handle_exception(
     [FNAME, device_id, offset, len](auto e) -> write_ertr::future<size_t> {
-    ERROR("{} poffset={}~{} got error -- {}",
+    ERROR("{} poffset=0x{:x}~0x{:x} got error -- {}",
           device_id_printer_t{device_id}, offset, len, e);
     return crimson::ct_error::input_output_error::make();
   }).then([FNAME, device_id, offset, len](auto result) -> write_ertr::future<> {
     if (result != len) {
-      ERROR("{} poffset={}~{} write len={} inconsistent",
+      ERROR("{} poffset=0x{:x}~0x{:x} write len=0x{:x} inconsistent",
             device_id_printer_t{device_id}, offset, len, result);
       return crimson::ct_error::input_output_error::make();
     }
-    TRACE("{} poffset={}~{} done", device_id_printer_t{device_id}, offset, len);
+    TRACE("{} poffset=0x{:x}~0x{:x} done", device_id_printer_t{device_id}, offset, len);
     return write_ertr::now();
   });
 }
@@ -90,7 +94,7 @@ static write_ertr::future<> do_writev(
   size_t block_size)
 {
   LOG_PREFIX(block_do_writev);
-  TRACE("{} poffset={}~{}, {} buffers",
+  TRACE("{} poffset=0x{:x}~0x{:x}, {} buffers",
         device_id_printer_t{device_id}, offset, bl.length(), bl.get_num_buffers());
 
   // writev requires each buffer to be aligned to the disks' block
@@ -109,22 +113,22 @@ static write_ertr::future<> do_writev(
       auto off = offset + p.offset;
       auto len = p.length;
       auto& iov = p.iov;
-      TRACE("{} poffset={}~{} dma_write ...",
+      TRACE("{} poffset=0x{:x}~0x{:x} dma_write ...",
             device_id_printer_t{device_id}, off, len);
       return device.dma_write(off, std::move(iov)
       ).handle_exception(
         [FNAME, device_id, off, len](auto e) -> write_ertr::future<size_t>
       {
-        ERROR("{} poffset={}~{} dma_write got error -- {}",
+        ERROR("{} poffset=0x{:x}~0x{:x} dma_write got error -- {}",
               device_id_printer_t{device_id}, off, len, e);
 	return crimson::ct_error::input_output_error::make();
       }).then([FNAME, device_id, off, len](size_t written) -> write_ertr::future<> {
 	if (written != len) {
-          ERROR("{} poffset={}~{} dma_write len={} inconsistent",
+          ERROR("{} poffset=0x{:x}~0x{:x} dma_write len=0x{:x} inconsistent",
                 device_id_printer_t{device_id}, off, len, written);
 	  return crimson::ct_error::input_output_error::make();
 	}
-        TRACE("{} poffset={}~{} dma_write done",
+        TRACE("{} poffset=0x{:x}~0x{:x} dma_write done",
               device_id_printer_t{device_id}, off, len);
 	return write_ertr::now();
       });
@@ -140,7 +144,7 @@ static read_ertr::future<> do_read(
   bufferptr &bptr)
 {
   LOG_PREFIX(block_do_read);
-  TRACE("{} poffset={}~{} ...", device_id_printer_t{device_id}, offset, len);
+  TRACE("{} poffset=0x{:x}~0x{:x} ...", device_id_printer_t{device_id}, offset, len);
   assert(len <= bptr.length());
   return device.dma_read(
     offset,
@@ -153,16 +157,53 @@ static read_ertr::future<> do_read(
     //	once seastar::future<T>::handle_exception() returns seastar::futurize_t<T>
     [FNAME, device_id, offset, len](auto e) -> read_ertr::future<size_t>
   {
-    ERROR("{} poffset={}~{} got error -- {}",
+    ERROR("{} poffset=0x{:x}~0x{:x} got error -- {}",
           device_id_printer_t{device_id}, offset, len, e);
     return crimson::ct_error::input_output_error::make();
   }).then([FNAME, device_id, offset, len](auto result) -> read_ertr::future<> {
     if (result != len) {
-      ERROR("{} poffset={}~{} read len={} inconsistent",
+      ERROR("{} poffset=0x{:x}~0x{:x} read len=0x{:x} inconsistent",
             device_id_printer_t{device_id}, offset, len, result);
       return crimson::ct_error::input_output_error::make();
     }
-    TRACE("{} poffset={}~{} done", device_id_printer_t{device_id}, offset, len);
+    TRACE("{} poffset=0x{:x}~0x{:x} done", device_id_printer_t{device_id}, offset, len);
+    return read_ertr::now();
+  });
+}
+
+static read_ertr::future<> do_readv(
+  device_id_t device_id,
+  seastar::file &device,
+  uint64_t offset,
+  std::vector<bufferptr> ptrs)
+{
+  LOG_PREFIX(block_do_readv);
+  std::vector<iovec> iov;
+  size_t len = 0;
+  for (auto &ptr : ptrs) {
+    iov.emplace_back(ptr.c_str(), ptr.length());
+    len += ptr.length();
+  }
+  TRACE("{} poffset=0x{:x}~0x{:x} {} buffers",
+    device_id_printer_t{device_id}, offset, len, ptrs.size());
+  return device.dma_read(offset, std::move(iov)
+  ).handle_exception(
+    //FIXME: this is a little bit tricky, since seastar::future<T>::handle_exception
+    //	returns seastar::future<T>, to return an crimson::ct_error, we have to create
+    //	a seastar::future<T> holding that crimson::ct_error. This is not necessary
+    //	once seastar::future<T>::handle_exception() returns seastar::futurize_t<T>
+    [FNAME, device_id, offset, len](auto e) -> read_ertr::future<size_t>
+  {
+    ERROR("{} poffset=0x{:x}~0x{:x} got error -- {}",
+          device_id_printer_t{device_id}, offset, len, e);
+    return crimson::ct_error::input_output_error::make();
+  }).then([FNAME, device_id, offset, len](auto result) -> read_ertr::future<> {
+    if (result != len) {
+      ERROR("{} poffset=0x{:x}~0x{:x} read len=0x{:x} inconsistent",
+            device_id_printer_t{device_id}, offset, len, result);
+      return crimson::ct_error::input_output_error::make();
+    }
+    TRACE("{} poffset=0x{:x}~0x{:x} done", device_id_printer_t{device_id}, offset, len);
     return read_ertr::now();
   });
 }
@@ -174,7 +215,7 @@ SegmentStateTracker::write_out(
   uint64_t offset)
 {
   LOG_PREFIX(SegmentStateTracker::write_out);
-  DEBUG("{} poffset={}~{}",
+  DEBUG("{} poffset=0x{:x}~0x{:x}",
         device_id_printer_t{device_id}, offset, bptr.length());
   return do_write(device_id, device, offset, bptr);
 }
@@ -186,7 +227,7 @@ SegmentStateTracker::read_in(
   uint64_t offset)
 {
   LOG_PREFIX(SegmentStateTracker::read_in);
-  DEBUG("{} poffset={}~{}",
+  DEBUG("{} poffset=0x{:x}~0x{:x}",
         device_id_printer_t{device_id}, offset, bptr.length());
   return do_read(
     device_id,
@@ -195,9 +236,9 @@ SegmentStateTracker::read_in(
     bptr.length(),
     bptr);
 }
-
+using std::vector;
 static
-block_sm_superblock_t make_superblock(
+device_superblock_t make_superblock(
   device_id_t device_id,
   device_config_t sm_config,
   const seastar::stat_data &data)
@@ -213,87 +254,38 @@ block_sm_superblock_t make_superblock(
   auto config_segment_size = get_conf<Option::size_t>(
     "seastore_segment_size");
   size_t raw_segments = size / config_segment_size;
-  size_t tracker_size = SegmentStateTracker::get_raw_size(
-    raw_segments,
+  size_t shard_tracker_size = SegmentStateTracker::get_raw_size(
+    raw_segments / seastar::this_smp_shard_count(),
     data.block_size);
-  size_t tracker_off = data.block_size;
-  size_t first_seg_off = tracker_size + tracker_off;
-  size_t segments = (size - first_seg_off) / config_segment_size;
-  size_t available_size = segments * config_segment_size;
+  size_t total_tracker_size = shard_tracker_size * seastar::this_smp_shard_count();
+  size_t tracker_off = data.block_size;   //superblock
+  size_t segments = (size - tracker_off - total_tracker_size) / config_segment_size;
+  size_t segments_per_shard = segments / seastar::this_smp_shard_count();
 
-  INFO("{} disk_size={}, available_size={}, segment_size={}, segments={}, "
-       "block_size={}, tracker_off={}, first_seg_off={}",
+  vector<device_shard_info_t> shard_infos(seastar::this_smp_shard_count());
+  for (unsigned int i = 0; i < seastar::this_smp_shard_count(); i++) {
+    shard_infos[i].size = segments_per_shard * config_segment_size;
+    shard_infos[i].segments = segments_per_shard;
+    shard_infos[i].tracker_offset = tracker_off + i * shard_tracker_size;
+    shard_infos[i].first_segment_offset = tracker_off + total_tracker_size
+                             + i * segments_per_shard * config_segment_size;
+  }
+
+  INFO("{} disk_size=0x{:x}, segment_size=0x{:x}, block_size=0x{:x}",
        device_id_printer_t{device_id},
        size,
-       available_size,
-       config_segment_size,
-       segments,
-       data.block_size,
-       tracker_off,
-       first_seg_off);
+       uint64_t(config_segment_size),
+       data.block_size);
+  for (unsigned int i = 0; i < seastar::this_smp_shard_count(); i++) {
+    INFO("shard {} infos: {}", i, shard_infos[i]);
+  }
 
-  return block_sm_superblock_t{
-    available_size,
+  return device_superblock_t::make_segmented(
+    seastar::this_smp_shard_count(),
     config_segment_size,
     data.block_size,
-    segments,
-    tracker_off,
-    first_seg_off,
-    std::move(sm_config)
-  };
-}
-
-using check_create_device_ertr = BlockSegmentManager::access_ertr;
-using check_create_device_ret = check_create_device_ertr::future<>;
-static check_create_device_ret check_create_device(
-  const std::string &path,
-  size_t size)
-{
-  LOG_PREFIX(block_check_create_device);
-  INFO("path={}, size={}", path, size);
-  return seastar::open_file_dma(
-    path,
-    seastar::open_flags::exclusive |
-    seastar::open_flags::rw |
-    seastar::open_flags::create
-  ).then([size, FNAME, &path](auto file) {
-    return seastar::do_with(
-      file,
-      [size, FNAME, &path](auto &f) -> seastar::future<>
-    {
-      DEBUG("path={} created, truncating to {}", path, size);
-      ceph_assert(f);
-      return f.truncate(
-        size
-      ).then([&f, size] {
-        return f.allocate(0, size);
-      }).finally([&f] {
-        return f.close();
-      });
-    });
-  }).then_wrapped([&path, FNAME](auto f) -> check_create_device_ret {
-    if (f.failed()) {
-      try {
-	f.get();
-	return seastar::now();
-      } catch (const std::system_error &e) {
-	if (e.code().value() == EEXIST) {
-          ERROR("path={} exists", path);
-	  return seastar::now();
-	} else {
-          ERROR("path={} creation error -- {}", path, e);
-	  return crimson::ct_error::input_output_error::make();
-	}
-      } catch (...) {
-        ERROR("path={} creation error", path);
-	return crimson::ct_error::input_output_error::make();
-      }
-    }
-
-    DEBUG("path={} complete", path);
-    std::ignore = f.discard_result();
-    return seastar::now();
-  });
+    std::move(sm_config),
+    std::move(shard_infos));
 }
 
 using open_device_ret = 
@@ -313,8 +305,13 @@ open_device_ret open_device(
     ).then([stat, &path, FNAME](auto file) mutable {
       return file.size().then([stat, file, &path, FNAME](auto size) mutable {
         stat.size = size;
-        INFO("path={} successful, size={}, block_size={}", 
-        path, stat.size, stat.block_size);
+        // Use Seastar's DMA alignment for optimal I/O alignment; clamp to
+        // laddr_t::UNIT_SIZE since SeaStore operates at 4 KiB granularity
+        // and rejects smaller device-reported block sizes.
+        stat.block_size = std::max<uint64_t>(file.disk_write_dma_alignment(),
+                                             laddr_t::UNIT_SIZE);
+        INFO("path={} successful, size=0x{:x}, block_size=0x{:x}",
+             path, stat.size, stat.block_size);
         return std::make_pair(file, stat);
       });
     });
@@ -330,28 +327,33 @@ BlockSegmentManager::access_ertr::future<>
 write_superblock(
     device_id_t device_id,
     seastar::file &device,
-    block_sm_superblock_t sb)
+    device_superblock_t sb)
 {
   LOG_PREFIX(block_write_superblock);
   DEBUG("{} write {}", device_id_printer_t{device_id}, sb);
   sb.validate();
-  assert(ceph::encoded_sizeof<block_sm_superblock_t>(sb) <
-	 sb.block_size);
+  assert(SUPERBLOCK_HEADER_PREFIX +
+	 ceph::encoded_sizeof<device_superblock_t>(sb) < sb.block_size);
   return seastar::do_with(
     bufferptr(ceph::buffer::create_page_aligned(sb.block_size)),
     [=, &device](auto &bp)
   {
+    bp.zero();
+    // magic at offset 0, followed by 37 bytes of null padding (already zero)
+    std::memcpy(bp.c_str(),
+		CRIMSON_DEVICE_SUPERBLOCK_MAGIC.data(), SUPERBLOCK_MAGIC_SIZE);
+    // DENC-encoded superblock at offset 60
     bufferlist bl;
     encode(sb, bl);
     auto iter = bl.begin();
-    assert(bl.length() < sb.block_size);
-    iter.copy(bl.length(), bp.c_str());
+    assert(SUPERBLOCK_HEADER_PREFIX + bl.length() < sb.block_size);
+    iter.copy(bl.length(), bp.c_str() + SUPERBLOCK_HEADER_PREFIX);
     return do_write(device_id, device, 0, bp);
   });
 }
 
 static
-BlockSegmentManager::access_ertr::future<block_sm_superblock_t>
+BlockSegmentManager::access_ertr::future<device_superblock_t>
 read_superblock(seastar::file &device, seastar::stat_data sd)
 {
   LOG_PREFIX(block_read_superblock);
@@ -367,9 +369,22 @@ read_superblock(seastar::file &device, seastar::stat_data sd)
       bp.length(),
       bp
     ).safe_then([=, &bp] {
+      // verify magic at offset 0
+      superblock_magic_t disk_magic;
+      std::memcpy(disk_magic.data(), bp.c_str(), SUPERBLOCK_MAGIC_SIZE);
+      if (disk_magic != CRIMSON_DEVICE_SUPERBLOCK_MAGIC) {
+        ERROR("invalid superblock magic, got: {:02x}",
+          fmt::join(
+            std::views::transform(disk_magic,
+              [](std::byte b) { return std::to_integer<uint8_t>(b); }),
+            " "));
+        ceph_abort_msg("invalid superblock magic");
+      }
+      // decode DENC superblock from offset 60
       bufferlist bl;
-      bl.push_back(bp);
-      block_sm_superblock_t ret;
+      bl.append(bp.c_str() + SUPERBLOCK_HEADER_PREFIX,
+		bp.length() - SUPERBLOCK_HEADER_PREFIX);
+      device_superblock_t ret;
       auto bliter = bl.cbegin();
       try {
         decode(ret, bliter);
@@ -377,9 +392,9 @@ read_superblock(seastar::file &device, seastar::stat_data sd)
         ERROR("got decode error!");
         ceph_assert(0 == "invalid superblock");
       }
-      assert(ceph::encoded_sizeof<block_sm_superblock_t>(ret) <
-             sd.block_size);
-      return BlockSegmentManager::access_ertr::future<block_sm_superblock_t>(
+      assert(SUPERBLOCK_HEADER_PREFIX +
+	     ceph::encoded_sizeof<device_superblock_t>(ret) <= sd.block_size);
+      return BlockSegmentManager::access_ertr::future<device_superblock_t>(
         BlockSegmentManager::access_ertr::ready_future_marker{},
         ret);
     });
@@ -405,19 +420,19 @@ Segment::write_ertr::future<> BlockSegment::write(
 {
   LOG_PREFIX(BlockSegment::write);
   auto paddr = paddr_t::make_seg_paddr(id, offset);
-  DEBUG("{} offset={}~{} poffset={} ...",
+  DEBUG("{} offset=0x{:x}~0x{:x} poffset=0x{:x} ...",
         id, offset, bl.length(), manager.get_offset(paddr));
 
   if (offset < write_pointer ||
       offset % manager.superblock.block_size != 0 ||
       bl.length() % manager.superblock.block_size != 0) {
-    ERROR("{} offset={}~{} poffset={} invalid write",
+    ERROR("{} offset=0x{:x}~0x{:x} poffset=0x{:x} invalid write",
           id, offset, bl.length(), manager.get_offset(paddr));
     return crimson::ct_error::invarg::make();
   }
 
   if (offset + bl.length() > manager.superblock.segment_size) {
-    ERROR("{} offset={}~{} poffset={} write out of the range {}",
+    ERROR("{} offset=0x{:x}~0x{:x} poffset=0x{:x} write out of the range 0x{:x}",
           id, offset, bl.length(), manager.get_offset(paddr),
           manager.superblock.segment_size);
     return crimson::ct_error::enospc::make();
@@ -438,7 +453,7 @@ Segment::close_ertr::future<> BlockSegmentManager::segment_close(
   LOG_PREFIX(BlockSegmentManager::segment_close);
   auto s_id = id.device_segment_id();
   int unused_bytes = get_segment_size() - write_pointer;
-  INFO("{} unused_bytes={} ...", id, unused_bytes);
+  INFO("{} unused_bytes=0x{:x} ...", id, unused_bytes);
 
   assert(unused_bytes >= 0);
   assert(id.device_id() == get_device_id());
@@ -449,7 +464,8 @@ Segment::close_ertr::future<> BlockSegmentManager::segment_close(
   stats.closed_segments_unused_bytes += unused_bytes;
   stats.metadata_write.increment(tracker->get_size());
   return tracker->write_out(
-      get_device_id(), device, superblock.tracker_offset);
+      get_device_id(), device,
+      shard_info.tracker_offset);
 }
 
 Segment::write_ertr::future<> BlockSegmentManager::segment_write(
@@ -472,30 +488,90 @@ BlockSegmentManager::~BlockSegmentManager()
 {
 }
 
+seastar::future<> BlockSegmentManager::start(uint32_t shard_nums)
+{
+  LOG_PREFIX(BlockSegmentManager::start);
+  device_shard_nums = shard_nums;
+  auto num_shard_services = (device_shard_nums + seastar::this_smp_shard_count() - 1 ) / seastar::this_smp_shard_count();
+  INFO("device_shard_nums={} seastar::smp={}, num_shard_services={}", device_shard_nums, seastar::this_smp_shard_count(), num_shard_services);
+  return shard_devices.start(num_shard_services, device_path, superblock.config.spec.dtype);
+
+}
+
+seastar::future<> BlockSegmentManager::stop()
+{
+  return shard_devices.stop();
+}
+
+Device& BlockSegmentManager::get_sharded_device(store_index_t store_index)
+{
+  assert(store_index < shard_devices.local().mshard_devices.size());
+  return *shard_devices.local().mshard_devices[store_index];
+}
+
+SegmentManager::read_ertr::future<uint32_t> BlockSegmentManager::get_shard_nums()
+{
+  return open_device(
+    device_path
+  ).safe_then([this](auto p) {
+    device = std::move(p.first);
+    auto sd = p.second;
+    return read_superblock(device, sd);
+  }).safe_then([](auto sb) {
+    return read_ertr::make_ready_future<uint32_t>(sb.shard_num);
+  }).handle_error(
+    crimson::ct_error::assert_all(
+      "Invalid error in BlockSegmentManager::get_shard_nums"
+    )
+  );
+}
+
 BlockSegmentManager::mount_ret BlockSegmentManager::mount()
 {
-  LOG_PREFIX(BlockSegmentManager::mount);
+  return shard_devices.invoke_on_all([](auto &local_device) {
+    return seastar::do_for_each(local_device.mshard_devices, [](auto& mshard_device) {
+      return mshard_device->shard_mount(
+      ).handle_error(
+        crimson::ct_error::assert_all(
+          "Invalid error in BlockSegmentManager::mount"
+      ));
+    });
+  });
+}
+
+BlockSegmentManager::mount_ret BlockSegmentManager::shard_mount()
+{
+  LOG_PREFIX(BlockSegmentManager::shard_mount);
   return open_device(
     device_path
   ).safe_then([=, this](auto p) {
     device = std::move(p.first);
     auto sd = p.second;
     return read_superblock(device, sd);
-  }).safe_then([=, this](auto sb) {
+  }).safe_then([=, this](auto sb) ->mount_ertr::future<> {
     set_device_id(sb.config.spec.id);
-    INFO("{} read {}", device_id_printer_t{get_device_id()}, sb);
+    if(seastar::this_shard_id() + seastar::this_smp_shard_count() * store_index >= sb.shard_num) {
+      INFO("{} shard_id {} out of range {}",
+      device_id_printer_t{get_device_id()},
+        seastar::this_shard_id() + seastar::this_smp_shard_count() * store_index,
+        sb.shard_num);
+      shard_status = false;
+      return mount_ertr::now();
+    }
+    shard_info = sb.shard_infos[seastar::this_shard_id() + seastar::this_smp_shard_count() * store_index];
+    INFO("{} read {}", device_id_printer_t{get_device_id()}, shard_info);
     sb.validate();
     superblock = sb;
     stats.data_read.increment(
-        ceph::encoded_sizeof<block_sm_superblock_t>(superblock));
+        ceph::encoded_sizeof<device_superblock_t>(superblock));
     tracker = std::make_unique<SegmentStateTracker>(
-      superblock.segments,
+      shard_info.segments,
       superblock.block_size);
     stats.data_read.increment(tracker->get_size());
     return tracker->read_in(
       get_device_id(),
       device,
-      superblock.tracker_offset
+      shard_info.tracker_offset
     ).safe_then([this] {
       for (device_segment_id_t i = 0; i < tracker->get_capacity(); ++i) {
 	if (tracker->get(i) == segment_state_t::OPEN) {
@@ -504,56 +580,88 @@ BlockSegmentManager::mount_ret BlockSegmentManager::mount()
       }
       stats.metadata_write.increment(tracker->get_size());
       return tracker->write_out(
-          get_device_id(), device, superblock.tracker_offset);
+          get_device_id(), device,
+          shard_info.tracker_offset);
     });
   }).safe_then([this, FNAME] {
     INFO("{} complete", device_id_printer_t{get_device_id()});
-    register_metrics();
+    register_metrics(store_index);
   });
 }
 
 BlockSegmentManager::mkfs_ret BlockSegmentManager::mkfs(
   device_config_t sm_config)
 {
-  LOG_PREFIX(BlockSegmentManager::mkfs);
+  return shard_devices.local().mshard_devices[0]->primary_mkfs(sm_config
+  ).safe_then([this] {
+    return shard_devices.invoke_on_all([](auto &local_device) {
+      return seastar::do_for_each(local_device.mshard_devices, [](auto& mshard_device) {
+        return mshard_device->shard_mkfs(
+        ).handle_error(
+          crimson::ct_error::assert_all(
+            "Invalid error in BlockSegmentManager::mkfs"
+        ));
+      });
+    });
+  });
+}
+
+BlockSegmentManager::mkfs_ret BlockSegmentManager::primary_mkfs(
+  device_config_t sm_config)
+{
+  LOG_PREFIX(BlockSegmentManager::primary_mkfs);
+  ceph_assert(sm_config.spec.dtype == superblock.config.spec.dtype);
   set_device_id(sm_config.spec.id);
   INFO("{} path={}, {}",
        device_id_printer_t{get_device_id()}, device_path, sm_config);
-  return seastar::do_with(
-    seastar::file{},
-    seastar::stat_data{},
-    block_sm_superblock_t{},
-    std::unique_ptr<SegmentStateTracker>(),
-    [=, this](auto &device, auto &stat, auto &sb, auto &tracker)
-  {
-    check_create_device_ret maybe_create = check_create_device_ertr::now();
-    using crimson::common::get_conf;
-    if (get_conf<bool>("seastore_block_create")) {
-      auto size = get_conf<Option::size_t>("seastore_device_size");
-      maybe_create = check_create_device(device_path, size);
-    }
 
-    return maybe_create.safe_then([this] {
-      return open_device(device_path);
-    }).safe_then([&, sm_config](auto p) {
-      device = p.first;
-      stat = p.second;
-      sb = make_superblock(get_device_id(), sm_config, stat);
-      stats.metadata_write.increment(
-          ceph::encoded_sizeof<block_sm_superblock_t>(sb));
-      return write_superblock(get_device_id(), device, sb);
-    }).safe_then([&, FNAME, this] {
-      DEBUG("{} superblock written", device_id_printer_t{get_device_id()});
-      tracker.reset(new SegmentStateTracker(sb.segments, sb.block_size));
-      stats.metadata_write.increment(tracker->get_size());
-      return tracker->write_out(
-          get_device_id(), device, sb.tracker_offset);
-    }).finally([&] {
-      return device.close();
-    }).safe_then([FNAME, this] {
-      INFO("{} complete", device_id_printer_t{get_device_id()});
-      return mkfs_ertr::now();
-    });
+  seastar::file device;
+  seastar::stat_data stat;
+  device_superblock_t sb;
+  std::unique_ptr<SegmentStateTracker> tracker;
+
+  using crimson::common::get_conf;
+  if (get_conf<bool>("seastore_block_create")) {
+    auto size = get_conf<Option::size_t>("seastore_device_size");
+     co_await check_create_device(device_path, size);
+  }
+  auto p = co_await open_device(device_path);
+  device = p.first;
+  stat = p.second;
+  auto closer = seastar::defer([&device] {
+    std::ignore = device.close();
+  });
+  sb = make_superblock(get_device_id(), sm_config, stat);
+  stats.metadata_write.increment(ceph::encoded_sizeof<device_superblock_t>(sb));
+  co_await write_superblock(get_device_id(), device, sb);
+  INFO("{} complete", device_id_printer_t{get_device_id()});
+}
+
+BlockSegmentManager::mkfs_ret BlockSegmentManager::shard_mkfs()
+{
+  LOG_PREFIX(BlockSegmentManager::shard_mkfs);
+  return open_device(
+    device_path
+  ).safe_then([this](auto p) {
+    device = std::move(p.first);
+    auto sd = p.second;
+    return read_superblock(device, sd);
+  }).safe_then([this, FNAME](auto sb) {
+    set_device_id(sb.config.spec.id);
+    shard_info = sb.shard_infos[seastar::this_shard_id()];
+    INFO("{} read {}", device_id_printer_t{get_device_id()}, shard_info);
+    sb.validate();
+    tracker.reset(new SegmentStateTracker(
+      shard_info.segments, sb.block_size));
+    stats.metadata_write.increment(tracker->get_size());
+    return tracker->write_out(
+      get_device_id(), device,
+      shard_info.tracker_offset);
+  }).finally([this] {
+    return device.close();
+  }).safe_then([FNAME, this] {
+    INFO("{} complete", device_id_printer_t{get_device_id()});
+    return mkfs_ertr::now();
   });
 }
 
@@ -587,7 +695,8 @@ SegmentManager::open_ertr::future<SegmentRef> BlockSegmentManager::open(
   tracker->set(s_id, segment_state_t::OPEN);
   stats.metadata_write.increment(tracker->get_size());
   return tracker->write_out(
-      get_device_id(), device, superblock.tracker_offset
+      get_device_id(), device,
+      shard_info.tracker_offset
   ).safe_then([this, id, FNAME] {
     ++stats.opened_segments;
     DEBUG("{} done", id);
@@ -620,7 +729,60 @@ SegmentManager::release_ertr::future<> BlockSegmentManager::release(
   ++stats.released_segments;
   stats.metadata_write.increment(tracker->get_size());
   return tracker->write_out(
-      get_device_id(), device, superblock.tracker_offset);
+      get_device_id(), device,
+      shard_info.tracker_offset);
+}
+
+SegmentManager::read_ertr::future<> BlockSegmentManager::readv(
+  paddr_t addr,
+  std::vector<bufferptr> ptrs)
+{
+  LOG_PREFIX(BlockSegmentManager::readv);
+  size_t len = 0;
+  for (auto &ptr : ptrs) {
+    len += ptr.length();
+  }
+  auto& seg_addr = addr.as_seg_paddr();
+  auto id = seg_addr.get_segment_id();
+  auto s_id = id.device_segment_id();
+  auto s_off = seg_addr.get_segment_off();
+  auto p_off = get_offset(addr);
+  DEBUG("{} offset=0x{:x}~0x{:x} poffset=0x{:x} ...", id, s_off, len, p_off);
+
+  assert(addr.get_device_id() == get_device_id());
+
+  if (s_off % superblock.block_size != 0 ||
+      len % superblock.block_size != 0) {
+    ERROR("{} offset=0x{:x}~0x{:x} poffset=0x{:x} invalid read", id, s_off, len, p_off);
+    return crimson::ct_error::invarg::make();
+  }
+
+  if (s_id >= get_num_segments()) {
+    ERROR("{} offset=0x{:x}~0x{:x} poffset=0x{:x} segment-id out of range {}",
+          id, s_off, len, p_off, get_num_segments());
+    return crimson::ct_error::invarg::make();
+  }
+
+  if (s_off + len > superblock.segment_size) {
+    ERROR("{} offset=0x{:x}~0x{:x} poffset=0x{:x} read out of range 0x{:x}",
+          id, s_off, len, p_off, superblock.segment_size);
+    return crimson::ct_error::invarg::make();
+  }
+
+  if (tracker->get(s_id) == segment_state_t::EMPTY) {
+    // XXX: not an error during scanning,
+    // might need refactor to increase the log level
+    DEBUG("{} offset=0x{:x}~0x{:x} poffset=0x{:x} invalid state {}",
+          id, s_off, len, p_off, tracker->get(s_id));
+    return crimson::ct_error::enoent::make();
+  }
+
+  stats.data_read.increment(len);
+  return do_readv(
+    get_device_id(),
+    device,
+    p_off,
+    std::move(ptrs));
 }
 
 SegmentManager::read_ertr::future<> BlockSegmentManager::read(
@@ -634,24 +796,24 @@ SegmentManager::read_ertr::future<> BlockSegmentManager::read(
   auto s_id = id.device_segment_id();
   auto s_off = seg_addr.get_segment_off();
   auto p_off = get_offset(addr);
-  DEBUG("{} offset={}~{} poffset={} ...", id, s_off, len, p_off);
+  DEBUG("{} offset=0x{:x}~0x{:x} poffset=0x{:x} ...", id, s_off, len, p_off);
 
   assert(addr.get_device_id() == get_device_id());
 
   if (s_off % superblock.block_size != 0 ||
       len % superblock.block_size != 0) {
-    ERROR("{} offset={}~{} poffset={} invalid read", id, s_off, len, p_off);
+    ERROR("{} offset=0x{:x}~0x{:x} poffset=0x{:x} invalid read", id, s_off, len, p_off);
     return crimson::ct_error::invarg::make();
   }
 
   if (s_id >= get_num_segments()) {
-    ERROR("{} offset={}~{} poffset={} segment-id out of range {}",
+    ERROR("{} offset=0x{:x}~0x{:x} poffset=0x{:x} segment-id out of range {}",
           id, s_off, len, p_off, get_num_segments());
     return crimson::ct_error::invarg::make();
   }
 
   if (s_off + len > superblock.segment_size) {
-    ERROR("{} offset={}~{} poffset={} read out of range {}",
+    ERROR("{} offset=0x{:x}~0x{:x} poffset=0x{:x} read out of range 0x{:x}",
           id, s_off, len, p_off, superblock.segment_size);
     return crimson::ct_error::invarg::make();
   }
@@ -659,7 +821,7 @@ SegmentManager::read_ertr::future<> BlockSegmentManager::read(
   if (tracker->get(s_id) == segment_state_t::EMPTY) {
     // XXX: not an error during scanning,
     // might need refactor to increase the log level
-    DEBUG("{} offset={}~{} poffset={} invalid state {}",
+    DEBUG("{} offset=0x{:x}~0x{:x} poffset=0x{:x} invalid state {}",
           id, s_off, len, p_off, tracker->get(s_id));
     return crimson::ct_error::enoent::make();
   }
@@ -673,14 +835,23 @@ SegmentManager::read_ertr::future<> BlockSegmentManager::read(
     out);
 }
 
-void BlockSegmentManager::register_metrics()
+void BlockSegmentManager::register_metrics(store_index_t store_index)
 {
   LOG_PREFIX(BlockSegmentManager::register_metrics);
+  if (!shard_status) {
+    INFO("{} shard {} is not active, skip registering metrics",
+         device_id_printer_t{get_device_id()}, store_index);
+    return;
+  }
+
   DEBUG("{}", device_id_printer_t{get_device_id()});
   namespace sm = seastar::metrics;
   std::vector<sm::label_instance> label_instances;
   label_instances.push_back(sm::label_instance("device_id", get_device_id()));
+  label_instances.push_back(
+    sm::label_instance("shard_device_index", std::to_string(store_index)));
   stats.reset();
+
   metrics.add_group(
     "segment_manager",
     {
@@ -688,61 +859,61 @@ void BlockSegmentManager::register_metrics()
         "data_read_num",
         stats.data_read.num,
         sm::description("total number of data read"),
-	label_instances
+        label_instances
       ),
       sm::make_counter(
         "data_read_bytes",
         stats.data_read.bytes,
         sm::description("total bytes of data read"),
-	label_instances
+        label_instances
       ),
       sm::make_counter(
         "data_write_num",
         stats.data_write.num,
         sm::description("total number of data write"),
-	label_instances
+        label_instances
       ),
       sm::make_counter(
         "data_write_bytes",
         stats.data_write.bytes,
         sm::description("total bytes of data write"),
-	label_instances
+        label_instances
       ),
       sm::make_counter(
         "metadata_write_num",
         stats.metadata_write.num,
         sm::description("total number of metadata write"),
-	label_instances
+        label_instances
       ),
       sm::make_counter(
         "metadata_write_bytes",
         stats.metadata_write.bytes,
         sm::description("total bytes of metadata write"),
-	label_instances
+        label_instances
       ),
       sm::make_counter(
         "opened_segments",
         stats.opened_segments,
         sm::description("total segments opened"),
-	label_instances
+        label_instances
       ),
       sm::make_counter(
         "closed_segments",
         stats.closed_segments,
         sm::description("total segments closed"),
-	label_instances
+        label_instances
       ),
       sm::make_counter(
         "closed_segments_unused_bytes",
         stats.closed_segments_unused_bytes,
         sm::description("total unused bytes of closed segments"),
-	label_instances
+        label_instances
       ),
       sm::make_counter(
         "released_segments",
         stats.released_segments,
         sm::description("total segments released"),
-	label_instances
+	      label_instances
       ),
     }
   );

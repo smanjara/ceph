@@ -1,7 +1,7 @@
 import argparse
 from ceph_volume.util import arg_validators
 
-def create_parser(prog, description):
+def create_parser(prog: str, description: str) -> argparse.ArgumentParser:
     """
     Both prepare and create share the same parser, those are defined here to
     avoid duplication
@@ -12,6 +12,14 @@ def create_parser(prog, description):
         description=description,
     )
     parser.add_argument(
+        '--objectstore',
+        dest='objectstore',
+        help='The OSD objectstore.',
+        default='bluestore',
+        choices=['bluestore', 'seastore'],
+        type=str,
+    ),
+    parser.add_argument(
         '--data',
         required=True,
         type=arg_validators.ValidRawDevice(as_string=True),
@@ -20,7 +28,8 @@ def create_parser(prog, description):
     parser.add_argument(
         '--bluestore',
         action='store_true',
-        help='Use BlueStore backend')
+        help='Use BlueStore backend. (DEPRECATED: use --objectstore instead)'
+    )
     parser.add_argument(
         '--crush-device-class',
         dest='crush_device_class',
@@ -46,7 +55,40 @@ def create_parser(prog, description):
     )
     parser.add_argument(
         '--dmcrypt',
-        action='store_true',
+        action=arg_validators.DmcryptAction,
         help='Enable device encryption via dm-crypt',
+    )
+    parser.add_argument(
+        '--with-tpm',
+        dest='with_tpm',
+        help='Whether encrypted OSDs should be enrolled with TPM.',
+        action='store_true'
+    ),
+    parser.add_argument(
+        '--tpm2-pcrs',
+        dest='tpm2_pcrs',
+        help=('PCRs for systemd-cryptenroll --tpm2-pcrs when using --with-tpm '
+              '(default binds to Secure Boot policy, see systemd-cryptenroll(1)).'),
+        default='7',
+        type=str,
+    ),
+    parser.add_argument(
+        '--osd-id',
+        help='Reuse an existing OSD id',
+        default=None,
+        type=arg_validators.valid_osd_id,
+    )
+    parser.add_argument(
+        '--osd-fsid',
+        help='Reuse an existing OSD fsid',
+        default=None,
+    )
+    parser.add_argument(
+        '--osd-type',
+        dest='osd_type',
+        help='The Ceph OSD type to use.',
+        default='classic',
+        choices=['classic', 'crimson'],
+        type=str,
     )
     return parser

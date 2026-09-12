@@ -1,8 +1,7 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
-#ifndef CEPH_RGW_SYNC_H
-#define CEPH_RGW_SYNC_H
+#pragma once
 
 #include <atomic>
 
@@ -16,6 +15,7 @@
 #include "rgw_sal_rados.h"
 #include "rgw_sync_trace.h"
 #include "rgw_mdlog.h"
+#include "sync_fairness.h"
 
 #define ERROR_LOGGER_SHARDS 32
 #define RGW_SYNC_ERROR_LOG_SHARD_PREFIX "sync.error-log"
@@ -40,11 +40,11 @@ struct rgw_mdlog_entry {
 
   void decode_json(JSONObj *obj);
 
-  bool convert_from(cls_log_entry& le) {
+  bool convert_from(cls::log::entry& le) {
     id = le.id;
     section = le.section;
     name = le.name;
-    timestamp = le.timestamp.to_real_time();
+    timestamp = le.timestamp;
     try {
       auto iter = le.data.cbegin();
       decode(log_data, iter);
@@ -181,6 +181,7 @@ struct RGWMetaSyncEnv {
   RGWHTTPManager *http_manager{nullptr};
   RGWSyncErrorLogger *error_logger{nullptr};
   RGWSyncTraceManager *sync_tracer{nullptr};
+  rgw::sync_fairness::BidManager* bid_manager{nullptr};
 
   RGWMetaSyncEnv() {}
 
@@ -225,7 +226,7 @@ public:
       http_manager(store->ctx(), completion_mgr),
       status_manager(_sm) {}
 
-  virtual ~RGWRemoteMetaLog() override;
+  ~RGWRemoteMetaLog() override;
 
   int init();
   void finish();
@@ -235,7 +236,7 @@ public:
   int read_master_log_shards_next(const DoutPrefixProvider *dpp, const std::string& period, std::map<int, std::string> shard_markers, std::map<int, rgw_mdlog_shard_data> *result);
   int read_sync_status(const DoutPrefixProvider *dpp, rgw_meta_sync_status *sync_status);
   int init_sync_status(const DoutPrefixProvider *dpp);
-  int run_sync(const DoutPrefixProvider *dpp, optional_yield y);
+  int run_sync(const DoutPrefixProvider *dpp, optional_yield y, rgw::sal::ConfigStore* cfgstore);
 
   void wakeup(int shard_id);
 
@@ -293,7 +294,7 @@ public:
     return master_log.read_master_log_shards_next(dpp, period, shard_markers, result);
   }
 
-  int run(const DoutPrefixProvider *dpp, optional_yield y) { return master_log.run_sync(dpp, y); }
+  int run(const DoutPrefixProvider *dpp, optional_yield y, rgw::sal::ConfigStore* cfgstore) { return master_log.run_sync(dpp, y, cfgstore); }
 
 
   // implements DoutPrefixProvider
@@ -370,7 +371,7 @@ public:
     }
   }
 
-  bool start(const T& pos, int index_pos, const real_time& timestamp) {
+  bool start(const T& pos, uint64_t index_pos, const real_time& timestamp) {
     if (pending.find(pos) != pending.end()) {
       return false;
     }
@@ -378,7 +379,7 @@ public:
     return true;
   }
 
-  void try_update_high_marker(const T& pos, int index_pos, const real_time& timestamp) {
+  void try_update_high_marker(const T& pos, uint64_t index_pos, const real_time& timestamp) {
     finish_markers[pos] = marker_entry(index_pos, timestamp);
   }
 
@@ -546,4 +547,3 @@ RGWCoroutine* create_list_remote_mdlog_shard_cr(RGWMetaSyncEnv *env,
                                                 uint32_t max_entries,
                                                 rgw_mdlog_shard_data *result);
 
-#endif

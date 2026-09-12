@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -42,10 +43,19 @@
 #define EVENT_SUBTREEMAP_TEST   50
 #define EVENT_NOOP        51
 
+#define EVENT_SEGMENT      100
+#define EVENT_LID          101
+
 
 #include "include/buffer_fwd.h"
-#include "include/Context.h"
 #include "include/utime.h"
+
+#include "LogSegmentRef.h"
+
+#include <map>
+#include <memory>
+#include <ostream>
+#include <string>
 
 class MDSRank;
 class LogSegment;
@@ -110,8 +120,7 @@ public:
   virtual EMetaBlob *get_metablob() { return NULL; }
 
 protected:
-  LogSegment* get_segment() { return _segment; }
-  LogSegment const* get_segment() const { return _segment; }
+  LogSegmentRef const& get_segment() const { return _segment; }
 
   utime_t stamp;
 
@@ -122,12 +131,7 @@ private:
 
   EventType _type = 0;
   uint64_t _start_off = 0;
-  LogSegment *_segment = nullptr;
+  LogSegmentRef _segment = nullptr;
 };
-
-inline std::ostream& operator<<(std::ostream& out, const LogEvent &le) {
-  le.print(out);
-  return out;
-}
 
 #endif

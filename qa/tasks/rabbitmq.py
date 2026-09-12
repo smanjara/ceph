@@ -19,31 +19,70 @@ def install_rabbitmq(ctx, config):
     assert isinstance(config, dict)
     log.info('Installing RabbitMQ...')
 
+    os_version = teuthology.get_distro_version(ctx)
+    os_major_version = int(os_version.split('.')[0])
+
     for (client, _) in config.items():
         (remote,) = ctx.cluster.only(client).remotes.keys()
 
         ctx.cluster.only(client).run(args=[
-             'sudo', 'yum', '-y', 'install', 'epel-release'
+             'sudo', 'dnf', '-y', 'install', 'epel-release'
         ])
 
-        link1 = 'https://packagecloud.io/install/repositories/rabbitmq/erlang/script.rpm.sh'
+        if os_major_version >= 10:
+            # packagecloud repos don't support EL10, use RabbitMQ yum
+            # repos with el/9 packages which are compatible with EL10
+            repo_el_version = '9'
+            erlang_repo = (
+                '[rabbitmq-erlang]\n'
+                'name=rabbitmq-erlang\n'
+                'baseurl=https://yum1.rabbitmq.com/erlang/el/{v}/$basearch\n'
+                '        https://yum2.rabbitmq.com/erlang/el/{v}/$basearch\n'
+                'repo_gpgcheck=0\n'
+                'enabled=1\n'
+                'gpgcheck=0\n'
+                'sslverify=1\n'
+                'sslcacert=/etc/pki/tls/certs/ca-bundle.crt\n'
+            ).format(v=repo_el_version)
+            ctx.cluster.only(client).run(args=[
+                'sudo', 'bash', '-c',
+                'echo -e \'{repo}\' > /etc/yum.repos.d/rabbitmq-erlang.repo'.format(
+                    repo=erlang_repo),
+            ])
+
+            rabbitmq_repo = (
+                '[rabbitmq-server]\n'
+                'name=rabbitmq-server\n'
+                'baseurl=https://yum2.rabbitmq.com/rabbitmq/el/{v}/noarch\n'
+                '        https://yum1.rabbitmq.com/rabbitmq/el/{v}/noarch\n'
+                'repo_gpgcheck=0\n'
+                'enabled=1\n'
+                'gpgcheck=0\n'
+                'sslverify=1\n'
+                'sslcacert=/etc/pki/tls/certs/ca-bundle.crt\n'
+            ).format(v=repo_el_version)
+            ctx.cluster.only(client).run(args=[
+                'sudo', 'bash', '-c',
+                'echo -e \'{repo}\' > /etc/yum.repos.d/rabbitmq-server.repo'.format(
+                    repo=rabbitmq_repo),
+            ])
+        else:
+            link1 = 'https://packagecloud.io/install/repositories/rabbitmq/erlang/script.rpm.sh'
+            ctx.cluster.only(client).run(args=[
+                 'curl', '-s', link1, run.Raw('|'), 'sudo', 'bash'
+            ])
+
+            link2 = 'https://packagecloud.io/install/repositories/rabbitmq/rabbitmq-server/script.rpm.sh'
+            ctx.cluster.only(client).run(args=[
+                 'curl', '-s', link2, run.Raw('|'), 'sudo', 'bash'
+            ])
 
         ctx.cluster.only(client).run(args=[
-             'curl', '-s', link1, run.Raw('|'), 'sudo', 'bash'
+             'sudo', 'dnf', '-y', 'install', 'erlang'
         ])
 
         ctx.cluster.only(client).run(args=[
-             'sudo', 'yum', '-y', 'install', 'erlang'
-        ])
-
-        link2 = 'https://packagecloud.io/install/repositories/rabbitmq/rabbitmq-server/script.rpm.sh'
-
-        ctx.cluster.only(client).run(args=[
-             'curl', '-s', link2, run.Raw('|'), 'sudo', 'bash'
-        ])
-
-        ctx.cluster.only(client).run(args=[
-             'sudo', 'yum', '-y', 'install', 'rabbitmq-server'
+             'sudo', 'dnf', '-y', 'install', 'rabbitmq-server'
         ])
 
     try:
@@ -53,7 +92,7 @@ def install_rabbitmq(ctx, config):
 
         for (client, _) in config.items():
             ctx.cluster.only(client).run(args=[
-                 'sudo', 'yum', '-y', 'remove', 'rabbitmq-server.noarch'
+                 'sudo', 'dnf', '-y', 'remove', 'rabbitmq-server.noarch'
             ])
 
 
@@ -70,22 +109,25 @@ def run_rabbitmq(ctx, config):
         (remote,) = ctx.cluster.only(client).remotes.keys()
 
         ctx.cluster.only(client).run(args=[
-             'sudo', 'chkconfig', 'rabbitmq-server', 'on'
+             'echo', 'loopback_users.guest = false', run.Raw('|'), 'sudo', 'tee', '-a', '/etc/rabbitmq/rabbitmq.conf'
             ],
         )
 
         ctx.cluster.only(client).run(args=[
-             'sudo', '/sbin/service', 'rabbitmq-server', 'start'
+             'sudo', 'systemctl', 'enable', 'rabbitmq-server'
             ],
         )
 
-        '''
+        ctx.cluster.only(client).run(args=[
+             'sudo', 'systemctl', 'start', 'rabbitmq-server'
+            ],
+        )
+
         # To check whether rabbitmq-server is running or not
         ctx.cluster.only(client).run(args=[
-             'sudo', '/sbin/service', 'rabbitmq-server', 'status'
+             'sudo', 'systemctl', 'status', 'rabbitmq-server'
             ],
         )
-        '''
 
     try:
         yield
@@ -96,7 +138,7 @@ def run_rabbitmq(ctx, config):
             (remote,) = ctx.cluster.only(client).remotes.keys()
 
             ctx.cluster.only(client).run(args=[
-                 'sudo', '/sbin/service', 'rabbitmq-server', 'stop'
+                 'sudo', 'systemctl', 'stop', 'rabbitmq-server'
                 ],
             )
 

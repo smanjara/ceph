@@ -1,10 +1,8 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <sys/mman.h>
 #include <string.h>
-
-#include "seastar/core/sleep.hh"
 
 #include "crimson/common/log.h"
 
@@ -20,8 +18,11 @@ namespace {
 namespace crimson::os::seastore::segment_manager {
 
 std::ostream &operator<<(std::ostream &lhs, const ephemeral_config_t &c) {
-  return lhs << "ephemeral_config_t(size=" << c.size << ", block_size=" << c.block_size
-	     << ", segment_size=" << c.segment_size << ")";
+  return lhs << "ephemeral_config_t(size=0x"
+             << std::hex << c.size
+             << ", block_size=0x" << c.block_size
+             << ", segment_size=0x" << c.segment_size
+             << std::dec << ")";
 }
 
 EphemeralSegmentManagerRef create_test_ephemeral() {
@@ -30,11 +31,21 @@ EphemeralSegmentManagerRef create_test_ephemeral() {
 }
 
 device_config_t get_ephemeral_device_config(
-    std::size_t index, std::size_t num_devices)
+    std::size_t index,
+    std::size_t num_main_devices,
+    std::size_t num_cold_devices)
 {
+  auto num_devices = num_main_devices + num_cold_devices;
   assert(num_devices > index);
+  auto get_sec_dtype = [num_main_devices](std::size_t idx) {
+    if (idx < num_main_devices) {
+      return device_type_t::EPHEMERAL_MAIN;
+    } else {
+      return device_type_t::EPHEMERAL_COLD;
+    }
+  };
+
   magic_t magic = 0xabcd;
-  auto type = device_type_t::SEGMENTED_EPHEMERAL;
   bool is_major_device;
   secondary_device_set_t secondary_devices;
   if (index == 0) {
@@ -44,7 +55,13 @@ device_config_t get_ephemeral_device_config(
          ++secondary_index) {
       device_id_t secondary_id = static_cast<device_id_t>(secondary_index);
       secondary_devices.insert({
-        secondary_index, device_spec_t{magic, type, secondary_id}
+        secondary_index,
+	device_spec_t{
+	  magic,
+	  get_sec_dtype(secondary_index),
+	  backend_type_t::SEGMENTED,
+	  secondary_id
+	}
       });
     }
   } else { // index > 0
@@ -54,7 +71,12 @@ device_config_t get_ephemeral_device_config(
   device_id_t id = static_cast<device_id_t>(index);
   seastore_meta_t meta = {};
   return {is_major_device,
-          device_spec_t{magic, type, id},
+          device_spec_t{
+            magic,
+	    get_sec_dtype(index),
+	    backend_type_t::SEGMENTED,
+            id
+          },
           meta,
           secondary_devices};
 }
@@ -71,7 +93,7 @@ segment_off_t EphemeralSegment::get_write_capacity() const
 Segment::close_ertr::future<> EphemeralSegment::close()
 {
   return manager.segment_close(id).safe_then([] {
-    return seastar::sleep(std::chrono::milliseconds(1));
+    return seastar::yield();
   });
 }
 
@@ -101,7 +123,7 @@ Segment::close_ertr::future<> EphemeralSegmentManager::segment_close(segment_id_
 
   segment_state[s_id] = segment_state_t::CLOSED;
   return Segment::close_ertr::now().safe_then([] {
-    return seastar::sleep(std::chrono::milliseconds(1));
+    return seastar::yield();
   });
 }
 
@@ -122,7 +144,8 @@ Segment::write_ertr::future<> EphemeralSegmentManager::segment_write(
 {
   auto& seg_addr = addr.as_seg_paddr();
   logger().debug(
-    "segment_write to segment {} at offset {}, physical offset {}, len {}, crc {}",
+    "segment_write to segment {} at offset 0x{:x}, "
+    "physical offset 0x{:x}, len 0x{:x}, crc 0x{:x}",
     seg_addr.get_segment_id(),
     seg_addr.get_segment_off(),
     get_offset(addr),
@@ -134,7 +157,7 @@ Segment::write_ertr::future<> EphemeralSegmentManager::segment_write(
 
   bl.begin().copy(bl.length(), buffer + get_offset(addr));
   return Segment::write_ertr::now().safe_then([] {
-    return seastar::sleep(std::chrono::milliseconds(1));
+    return seastar::yield();
   });
 }
 
@@ -154,12 +177,9 @@ EphemeralSegmentManager::init_ertr::future<> EphemeralSegmentManager::init()
     return crimson::ct_error::invarg::make();
   }
 
-  void* addr = ::mmap(
-    nullptr,
-    config.size,
-    PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS,
-    -1,
-    0);
+  // memset 0 is not needed: anonymous mapping is zero-filled
+  void* addr = ::mmap(nullptr, config.size, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 
   segment_state.resize(config.size / config.segment_size, segment_state_t::EMPTY);
 
@@ -168,9 +188,8 @@ EphemeralSegmentManager::init_ertr::future<> EphemeralSegmentManager::init()
 
   buffer = (char*)addr;
 
-  ::memset(buffer, 0, config.size);
   return init_ertr::now().safe_then([] {
-    return seastar::sleep(std::chrono::milliseconds(1));
+    return seastar::yield();
   });
 }
 
@@ -230,7 +249,7 @@ SegmentManager::release_ertr::future<> EphemeralSegmentManager::release(
   ::memset(buffer + get_offset(paddr_t::make_seg_paddr(id, 0)), 0, config.segment_size);
   segment_state[s_id] = segment_state_t::EMPTY;
   return release_ertr::now().safe_then([] {
-    return seastar::sleep(std::chrono::milliseconds(1));
+    return seastar::yield();
   });
 }
 
@@ -249,7 +268,7 @@ SegmentManager::read_ertr::future<> EphemeralSegmentManager::read(
 
   if (seg_addr.get_segment_off() + len > config.segment_size) {
     logger().error(
-      "EphemeralSegmentManager::read: invalid offset {}~{}!",
+      "EphemeralSegmentManager::read: invalid offset {}~0x{:x}!",
       addr,
       len);
     return crimson::ct_error::invarg::make();
@@ -260,7 +279,8 @@ SegmentManager::read_ertr::future<> EphemeralSegmentManager::read(
   bufferlist bl;
   bl.push_back(out);
   logger().debug(
-    "segment_read to segment {} at offset {}, physical offset {}, length {}, crc {}",
+    "segment_read to segment {} at offset 0x{:x}, "
+    "physical offset 0x{:x}, length 0x{:x}, crc 0x{:x}",
     seg_addr.get_segment_id().device_segment_id(),
     seg_addr.get_segment_off(),
     get_offset(addr),
@@ -268,7 +288,50 @@ SegmentManager::read_ertr::future<> EphemeralSegmentManager::read(
     bl.begin().crc32c(len, 1));
 
   return read_ertr::now().safe_then([] {
-    return seastar::sleep(std::chrono::milliseconds(1));
+    return seastar::yield();
+  });
+}
+
+SegmentManager::read_ertr::future<> EphemeralSegmentManager::readv(
+  paddr_t addr,
+  std::vector<bufferptr> ptrs)
+{
+  size_t len = 0;
+  for (auto &ptr : ptrs) {
+    len += ptr.length();
+  }
+  auto& seg_addr = addr.as_seg_paddr();
+  if (seg_addr.get_segment_id().device_segment_id() >= get_num_segments()) {
+    logger().error(
+      "EphemeralSegmentManager::readv: invalid segment {}",
+      addr);
+    return crimson::ct_error::invarg::make();
+  }
+
+  if (seg_addr.get_segment_off() + len > config.segment_size) {
+    logger().error(
+      "EphemeralSegmentManager::read: invalid offset {}~0x{:x}!",
+      addr,
+      len);
+    return crimson::ct_error::invarg::make();
+  }
+
+  auto offset = get_offset(addr);
+  for (auto &ptr : ptrs) {
+    ptr.copy_in(0, ptr.length(), buffer + offset);
+    offset += ptr.length();
+  }
+
+  logger().debug(
+    "segment_read to segment {} at offset 0x{:x}, "
+    "physical offset 0x{:x}, length 0x{:x}",
+    seg_addr.get_segment_id().device_segment_id(),
+    seg_addr.get_segment_off(),
+    get_offset(addr),
+    len);
+
+  return read_ertr::now().safe_then([] {
+    return seastar::yield();
   });
 }
 

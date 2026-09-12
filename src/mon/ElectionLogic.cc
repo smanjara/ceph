@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -13,9 +14,15 @@
  */
 
 #include "ElectionLogic.h"
+#include "ConnectionTracker.h"
 
 #include "include/ceph_assert.h"
 #include "common/dout.h"
+
+#include <iomanip>
+#include <ostream>
+#include <sstream>
+#include <string>
 
 #define dout_subsys ceph_subsys_mon
 #undef dout_prefix
@@ -42,7 +49,6 @@ using ceph::bufferlist;
 using ceph::decode;
 using ceph::encode;
 using ceph::Formatter;
-using ceph::JSONFormatter;
 using ceph::mono_clock;
 using ceph::mono_time;
 using ceph::timespan_str;
@@ -50,6 +56,21 @@ static ostream& _prefix(std::ostream *_dout, epoch_t epoch, ElectionOwner* elect
   return *_dout << "paxos." << elector->get_my_rank()
 		<< ").electionLogic(" <<  epoch << ") ";
 }
+
+ElectionLogic::ElectionLogic(ElectionOwner *e, election_strategy es, ConnectionTracker *t,
+			     double ipm,
+			     CephContext *c) : elector(e), peer_tracker(t), cct(c),
+					       last_election_winner(-1), last_voted_for(-1),
+					       ignore_propose_margin(ipm),
+					       stable_peer_tracker(),
+					       leader_peer_tracker(),
+					       leader_acked(-1),
+					       strategy(es),
+					       participating(true),
+					       electing_me(false) {}
+
+ElectionLogic::~ElectionLogic() noexcept = default;
+
 void ElectionLogic::init()
 {
   epoch = elector->read_persisted_epoch();
@@ -81,7 +102,7 @@ void ElectionLogic::bump_epoch(epoch_t e)
 
 void ElectionLogic::declare_standalone_victory()
 {
-  assert(elector->paxos_size() == 1 && elector->get_my_rank() == 0);
+  ceph_assert(elector->paxos_size() == 1 && elector->get_my_rank() == 0);
   init();
   bump_epoch(epoch+1);
 }
@@ -335,6 +356,12 @@ void ElectionLogic::propose_connectivity_handler(int from, epoch_t mepoch,
   ldout(cct, 10) << __func__ << " from " << from << " mepoch: "
     << mepoch << " epoch: " << epoch << dendl;
   ldout(cct, 30) << "last_election_winner: " << last_election_winner << dendl;
+  // ignore proposal from marked down mons if we are the tiebreaker
+  if (elector->is_tiebreaker(elector->get_my_rank()) &&
+      elector->is_stretch_marked_down_mons(from)) {
+    ldout(cct, 10) << "Ignoring proposal from marked down mon " << from << dendl;
+    return;
+  }
   if ((epoch % 2 == 0) &&
       last_election_winner != elector->get_my_rank() &&
       !elector->is_current_member(from)) {
@@ -398,7 +425,8 @@ void ElectionLogic::propose_connectivity_handler(int from, epoch_t mepoch,
   ldout(cct, 10) << "propose from rank=" << from << ",from_score=" << from_score
 		 << "; my score=" << my_score
 		 << "; currently acked " << leader_acked
-		 << ",leader_score=" << leader_score << dendl;
+		 << ",leader_score=" << leader_score
+     << ",disallowed_leaders=" << elector->get_disallowed_leaders() << dendl;
 
   bool my_win = (my_score >= 0) && // My score is non-zero; I am allowed to lead
     ((my_rank < from && my_score >= from_score) || // We have same scores and I have lower rank, or

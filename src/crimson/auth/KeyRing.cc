@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "KeyRing.h"
 
@@ -10,7 +10,7 @@
 #include <seastar/core/future-util.hh>
 #include <seastar/core/reactor.hh>
 
-#include "common/buffer_seastar.h"
+#include "crimson/common/buffer_seastar.h"
 #include "auth/KeyRing.h"
 #include "include/denc.h"
 #include "crimson/common/buffer_io.h"

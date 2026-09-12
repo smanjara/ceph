@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_CLS_RBD_CLIENT_H
 #define CEPH_LIBRBD_CLS_RBD_CLIENT_H
@@ -9,6 +9,8 @@
 #include "common/snap_types.h"
 #include "include/types.h"
 #include "include/rados/librados_fwd.hpp"
+
+#include <boost/optional.hpp>
 
 class Context;
 namespace ceph { template <uint8_t> class BitVector; }
@@ -329,8 +331,17 @@ void dir_remove_image(librados::ObjectWriteOperation *op,
 void dir_rename_image(librados::ObjectWriteOperation *op,
                       const std::string &src, const std::string &dest,
                       const std::string &id);
+[[deprecated("in favor of read/write variants")]]
 void dir_state_assert(librados::ObjectOperation *op,
                       cls::rbd::DirectoryState directory_state);
+template<typename ObjectOperation>
+void dir_state_assert(ObjectOperation *op,
+                      cls::rbd::DirectoryState directory_state)
+{
+  bufferlist bl;
+  encode(directory_state, bl);
+  op->exec(cls::rbd::method::dir_state_assert, bl);
+}
 int dir_state_assert(librados::IoCtx *ioctx, const std::string &oid,
                      cls::rbd::DirectoryState directory_state);
 void dir_state_set(librados::ObjectWriteOperation *op,
@@ -388,6 +399,11 @@ int mirror_mode_get(librados::IoCtx *ioctx,
                     cls::rbd::MirrorMode *mirror_mode);
 int mirror_mode_set(librados::IoCtx *ioctx,
                     cls::rbd::MirrorMode mirror_mode);
+
+int mirror_remote_namespace_get(librados::IoCtx *ioctx,
+				std::string *mirror_namespace);
+int mirror_remote_namespace_set(librados::IoCtx *ioctx,
+				const std::string &mirror_namespace);
 
 int mirror_peer_ping(librados::IoCtx *ioctx,
                      const std::string& site_name,
@@ -580,11 +596,24 @@ int group_snap_remove(librados::IoCtx *ioctx, const std::string &oid,
 int group_snap_get_by_id(librados::IoCtx *ioctx, const std::string &oid,
                          const std::string &snap_id,
                          cls::rbd::GroupSnapshot *snapshot);
+void group_snap_list_start(librados::ObjectReadOperation *op,
+                           const cls::rbd::GroupSnapshot &start,
+                           uint64_t max_return);
+int group_snap_list_finish(ceph::buffer::list::const_iterator *iter,
+                           std::vector<cls::rbd::GroupSnapshot> *snapshots);
 int group_snap_list(librados::IoCtx *ioctx, const std::string &oid,
                     const cls::rbd::GroupSnapshot &start,
                     uint64_t max_return,
                     std::vector<cls::rbd::GroupSnapshot> *snapshots);
-
+void group_snap_list_order_start(librados::ObjectReadOperation *op,
+                                 const std::string &start_snap_id,
+                                 uint64_t max_return);
+int group_snap_list_order_finish(ceph::buffer::list::const_iterator *iter,
+                                 std::map<std::string, uint64_t> *snap_order);
+int group_snap_list_order(librados::IoCtx *ioctx, const std::string &oid,
+                          const std::string &snap_id, uint64_t max_return,
+                          std::map<std::string, uint64_t> *snap_order);
+ 
 // operations on rbd_trash object
 void trash_add(librados::ObjectWriteOperation *op,
                const std::string &id,

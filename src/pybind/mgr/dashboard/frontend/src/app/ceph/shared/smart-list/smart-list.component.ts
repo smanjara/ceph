@@ -18,7 +18,8 @@ import {
 @Component({
   selector: 'cd-smart-list',
   templateUrl: './smart-list.component.html',
-  styleUrls: ['./smart-list.component.scss']
+  styleUrls: ['./smart-list.component.scss'],
+  standalone: false
 })
 export class SmartListComponent implements OnInit, OnChanges {
   @ViewChild('innerNav')
@@ -40,7 +41,10 @@ export class SmartListComponent implements OnInit, OnChanges {
 
   isEmpty = _.isEmpty;
 
-  constructor(private osdService: OsdService, private hostService: HostService) {}
+  constructor(
+    private osdService: OsdService,
+    private hostService: HostService
+  ) {}
 
   isSmartError(data: any): data is SmartError {
     return _.get(data, 'error') !== undefined;
@@ -194,7 +198,7 @@ smartmontools is required to successfully retrieve data.`;
         prop: 'errors_corrected_by_rereads_rewrites',
         name: $localize`Errors Corrected by Rereads/Rewrites`
       },
-      { prop: 'gigabytes_processed', name: $localize`Gigabyes Processed` },
+      { prop: 'gigabytes_processed', name: $localize`Gigabytes Processed` },
       { prop: 'total_errors_corrected', name: $localize`Total Errors Corrected` },
       { prop: 'total_uncorrected_errors', name: $localize`Total Errors Uncorrected` }
     ];

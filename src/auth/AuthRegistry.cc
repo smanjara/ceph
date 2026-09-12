@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "AuthRegistry.h"
 
@@ -9,6 +9,7 @@
 #endif
 #include "none/AuthNoneAuthorizeHandler.h"
 #include "common/ceph_context.h"
+#include "common/StackStringStream.h"
 #include "common/debug.h"
 #include "auth/KeyRing.h"
 
@@ -17,11 +18,13 @@
 #define dout_prefix *_dout << "AuthRegistry(" << this << ") "
 
 using std::string;
+using namespace std::literals;
 
 AuthRegistry::AuthRegistry(CephContext *cct)
   : cct(cct)
 {
   cct->_conf.add_observer(this);
+  _refresh_config();
 }
 
 AuthRegistry::~AuthRegistry()
@@ -32,29 +35,27 @@ AuthRegistry::~AuthRegistry()
   }
 }
 
-const char** AuthRegistry::get_tracked_conf_keys() const
+std::vector<std::string> AuthRegistry::get_tracked_keys() const noexcept
 {
-  static const char *keys[] = {
-    "auth_supported",
-    "auth_client_required",
-    "auth_cluster_required",
-    "auth_service_required",
-    "ms_mon_cluster_mode",
-    "ms_mon_service_mode",
-    "ms_mon_client_mode",
-    "ms_cluster_mode",
-    "ms_service_mode",
-    "ms_client_mode",
-    "keyring",
-    NULL
+  return {
+    "auth_client_required"s,
+    "auth_cluster_required"s,
+    "auth_service_required"s,
+    "ms_mon_cluster_mode"s,
+    "ms_mon_service_mode"s,
+    "ms_mon_client_mode"s,
+    "ms_cluster_mode"s,
+    "ms_service_mode"s,
+    "ms_client_mode"s,
+    "keyring"s
   };
-  return keys;
 }
 
 void AuthRegistry::handle_conf_change(
   const ConfigProxy& conf,
   const std::set<std::string>& changed)
 {
+  ldout(cct, 20) << __func__ << ": changed: " << changed << dendl;
   std::scoped_lock l(lock);
   _refresh_config();
 }
@@ -114,15 +115,20 @@ void AuthRegistry::_parse_mode_list(const string& s,
 
 void AuthRegistry::_refresh_config()
 {
-  if (cct->_conf->auth_supported.size()) {
-    _parse_method_list(cct->_conf->auth_supported, &cluster_methods);
-    _parse_method_list(cct->_conf->auth_supported, &service_methods);
-    _parse_method_list(cct->_conf->auth_supported, &client_methods);
-  } else {
-    _parse_method_list(cct->_conf->auth_cluster_required, &cluster_methods);
-    _parse_method_list(cct->_conf->auth_service_required, &service_methods);
-    _parse_method_list(cct->_conf->auth_client_required, &client_methods);
-  }
+  auto cluster_required = cct->_conf.get_val<std::string>("auth_cluster_required");
+  auto service_required = cct->_conf.get_val<std::string>("auth_service_required");
+  auto client_required = cct->_conf.get_val<std::string>("auth_client_required");
+
+  ldout(cct,10) << __func__ << ": conf values "
+                << " cluster_required=" << cluster_required
+                << " service_required=" << service_required
+                << " client_required=" << client_required
+                << dendl;
+
+  _parse_method_list(cluster_required, &cluster_methods);
+  _parse_method_list(service_required, &service_methods);
+  _parse_method_list(client_required, &client_methods);
+
   _parse_mode_list(cct->_conf.get_val<string>("ms_mon_cluster_mode"),
 		   &mon_cluster_modes);
   _parse_mode_list(cct->_conf.get_val<string>("ms_mon_service_mode"),
@@ -159,9 +165,12 @@ void AuthRegistry::_refresh_config()
     }
   }
   if (any_cephx) {
+    ldout(cct, 20) << "attempting to load cephx key" << dendl;
     KeyRing k;
-    int r = k.from_ceph_context(cct);
-    if (r == -ENOENT) {
+    CachedStackStringStream css;
+    int r = k.from_ceph_context(cct, css.get());
+    if (r < 0) {
+      ldout(cct, 5) << "removing any cephx auth method as loading cephx key failed: " << css->strv() << dendl;
       for (auto *p : {&cluster_methods, &service_methods, &client_methods}) {
 	auto q = std::find(p->begin(), p->end(), CEPH_AUTH_CEPHX);
 	if (q != p->end()) {
@@ -169,10 +178,6 @@ void AuthRegistry::_refresh_config()
 	  _no_keyring_disabled_cephx = true;
 	}
       }
-    }
-    if (_no_keyring_disabled_cephx) {
-      lderr(cct) << "no keyring found at " << cct->_conf->keyring
-	       << ", disabling cephx" << dendl;
     }
   }
 }

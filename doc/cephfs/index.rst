@@ -10,14 +10,13 @@ a state-of-the-art, multi-use, highly available, and performant file store for
 a variety of applications, including traditional use-cases like shared home
 directories, HPC scratch space, and distributed workflow shared storage.
 
-CephFS achieves these goals through the use of some novel architectural
-choices.  Notably, file metadata is stored in a separate RADOS pool from file
-data and served via a resizable cluster of *Metadata Servers*, or **MDS**,
-which may scale to support higher throughput metadata workloads.  Clients of
-the file system have direct access to RADOS for reading and writing file data
-blocks. For this reason, workloads may linearly scale with the size of the
-underlying RADOS object store; that is, there is no gateway or broker mediating
-data I/O for clients.
+CephFS achieves these goals through novel architectural choices. Notably, file
+metadata is stored in a RADOS pool separate from file data and is served via a
+resizable cluster of *Metadata Servers*, or **MDS**\es, which scale to support
+higher-throughput workloads. Clients of the file system have direct access to
+RADOS for reading and writing file data blocks. This makes it possible for
+workloads to scale linearly with the size of the underlying RADOS object store.
+There is no gateway or broker that mediates data I/O for clients.
 
 Access to data is coordinated through the cluster of MDS which serve as
 authorities for the state of the distributed metadata cache cooperatively
@@ -52,14 +51,15 @@ as needed`_. You can also `create other CephFS volumes`_.
 
 Finally, to mount CephFS on your client nodes, see `Mount CephFS:
 Prerequisites`_ page. Additionally, a command-line shell utility is available
-for interactive access or scripting via the `cephfs-shell`_.
+for interactive access or scripting via the :ref:`cephfs-shell <cephfs-shell>`.
+To provision CephFS volumes for Kubernetes and other container platforms,
+see :ref:`csi-cephfs`.
 
 .. _Orchestrator: ../mgr/orchestrator
 .. _deploy MDS manually as needed: add-remove-mds
 .. _create other CephFS volumes: fs-volumes
 .. _Orchestrator deployment table: ../mgr/orchestrator/#current-implementation-status
 .. _Mount CephFS\: Prerequisites: mount-prerequisites
-.. _cephfs-shell: ../man/8/cephfs-shell
 
 
 .. raw:: html
@@ -73,7 +73,7 @@ Administration
 
    --->
 
-.. toctree:: 
+.. toctree::
    :maxdepth: 1
    :hidden:
 
@@ -84,6 +84,7 @@ Administration
     MDS failover and standby configuration <standby>
     MDS Cache Configuration <cache-configuration>
     MDS Configuration Settings <mds-config-ref>
+    MDS Quality of Service <mds-qos>
     Manual: ceph-mds <../../man/8/ceph-mds>
     Export over NFS <nfs>
     Application best practices <app-best-practices>
@@ -92,8 +93,11 @@ Administration
     Health messages <health-messages>
     Upgrading old file systems <upgrading>
     CephFS Top Utility <cephfs-top>
+    cephfs-tool <cephfs-tool>
     Scheduled Snapshots <snap-schedule>
     CephFS Snapshot Mirroring <cephfs-mirroring>
+    CephFS Snapshot Mirroring Checkpoints <cephfs-mirroring-checkpoints>
+    Purge Queue <purge-queue>
 
 .. raw:: html
 
@@ -106,7 +110,7 @@ Mounting CephFS
 
    --->
 
-.. toctree:: 
+.. toctree::
    :maxdepth: 1
    :hidden:
 
@@ -134,7 +138,7 @@ CephFS Concepts
 
    --->
 
-.. toctree:: 
+.. toctree::
    :maxdepth: 1
    :hidden:
 
@@ -144,10 +148,13 @@ CephFS Concepts
     File layouts <file-layouts>
     Distributed Metadata Cache <mdcache>
     Dynamic Metadata Management in CephFS <dynamic-metadata-management>
-    CephFS IO Path <cephfs-io-path>
+    CephFS I/O Path <cephfs-io-path>
+    Case Sensitivity and Normalization <charmap>
     LazyIO <lazyio>
     Directory fragmentation <dirfrags>
     Multiple active MDS daemons <multimds>
+    Snapshots <snapshots>
+    fscrypt <fscrypt>
 
 
 .. raw:: html
@@ -161,17 +168,18 @@ Troubleshooting and Disaster Recovery
 
    --->
 
-.. toctree:: 
+.. toctree::
    :hidden:
 
     Client eviction <eviction>
     Scrubbing the File System <scrub>
+    Damaged ranks <damaged-rank>
     Handling full file systems <full>
     Metadata repair <disaster-recovery-experts>
     Troubleshooting <troubleshooting>
     Disaster recovery <disaster-recovery>
     cephfs-journal-tool <cephfs-journal-tool>
-    Recovering file system after monitor store loss <recover-fs-after-mon-store-loss>
+    Recovering file system after Monitor store loss <recover-fs-after-mon-store-loss>
 
 
 .. raw:: html
@@ -185,7 +193,7 @@ Developer Guides
 
    --->
 
-.. toctree:: 
+.. toctree::
    :maxdepth: 1
    :hidden:
 
@@ -193,6 +201,7 @@ Developer Guides
     Client's Capabilities <capabilities>
     Java and Python bindings <api/index>
     Mantle <mantle>
+    Metrics <metrics>
 
 
 .. raw:: html

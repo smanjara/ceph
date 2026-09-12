@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 /*
  * Ceph - scalable distributed file system
@@ -118,7 +118,7 @@ private:
   std::thread lock_keeper;
   std::condition_variable lock_keeper_cvar;
   std::mutex lock_keeper_mutex;
-  time last_renewal = time::min();
+  time last_renewal = clock::zero();
   std::chrono::milliseconds lock_keeper_interval{2000};
   std::chrono::milliseconds lock_keeper_timeout{30000};
   std::atomic<bool> blocklisted = false;

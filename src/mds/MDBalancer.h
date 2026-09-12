@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -14,21 +15,28 @@
 #ifndef CEPH_MDBALANCER_H
 #define CEPH_MDBALANCER_H
 
+#include <cstdint>
+#include <map>
+#include <set>
+#include <string>
+#include <vector>
+
 #include "include/types.h"
+#include "common/ceph_time.h" // for coarse_mono_time()
+#include "include/cephfs/types.h" // for mds_rank_t
 #include "common/Clock.h"
-#include "common/Cond.h"
+#include "common/ref.h"
 
-#include "msg/Message.h"
-#include "messages/MHeartbeat.h"
-
-#include "MDSMap.h"
-
+struct dirfrag_t;
+struct mds_load_t;
+class MDSMap;
 class MDSRank;
 class MHeartbeat;
 class CInode;
 class CDir;
 class Messenger;
 class MonClient;
+class Message;
 
 class MDBalancer {
 public:
@@ -37,6 +45,7 @@ public:
   friend class C_Bal_SendHeartbeat;
 
   MDBalancer(MDSRank *m, Messenger *msgr, MonClient *monc);
+  ~MDBalancer() noexcept;
 
   void handle_conf_change(const std::set<std::string>& changed, const MDSMap& mds_map);
 
@@ -60,9 +69,7 @@ public:
 
   void queue_split(const CDir *dir, bool fast);
   void queue_merge(CDir *dir);
-  bool is_fragment_pending(dirfrag_t df) {
-    return split_pending.count(df) || merge_pending.count(df);
-  }
+  bool is_fragment_pending(dirfrag_t df);
 
   /**
    * Based on size and configuration, decide whether to issue a queue_split
@@ -76,12 +83,27 @@ public:
 
   int dump_loads(Formatter *f, int64_t depth = -1) const;
 
+  bool get_bal_export_pin() const {
+    return bal_export_pin;
+  }
+  int64_t get_bal_merge_size() const {
+    return bal_merge_size;
+  }
+  int64_t get_bal_split_size() const {
+    return bal_split_size;
+  }
+  double get_bal_fragment_fast_factor() const {
+    return bal_fragment_fast_factor;
+  }
+
 private:
   typedef struct {
     std::map<mds_rank_t, double> targets;
     std::map<mds_rank_t, double> imported;
     std::map<mds_rank_t, double> exported;
   } balance_state_t;
+
+  static const unsigned int AUTH_TREES_THRESHOLD = 5;
 
   //set up the rebalancing targets for export and do one if the
   //MDSMap is up to date
@@ -121,7 +143,20 @@ private:
 
   bool bal_fragment_dirs;
   int64_t bal_fragment_interval;
-  static const unsigned int AUTH_TREES_THRESHOLD = 5;
+  int64_t bal_interval;
+  int64_t bal_max_until;
+  int64_t bal_mode;
+  bool bal_export_pin;
+  double bal_sample_interval;
+  double bal_split_rd;
+  double bal_split_wr;
+  double bal_replicate_threshold;
+  double bal_unreplicate_threshold;
+  double bal_fragment_fast_factor;
+  int64_t bal_split_bits;
+  int64_t bal_split_size;
+  int64_t bal_merge_size;
+  int64_t num_bal_times;
 
   MDSRank *mds;
   Messenger *messenger;

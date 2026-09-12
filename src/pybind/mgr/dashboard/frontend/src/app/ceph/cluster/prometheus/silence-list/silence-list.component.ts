@@ -1,13 +1,11 @@
 import { Component, Inject } from '@angular/core';
 
 import { NgbModalRef } from '@ng-bootstrap/ng-bootstrap';
-import { SortDirection, SortPropDir } from '@swimlane/ngx-datatable';
 import { Observable, Subscriber } from 'rxjs';
 
-import { PrometheusListHelper } from '~/app/ceph/cluster/prometheus/prometheus-list-helper';
-import { SilenceFormComponent } from '~/app/ceph/cluster/prometheus/silence-form/silence-form.component';
+import { PrometheusListHelper } from '~/app/shared/helpers/prometheus-list-helper';
 import { PrometheusService } from '~/app/shared/api/prometheus.service';
-import { CriticalConfirmationModalComponent } from '~/app/shared/components/critical-confirmation-modal/critical-confirmation-modal.component';
+import { DeleteConfirmationModalComponent } from '~/app/shared/components/delete-confirmation-modal/delete-confirmation-modal.component';
 import { ActionLabelsI18n, SucceededActionLabelsI18n } from '~/app/shared/constants/app.constants';
 import { CellTemplate } from '~/app/shared/enum/cell-template.enum';
 import { Icons } from '~/app/shared/enum/icons.enum';
@@ -20,21 +18,21 @@ import { Permission } from '~/app/shared/models/permissions';
 import { PrometheusRule } from '~/app/shared/models/prometheus-alerts';
 import { CdDatePipe } from '~/app/shared/pipes/cd-date.pipe';
 import { AuthStorageService } from '~/app/shared/services/auth-storage.service';
-import { ModalService } from '~/app/shared/services/modal.service';
+import { ModalCdsService } from '~/app/shared/services/modal-cds.service';
 import { NotificationService } from '~/app/shared/services/notification.service';
 import { PrometheusSilenceMatcherService } from '~/app/shared/services/prometheus-silence-matcher.service';
 import { URLBuilderService } from '~/app/shared/services/url-builder.service';
+import { CdSortDirection } from '~/app/shared/enum/cd-sort-direction';
+import { CdSortPropDir } from '~/app/shared/models/cd-sort-prop-dir';
 
 const BASE_URL = 'monitoring/silences';
 
 @Component({
-  providers: [
-    { provide: URLBuilderService, useValue: new URLBuilderService(BASE_URL) },
-    SilenceFormComponent
-  ],
+  providers: [{ provide: URLBuilderService, useValue: new URLBuilderService(BASE_URL) }],
   selector: 'cd-silences-list',
   templateUrl: './silence-list.component.html',
-  styleUrls: ['./silence-list.component.scss']
+  styleUrls: ['./silence-list.component.scss'],
+  standalone: false
 })
 export class SilenceListComponent extends PrometheusListHelper {
   silences: AlertmanagerSilence[] = [];
@@ -44,23 +42,22 @@ export class SilenceListComponent extends PrometheusListHelper {
   selection = new CdTableSelection();
   modalRef: NgbModalRef;
   customCss = {
-    'badge badge-danger': 'active',
-    'badge badge-warning': 'pending',
-    'badge badge-default': 'expired'
+    'tag-danger': 'active',
+    'tag-warning': 'pending',
+    'tag-default': 'expired'
   };
-  sorts: SortPropDir[] = [{ prop: 'endsAt', dir: SortDirection.desc }];
+  sorts: CdSortPropDir[] = [{ prop: 'endsAt', dir: CdSortDirection.desc }];
   rules: PrometheusRule[];
   visited: boolean;
 
   constructor(
     private authStorageService: AuthStorageService,
     private cdDatePipe: CdDatePipe,
-    private modalService: ModalService,
+    private modalService: ModalCdsService,
     private notificationService: NotificationService,
     private urlBuilder: URLBuilderService,
     private actionLabels: ActionLabelsI18n,
     private succeededLabels: SucceededActionLabelsI18n,
-    private silenceFormComponent: SilenceFormComponent,
     private silenceMatcher: PrometheusSilenceMatcherService,
     @Inject(PrometheusService) prometheusService: PrometheusService
   ) {
@@ -125,7 +122,7 @@ export class SilenceListComponent extends PrometheusListHelper {
         name: $localize`Alerts Silenced`,
         prop: 'silencedAlerts',
         flexGrow: 3,
-        cellTransformation: CellTemplate.badge
+        cellTransformation: CellTemplate.tag
       },
       {
         name: $localize`Created by`,
@@ -150,7 +147,14 @@ export class SilenceListComponent extends PrometheusListHelper {
       {
         name: $localize`Status`,
         prop: 'status.state',
-        cellTransformation: CellTemplate.classAdding
+        cellTransformation: CellTemplate.tag,
+        customTemplateConfig: {
+          map: {
+            active: { class: 'tag-danger' },
+            pending: { class: 'tag-warning' },
+            expired: { class: 'tag-default' }
+          }
+        }
       }
     ];
   }
@@ -163,7 +167,7 @@ export class SilenceListComponent extends PrometheusListHelper {
           const activeSilences = silences.filter(
             (silence: AlertmanagerSilence) => silence.status.state !== 'expired'
           );
-          this.getAlerts(activeSilences);
+          this.loadRulesAndMatchAlerts(activeSilences);
         },
         () => {
           this.prometheusService.disableAlertmanagerConfig();
@@ -176,13 +180,32 @@ export class SilenceListComponent extends PrometheusListHelper {
     this.selection = selection;
   }
 
-  getAlerts(silences: any) {
-    const rules = this.silenceFormComponent.getRules();
-    silences.forEach((silence: any) => {
-      silence.matchers.forEach((matcher: any) => {
-        this.rules = this.silenceMatcher.getMatchedRules(matcher, rules);
+  private loadRulesAndMatchAlerts(silences: AlertmanagerSilence[]) {
+    this.prometheusService.ifPrometheusConfigured(
+      () =>
+        this.prometheusService.getRules().subscribe(
+          (groups) => {
+            this.rules = groups.groups.flatMap((group) => group.rules);
+            this.getAlerts(silences);
+          },
+          () => {
+            this.rules = [];
+            this.getAlerts(silences);
+          }
+        ),
+      () => {
+        this.rules = [];
+        this.getAlerts(silences);
+      }
+    );
+  }
+
+  getAlerts(silences: AlertmanagerSilence[]) {
+    silences.forEach((silence) => {
+      silence.matchers.forEach((matcher) => {
+        const matchedRules = this.silenceMatcher.getMatchedRules(matcher, this.rules);
         const alertNames: string[] = [];
-        for (const rule of this.rules) {
+        for (const rule of matchedRules) {
           alertNames.push(rule.name);
         }
         silence.silencedAlerts = alertNames;
@@ -194,7 +217,7 @@ export class SilenceListComponent extends PrometheusListHelper {
     const id = this.selection.first().id;
     const i18nSilence = $localize`Silence`;
     const applicationName = 'Prometheus';
-    this.modalRef = this.modalService.show(CriticalConfirmationModalComponent, {
+    this.modalRef = this.modalService.show(DeleteConfirmationModalComponent, {
       itemDescription: i18nSilence,
       itemNames: [id],
       actionDescription: this.actionLabels.EXPIRE,

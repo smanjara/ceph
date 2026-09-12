@@ -1,24 +1,15 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #pragma once
 
 #include <string>
 #include <functional>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <boost/optional.hpp>
 
 #include "include/common_fwd.h"
 
 namespace rgw::kafka {
-// forward declaration of connection object
-struct connection_t;
-
-typedef boost::intrusive_ptr<connection_t> connection_ptr_t;
-
-// required interfaces needed so that connection_t could be used inside boost::intrusive_ptr
-void intrusive_ptr_add_ref(const connection_t* p);
-void intrusive_ptr_release(const connection_t* p);
 
 // the reply callback is expected to get an integer parameter
 // indicating the result, and not to return anything
@@ -30,28 +21,75 @@ bool init(CephContext* cct);
 // shutdown the kafka manager
 void shutdown();
 
+// key class for the connection list
+struct connection_id_t {
+  std::string broker;
+  std::string user;
+  std::string password;
+  std::string ca_location;
+  std::string mechanism;
+  std::string ssl_certificate;
+  std::string ssl_key;
+  std::string ssl_key_password;
+  std::string kerberos_service_name;
+  std::string kerberos_principal;
+  std::string kerberos_keytab;
+  bool ssl = false;
+  bool verify_ssl = true;
+  connection_id_t() = default;
+  connection_id_t(const std::string& _broker,
+                  const std::string& _user,
+                  const std::string& _password,
+                  const boost::optional<const std::string&>& _ca_location,
+                  const boost::optional<const std::string&>& _mechanism,
+                  bool _ssl,
+                  bool _verify_ssl,
+                  const boost::optional<const std::string&>& _ssl_certificate,
+                  const boost::optional<const std::string&>& _ssl_key,
+                  const boost::optional<const std::string&>& _ssl_key_password,
+                  const boost::optional<const std::string&>& _kerberos_service_name,
+                  const boost::optional<const std::string&>& _kerberos_principal,
+                  const boost::optional<const std::string&>& _kerberos_keytab);
+};
+
+std::string to_string(const connection_id_t& id);
+
 // connect to a kafka endpoint
-connection_ptr_t connect(const std::string& url, bool use_ssl, bool verify_ssl, boost::optional<const std::string&> ca_location);
+bool connect(connection_id_t& conn_id,
+             const std::string& url,
+             bool use_ssl,
+             bool verify_ssl,
+             boost::optional<const std::string&> ca_location,
+             boost::optional<const std::string&> mechanism,
+             boost::optional<const std::string&> user_name,
+             boost::optional<const std::string&> password,
+             boost::optional<const std::string&> brokers,
+             boost::optional<const std::string&> ssl_certificate,
+             boost::optional<const std::string&> ssl_key,
+             boost::optional<const std::string&> ssl_key_password,
+             boost::optional<const std::string&> kerberos_service_name,
+             boost::optional<const std::string&> kerberos_principal,
+             boost::optional<const std::string&> kerberos_keytab);
 
 // publish a message over a connection that was already created
-int publish(connection_ptr_t& conn,
-    const std::string& topic,
-    const std::string& message);
+int publish(const connection_id_t& conn_id,
+            const std::string& topic,
+            const std::string& message);
 
 // publish a message over a connection that was already created
 // and pass a callback that will be invoked (async) when broker confirms
 // receiving the message
-int publish_with_confirm(connection_ptr_t& conn, 
-    const std::string& topic,
-    const std::string& message,
-    reply_callback_t cb);
+int publish_with_confirm(const connection_id_t& conn_id,
+                         const std::string& topic,
+                         const std::string& message,
+                         reply_callback_t cb);
 
 // convert the integer status returned from the "publish" function to a string
 std::string status_to_string(int s);
 
 // number of connections
 size_t get_connection_count();
-  
+
 // return the number of messages that were sent
 // to broker, but were not yet acked/nacked/timedout
 size_t get_inflight();
@@ -70,12 +108,6 @@ size_t get_max_inflight();
 
 // maximum number of messages in the queue
 size_t get_max_queue();
-
-// disconnect from a kafka broker
-bool disconnect(connection_ptr_t& conn);
-
-// display connection as string
-std::string to_string(const connection_ptr_t& conn);
 
 }
 

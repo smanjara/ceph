@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -12,8 +13,9 @@
  */
 
 #include "DaemonServer.h"
-#include <boost/algorithm/string.hpp>
-#include "mgr/Mgr.h"
+#include "DaemonState.h"
+#include "Mgr.h"
+#include "MgrSession.h"
 
 #include "include/stringify.h"
 #include "include/str_list.h"
@@ -24,7 +26,10 @@
 #include "mgr/DaemonHealthMetricCollector.h"
 #include "mgr/OSDPerfMetricCollector.h"
 #include "mgr/MDSPerfMetricCollector.h"
+#include "mgr/MgrOpRequest.h"
+#include "mon/MonClient.h"
 #include "mon/MonCommand.h"
+#include "msg/Messenger.h"
 
 #include "messages/MMgrOpen.h"
 #include "messages/MMgrUpdate.h"
@@ -35,11 +40,25 @@
 #include "messages/MCommandReply.h"
 #include "messages/MMgrCommand.h"
 #include "messages/MMgrCommandReply.h"
+#include "messages/MMgrReport.h"
 #include "messages/MPGStats.h"
 #include "messages/MOSDScrub2.h"
 #include "messages/MOSDForceRecovery.h"
+#include "common/debug.h"
 #include "common/errno.h"
+#include "common/JSONFormatter.h"
 #include "common/pick_address.h"
+#include "common/TextTable.h"
+#include "crush/CrushWrapper.h"
+
+#include <boost/algorithm/string.hpp>
+
+#include <iomanip>
+
+#include <list>
+#include <map>
+#include <string>
+#include <vector>
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_mgr
@@ -47,8 +66,10 @@
 #define dout_prefix *_dout << "mgr.server " << __func__ << " "
 
 using namespace TOPNSPC::common;
+using namespace std::literals;
 
 using std::list;
+using std::ostream;
 using std::ostringstream;
 using std::string;
 using std::stringstream;
@@ -78,7 +99,7 @@ DaemonServer::DaemonServer(MonClient *monc_,
 					g_conf().get_val<uint64_t>("mgr_client_messages"))),
       osd_byte_throttler(new Throttle(g_ceph_context, "mgr_osd_bytes",
 				      g_conf().get_val<Option::size_t>("mgr_osd_bytes"))),
-      osd_msg_throttler(new Throttle(g_ceph_context, "mgr_osd_messsages",
+      osd_msg_throttler(new Throttle(g_ceph_context, "mgr_osd_messages",
 				     g_conf().get_val<uint64_t>("mgr_osd_messages"))),
       mds_byte_throttler(new Throttle(g_ceph_context, "mgr_mds_bytes",
 				      g_conf().get_val<Option::size_t>("mgr_mds_bytes"))),
@@ -96,22 +117,69 @@ DaemonServer::DaemonServer(MonClient *monc_,
       py_modules(py_modules_),
       clog(clog_),
       audit_clog(audit_clog_),
+      asok_hook(nullptr),
       pgmap_ready(false),
       timer(g_ceph_context, lock),
-      shutting_down(false),
       tick_event(nullptr),
       osd_perf_metric_collector_listener(this),
       osd_perf_metric_collector(osd_perf_metric_collector_listener),
       mds_perf_metric_collector_listener(this),
-      mds_perf_metric_collector(mds_perf_metric_collector_listener)
+      mds_perf_metric_collector(mds_perf_metric_collector_listener),
+      op_tracker(g_ceph_context, g_ceph_context->_conf->mgr_enable_op_tracker,
+                                 g_ceph_context->_conf->mgr_num_op_tracker_shard),
+      stats_autotuner(std::make_unique<StatsAutotuner>(
+        g_conf().get_val<int64_t>("mgr_stats_period")))
 {
   g_conf().add_observer(this);
+  /* define op size and time for mgr daemon */
+  op_tracker.set_complaint_and_threshold(cct->_conf->mgr_op_complaint_time,
+                                         cct->_conf->mgr_op_log_threshold);
+  op_tracker.set_history_size_and_duration(cct->_conf->mgr_op_history_size,
+                                           cct->_conf->mgr_op_history_duration);
+  op_tracker.set_history_slow_op_size_and_threshold(cct->_conf->mgr_op_history_slow_op_size,
+                                                    cct->_conf->mgr_op_history_slow_op_threshold);
+}
+
+void DaemonServer::shutdown()
+{
+  bool expected = false;
+  if (!shutting_down.compare_exchange_strong(expected, true)) {
+    return;
+  }
+
+  op_tracker.on_shutdown();
+
+  delete msgr;
+  msgr = nullptr;
+  g_conf().remove_observer(this);
 }
 
 DaemonServer::~DaemonServer() {
-  delete msgr;
-  g_conf().remove_observer(this);
+  shutdown();
 }
+
+class DaemonServerHook : public AdminSocketHook {
+  DaemonServer *daemon_server;
+public:
+  explicit DaemonServerHook(DaemonServer *o) : daemon_server(o) {}
+  int call(std::string_view admin_command,
+           const cmdmap_t& cmdmap,
+           const bufferlist&,
+           Formatter *f,
+           std::ostream& errss,
+           bufferlist& out) override {
+    stringstream outss;
+    int r = 0;
+    try {
+      r = daemon_server->asok_command(admin_command, cmdmap, f, outss);
+      out.append(outss);
+    } catch (const TOPNSPC::common::bad_cmd_get& e) {
+      errss << e.what();
+      r = -EINVAL;
+    }
+    return r;
+  }
+};
 
 int DaemonServer::init(uint64_t gid, entity_addrvec_t client_addrs)
 {
@@ -121,8 +189,20 @@ int DaemonServer::init(uint64_t gid, entity_addrvec_t client_addrs)
   msgr = Messenger::create(g_ceph_context, public_msgr_type,
 			   entity_name_t::MGR(gid),
 			   "mgr",
-			   Messenger::get_pid_nonce());
+			   Messenger::get_random_nonce());
+  msgr->set_dispatch_throttle_size(
+      g_conf().get_val<Option::size_t>("mgr_dispatch_throttle_bytes"));
   msgr->set_default_policy(Messenger::Policy::stateless_server(0));
+  // throttle policy
+  msgr->set_policy(entity_name_t::TYPE_OSD,
+                   Messenger::Policy::stateless_server(
+                     CEPH_FEATURE_SERVER_LUMINOUS));
+  msgr->set_policy(entity_name_t::TYPE_MON,
+                   Messenger::Policy::lossy_client(CEPH_FEATURE_UID |
+                                                   CEPH_FEATURE_PGID64));
+  msgr->set_policy(entity_name_t::TYPE_MDS,
+                   Messenger::Policy::stateless_server(
+                     CEPH_FEATURE_SERVER_LUMINOUS));
 
   msgr->set_auth_client(monc);
 
@@ -171,6 +251,40 @@ int DaemonServer::init(uint64_t gid, entity_addrvec_t client_addrs)
   schedule_tick_locked(
     g_conf().get_val<std::chrono::seconds>("mgr_tick_period").count());
 
+  op_tracker.set_tracking(cct->_conf->mgr_enable_op_tracker);
+
+  AdminSocket *admin_socket = g_ceph_context->get_admin_socket();
+  asok_hook = new DaemonServerHook(this);
+  r = admin_socket->register_command("dump_ops_in_flight " \
+             "name=filterstr,type=CephString,n=N,req=false",
+             asok_hook,
+             "show the ops currently in flight");
+  ceph_assert(r == 0);
+  r = admin_socket->register_command("dump_blocked_ops " \
+             "name=filterstr,type=CephString,n=N,req=false",
+             asok_hook,
+             "show the blocked ops currently in flight");
+  ceph_assert(r == 0);
+  r = admin_socket->register_command("dump_blocked_ops_count " \
+             "name=filterstr,type=CephString,n=N,req=false",
+             asok_hook,
+             "show the count of blocked ops currently in flight");
+  ceph_assert(r == 0);
+  r = admin_socket->register_command("dump_historic_ops " \
+             "name=filterstr,type=CephString,n=N,req=false",
+             asok_hook,
+             "show recent ops");
+  ceph_assert(r == 0);
+  r = admin_socket->register_command("dump_historic_slow_ops " \
+             "name=filterstr,type=CephString,n=N,req=false",
+             asok_hook,
+             "show slowest recent ops");
+  ceph_assert(r == 0);
+  r = admin_socket->register_command("dump_historic_ops_by_duration " \
+             "name=filterstr,type=CephString,n=N,req=false",
+             asok_hook,
+             "show slowest recent ops, sorted by duration");
+  ceph_assert(r == 0);
   return 0;
 }
 
@@ -179,7 +293,7 @@ entity_addrvec_t DaemonServer::get_myaddrs() const
   return msgr->get_myaddrs();
 }
 
-int DaemonServer::ms_handle_authentication(Connection *con)
+bool DaemonServer::ms_handle_fast_authentication(Connection *con)
 {
   auto s = ceph::make_ref<MgrSession>(cct);
   con->set_priv(s);
@@ -190,7 +304,7 @@ int DaemonServer::ms_handle_authentication(Connection *con)
 	   << " addr " << con->get_peer_addrs()
 	   << dendl;
 
-  AuthCapsInfo &caps_info = con->get_peer_caps_info();
+  auto& caps_info = con->get_peer_caps_info();
   if (caps_info.allow_all) {
     dout(10) << " session " << s << " " << s->entity_name
 	     << " allow_all" << dendl;
@@ -204,45 +318,54 @@ int DaemonServer::ms_handle_authentication(Connection *con)
     catch (buffer::error& e) {
       dout(10) << " session " << s << " " << s->entity_name
                << " failed to decode caps" << dendl;
-      return -EACCES;
+      return false;
     }
     if (!s->caps.parse(str)) {
       dout(10) << " session " << s << " " << s->entity_name
 	       << " failed to parse caps '" << str << "'" << dendl;
-      return -EACCES;
+      return false;
     }
     dout(10) << " session " << s << " " << s->entity_name
              << " has caps " << s->caps << " '" << str << "'" << dendl;
   }
+  return true;
+}
 
+void DaemonServer::ms_handle_accept(Connection* con)
+{
   if (con->get_peer_type() == CEPH_ENTITY_TYPE_OSD) {
+    auto s = ceph::ref_cast<MgrSession>(con->get_priv());
     std::lock_guard l(lock);
     s->osd_id = atoi(s->entity_name.get_id().c_str());
     dout(10) << "registering osd." << s->osd_id << " session "
 	     << s << " con " << con << dendl;
     osd_cons[s->osd_id].insert(con);
   }
-
-  return 1;
 }
 
 bool DaemonServer::ms_handle_reset(Connection *con)
 {
+  std::lock_guard l(lock);
   if (con->get_peer_type() == CEPH_ENTITY_TYPE_OSD) {
     auto priv = con->get_priv();
     auto session = static_cast<MgrSession*>(priv.get());
-    if (!session) {
-      return false;
+    if (session) {
+      dout(10) << "unregistering osd." << session->osd_id
+               << "  session " << session << " con " << con << dendl;
+      osd_cons[session->osd_id].erase(con);
     }
-    std::lock_guard l(lock);
-    dout(10) << "unregistering osd." << session->osd_id
-	     << "  session " << session << " con " << con << dendl;
-    osd_cons[session->osd_id].erase(con);
+  }
 
-    auto iter = daemon_connections.find(con);
-    if (iter != daemon_connections.end()) {
-      daemon_connections.erase(iter);
-    }
+  auto iter = daemon_connections.find(con);
+  if (iter != daemon_connections.end()) {
+    dout(10) << "removing daemon connection " << con
+             << " peer " << con->get_peer_addr()
+             << dendl;
+    daemon_connections.erase(iter);
+  } else {
+    dout(10) << "reset for untracked daemon connection " << con
+             << " peer " << con->get_peer_addr()
+             << dendl;
   }
   return false;
 }
@@ -253,7 +376,7 @@ bool DaemonServer::ms_handle_refused(Connection *con)
   return false;
 }
 
-bool DaemonServer::ms_dispatch2(const ref_t<Message>& m)
+Dispatcher::dispatch_result_t DaemonServer::ms_dispatch2(const ref_t<Message>& m)
 {
   // Note that we do *not* take ::lock here, in order to avoid
   // serializing all message handling.  It's up to each handler
@@ -325,11 +448,42 @@ void DaemonServer::maybe_ready(int32_t osd_id)
 void DaemonServer::tick()
 {
   dout(10) << dendl;
+  auto tick_period = g_conf().get_val<std::chrono::seconds>("mgr_tick_period").count();
+  utime_t now = ceph_clock_now();
+
+  if (g_conf().get_val<bool>("mgr_stats_period_autotune") &&
+      stats_autotuner->should_check_now(now, tick_period)) {
+    dout(20) << "checking whether to adjust stats period" << dendl;
+    maybe_adjust_stats_period();
+  }
   send_report();
   adjust_pgs();
 
   schedule_tick_locked(
     g_conf().get_val<std::chrono::seconds>("mgr_tick_period").count());
+}
+
+void DaemonServer::maybe_adjust_stats_period() {
+  int64_t queue_depth = msgr->get_dispatch_queue_len();
+  int64_t current_period = g_conf().get_val<int64_t>("mgr_stats_period");
+  int64_t queue_threshold = g_conf().get_val<int64_t>("mgr_stats_period_autotune_queue_threshold");
+  auto result = stats_autotuner->evaluate_adjustment(queue_depth, current_period, queue_threshold);
+
+  if (result.new_period != current_period) {
+    dout(10) << "Adjusting mgr_stats_period from " << current_period
+      << " to " << result.new_period << " seconds ("
+      << result.reason_str()
+      << ")" << dendl;
+
+    std::stringstream ss;
+    int r = cct->_conf.set_val("mgr_stats_period", std::to_string(result.new_period), &ss);
+    if (r != 0) {
+      derr << "Failed to update mgr_stats_period: " << ss.str() << dendl;
+      return;
+    }
+    stats_autotuner->record_our_change(result.new_period);  // Track that we made this change
+    cct->_conf.apply_changes(nullptr);
+  }
 }
 
 // Currently modules do not set health checks in response to events delivered to
@@ -344,11 +498,6 @@ void DaemonServer::schedule_tick_locked(double delay_sec)
     timer.cancel_event(tick_event);
     tick_event = nullptr;
   }
-
-  // on shutdown start rejecting explicit requests to send reports that may
-  // originate from python land which may still be running.
-  if (shutting_down)
-    return;
 
   tick_event = timer.add_event_after(delay_sec,
     new LambdaContext([this](int r) {
@@ -394,19 +543,6 @@ void DaemonServer::handle_mds_perf_metric_query_updated()
       }));
 }
 
-void DaemonServer::shutdown()
-{
-  dout(10) << "begin" << dendl;
-  msgr->shutdown();
-  msgr->wait();
-  cluster_state.shutdown();
-  dout(10) << "done" << dendl;
-
-  std::lock_guard l(lock);
-  shutting_down = true;
-  timer.shutdown();
-}
-
 static DaemonKey key_from_service(
   const std::string& service_name,
   int peer_type,
@@ -425,7 +561,7 @@ void DaemonServer::fetch_missing_metadata(const DaemonKey& key,
   if (!daemon_state.is_updating(key) &&
       (key.type == "osd" || key.type == "mds" || key.type == "mon")) {
     std::ostringstream oss;
-    auto c = new MetadataUpdate(daemon_state, key);
+    auto c = new MetadataUpdate(daemon_state, cluster_state, key);
     if (key.type == "osd") {
       oss << "{\"prefix\": \"osd metadata\", \"id\": "
 	  << key.name<< "}";
@@ -734,7 +870,7 @@ bool DaemonServer::handle_report(const ref_t<MMgrReport>& m)
 
   if (m->metric_report_message) {
     const MetricReportMessage &message = *m->metric_report_message;
-    boost::apply_visitor(HandlePayloadVisitor(this), message.payload);
+    std::visit(HandlePayloadVisitor(this), message.payload);
   }
 
   return true;
@@ -743,14 +879,14 @@ bool DaemonServer::handle_report(const ref_t<MMgrReport>& m)
 
 void DaemonServer::_generate_command_map(
   cmdmap_t& cmdmap,
-  map<string,string> &param_str_map)
+  std::map<string,string> &param_str_map)
 {
   for (auto p = cmdmap.begin();
        p != cmdmap.end(); ++p) {
     if (p->first == "prefix")
       continue;
     if (p->first == "caps") {
-      vector<string> cv;
+      std::vector<string> cv;
       if (cmd_getval(cmdmap, "caps", cv) &&
 	  cv.size() % 2 == 0) {
 	for (unsigned i = 0; i < cv.size(); i += 2) {
@@ -784,7 +920,7 @@ bool DaemonServer::_allowed_command(
   const string &module,
   const string &prefix,
   const cmdmap_t& cmdmap,
-  const map<string,string>& param_str_map,
+  const std::map<string,string>& param_str_map,
   const MonCommand *this_cmd) {
 
   if (s->entity_name.is_mon()) {
@@ -873,14 +1009,21 @@ public:
  */
 class ReplyOnFinish : public Context {
   std::shared_ptr<CommandContext> cmdctx;
+  MgrOpRequestRef op;
 
 public:
   bufferlist from_mon;
   string outs;
 
-  explicit ReplyOnFinish(const std::shared_ptr<CommandContext> &cmdctx_)
-    : cmdctx(cmdctx_)
-    {}
+  explicit ReplyOnFinish(const std::shared_ptr<CommandContext> &cmdctx_,
+                         MgrOpRequestRef op_)
+    : cmdctx(cmdctx_),
+      op(op_)
+    {
+       if (op) {
+         op->mark_finish_mon_command();
+       }
+    }
   void finish(int r) override {
     cmdctx->odata.claim_append(from_mon);
     cmdctx->reply(r, outs);
@@ -924,7 +1067,7 @@ void DaemonServer::log_access_denied(
 }
 
 void DaemonServer::_check_offlines_pgs(
-  const set<int>& osds,
+  const ContainerType& osds,
   const OSDMap& osdmap,
   const PGMap& pgmap,
   offline_pg_report *report)
@@ -934,7 +1077,7 @@ void DaemonServer::_check_offlines_pgs(
   report->osds = osds;
 
   for (const auto& q : pgmap.pg_stat) {
-    set<int32_t> pg_acting;  // net acting sets (with no missing if degraded)
+    std::set<int32_t> pg_acting;  // net acting sets (with no missing if degraded)
     bool found = false;
     if (q.second.state == 0) {
       report->unknown.insert(q.first);
@@ -942,20 +1085,36 @@ void DaemonServer::_check_offlines_pgs(
     }
     if (q.second.state & PG_STATE_DEGRADED) {
       for (auto& anm : q.second.avail_no_missing) {
-	if (osds.count(anm.osd)) {
-	  found = true;
-	  continue;
-	}
+        std::visit([anm, &found](auto& container) {
+          using T = std::decay_t<decltype(container)>;
+          if constexpr (std::is_same_v<T, std::set<int>>) {
+            found = container.count(anm.osd);
+          } else if constexpr (std::is_same_v<T, std::vector<int>>) {
+            auto it = std::find(container.begin(), container.end(), anm.osd);
+            found = (it != container.end());
+          }
+        }, osds);
+        if (found) {
+          continue;
+        }
 	if (anm.osd != CRUSH_ITEM_NONE) {
 	  pg_acting.insert(anm.osd);
 	}
       }
     } else {
       for (auto& a : q.second.acting) {
-	if (osds.count(a)) {
-	  found = true;
-	  continue;
-	}
+        std::visit([a, &found](auto& container) {
+          using T = std::decay_t<decltype(container)>;
+          if constexpr (std::is_same_v<T, std::set<int>>) {
+            found = container.count(a);
+          } else if constexpr (std::is_same_v<T, std::vector<int>>) {
+            auto it = std::find(container.begin(), container.end(), a);
+            found = (it != container.end());
+          }
+        }, osds);
+        if (found) {
+          continue;
+        }
 	if (a != CRUSH_ITEM_NONE) {
 	  pg_acting.insert(a);
 	}
@@ -996,7 +1155,7 @@ void DaemonServer::_check_offlines_pgs(
 }
 
 void DaemonServer::_maximize_ok_to_stop_set(
-  const set<int>& orig_osds,
+  const std::set<int>& orig_osds,
   unsigned max,
   const OSDMap& osdmap,
   const PGMap& pgmap,
@@ -1014,9 +1173,9 @@ void DaemonServer::_maximize_ok_to_stop_set(
 
   // semi-arbitrarily start with the first osd in the set
   offline_pg_report report;
-  set<int> osds = orig_osds;
+  std::set<int> osds = orig_osds;
   int parent = *osds.begin();
-  set<int> children;
+  std::set<int> children;
 
   while (true) {
     // identify the next parent
@@ -1060,6 +1219,353 @@ void DaemonServer::_maximize_ok_to_stop_set(
   }
 }
 
+void DaemonServer::_update_upgraded_osds(
+  const std::vector<int>& orig_osds,
+  const std::vector<int>& to_upgrade,
+  const std::vector<int>& upgraded,
+  const std::vector<int>& version_unknown,
+  upgrade_osd_report *report)
+{
+  // reset output
+  *report = upgrade_osd_report();
+  report->osds = orig_osds;
+  report->ok_upgrade = to_upgrade;
+  report->ok_upgraded = upgraded;
+  report->bad_no_version = version_unknown;
+}
+
+bool DaemonServer::_valid_bucket_type_for_upgrade_check(
+  std::string_view bucket_type_str)
+{
+  if (bucket_type_str.empty()) {
+    dout(20) << "bucket type string is empty!" << dendl;
+    return false;
+  }
+
+  return (bucket_type_str == "rack" || bucket_type_str == "chassis" ||
+          bucket_type_str == "host" || bucket_type_str == "osd");
+}
+
+int DaemonServer::_populate_crush_bucket_osds(
+  const int item_id,
+  const OSDMap& osdmap,
+  const PGMap& pgmap,
+  std::vector<int>& crush_bucket_osds,
+  std::ostream *ss)
+{
+  int r = 0;
+  int btype = osdmap.crush->get_bucket_type(item_id);
+  if (btype < 0) {
+    // For negative type an OSD may be assumed
+    btype = 0;
+  }
+  std::string item_name = osdmap.crush->get_item_name(item_id);
+  std::string bucket_type_str = osdmap.crush->get_type_name(btype);
+  if (!_valid_bucket_type_for_upgrade_check(bucket_type_str)) {
+    ostringstream os;
+    os << "crush bucket \"" << item_name << "\" of type "
+       << "\"" << bucket_type_str << "\" is incompatible for "
+       << "upgradability check; valid types are: 'rack', 'chassis', "
+       << "'host' and 'osd'";
+    if (ss) {
+      *ss << os.str();
+    }
+    dout(20) << os.str() << dendl;
+    return -EINVAL;
+  }
+  dout(20) << "bucket type of parent " << item_name << " is "
+             << bucket_type_str << dendl;
+
+  std::vector<std::string> bucket_names;
+  // get candidate additions that are beneath this point in the tree
+  if (bucket_type_str == "rack" || bucket_type_str == "chassis") {
+    std::list<int> crush_bucket_children;
+    // Get the list of children
+    if (osdmap.crush->get_children(item_id, &crush_bucket_children) <= 0) {
+      ostringstream os;
+      os << "crush bucket \"" << item_name << "\" of type: "
+         << bucket_type_str << " has no children!";
+      if (ss) {
+        *ss << os.str();
+      }
+      dout(20) << os.str() << dendl;
+      return -ENOENT;
+    }
+    // create a list of bucket names pertaining to each child in the tree
+    for (const auto &child : crush_bucket_children) {
+      bucket_names.push_back(osdmap.crush->get_item_name(child));
+    }
+  } else if (bucket_type_str == "host" || bucket_type_str == "osd") {
+    bucket_names.push_back(item_name);
+  }
+
+  // The following struct is to help re-order the
+  // osds based on the number of pgs on them.
+  struct pgs_per_osd {
+    int osd_id;
+    size_t num_pgs;
+  };
+  std::vector<pgs_per_osd> child_bucket_pgs_per_osd;
+  // get osds under each child bucket and associate with their PG counts
+  for (const auto &name : bucket_names) {
+    std::set<int> tmp_bucket_osds;
+    r = osdmap.get_osds_by_bucket_name(name, &tmp_bucket_osds);
+    if (r < 0) {
+      ostringstream os;
+      os << "cannot parse crush bucket:\"" << name
+         << "\" of type: " << bucket_type_str << ". "
+         << "got error code: " << r;
+      if (ss) {
+        *ss << os.str();
+      }
+      dout(20) << os.str() << dendl;
+      return r;
+    }
+    for (const auto &osd : tmp_bucket_osds) {
+      child_bucket_pgs_per_osd.push_back({osd, pgmap.get_num_pg_by_osd(osd)});
+    }
+    dout(20) << "picked osds: " << tmp_bucket_osds
+             << " from bucket: " << name << dendl;
+  }
+
+  /**
+   * Sort all collected osds globally based on the number of pgs (ascending)
+   * they host and update the crush_bucket_osds vector with the same order.
+   */
+  std::sort(child_bucket_pgs_per_osd.begin(), child_bucket_pgs_per_osd.end(),
+            [](const pgs_per_osd& a, const pgs_per_osd& b) {
+      return std::tie(a.num_pgs, a.osd_id) < std::tie(b.num_pgs, b.osd_id);
+  });
+  crush_bucket_osds.reserve(
+    crush_bucket_osds.size() + child_bucket_pgs_per_osd.size());
+  for (const auto &item : child_bucket_pgs_per_osd) {
+    crush_bucket_osds.push_back(item.osd_id);
+  }
+
+  return r;
+}
+
+void DaemonServer::_maximize_ok_to_upgrade_set(
+  const std::vector<int>& orig_osds,
+  unsigned max,
+  const OSDMap& osdmap,
+  const PGMap& pgmap,
+  std::string_view ceph_version_new,
+  upgrade_osd_report *out_osd_report,
+  offline_pg_report *out_pg_report,
+  std::ostream *ss)
+{
+  std::vector<int> to_upgrade;
+  std::vector<int> upgraded;
+  std::vector<int> version_unknown;
+
+  dout(20) << "orig_osds " << orig_osds
+           << " new ceph_version " << ceph_version_new << dendl;
+  // Filter osds not yet running the new ceph_version.
+  // Limit the check for safe upgrade to only the set
+  // of OSDs that are still running the older version.
+  for (const auto& osd : orig_osds) {
+    auto osd_id = "osd." + std::to_string(osd);
+    auto ver = get_osd_metadata("ceph_version_short", osd_id);
+    if (ver.has_value()) {
+      if (*ver != ceph_version_new) {
+        to_upgrade.push_back(osd);
+      } else {
+        upgraded.push_back(osd);
+      }
+    } else {
+      derr << "couldn't determine 'ceph_version_short' for "
+           << osd_id << dendl;
+      version_unknown.push_back(osd);
+    }
+  }
+
+  dout(20) << "osds to upgrade: " << to_upgrade << dendl;
+  dout(20) << "osds upgraded: " << upgraded << " running new version("
+           << ceph_version_new << ")" << dendl;
+
+  // Check if all OSDs are upgraded
+  _update_upgraded_osds(orig_osds, to_upgrade, upgraded,
+    version_unknown, out_osd_report);
+  if (!out_osd_report->bad_no_version.empty()) {
+    dout(20) << "'ceph_version_short' on osds couldn't be determined" << dendl;
+    return;
+  }
+  if (out_osd_report->all_osds_upgraded()) {
+    dout(20) << "all osds are upgraded!" << dendl;
+    return;
+  }
+
+  // Re-try until we can find a safe subset of OSDs to upgrade.
+  // On each attempt reduce the original set of OSDs to check by a
+  // factor defined by 'mgr_osd_upgrade_check_convergence_factor'.
+  // If no safe number can be found after all attempts, a minimum of
+  // 1 OSD is attempted.
+  const double convergence_factor =
+    g_conf().get_val<double>("mgr_osd_upgrade_check_convergence_factor");
+  size_t osd_subset_count = to_upgrade.size();
+  std::vector<int> osds = to_upgrade;
+  while (true) {
+    // reset pg report
+    *out_pg_report = offline_pg_report();
+    // Check impact to PGs with the filtered set. Use the existing
+    // ok-to-stop logic for this purpose.
+    _check_offlines_pgs(osds, osdmap, pgmap, out_pg_report);
+    if (out_pg_report->ok_to_stop()) {
+      // we have a set that can be upgraded. But if it still exceeds
+      // the 'max' criteria set by the user, prune the to_upgrade
+      // vector further to hold only 'max' number of osds. For
+      // safety, run the offline pg check before returning.
+      if (osd_subset_count > max) {
+        osd_subset_count = max;
+        osds.resize(osd_subset_count);
+        continue;
+      }
+      _update_upgraded_osds(orig_osds, osds, upgraded,
+                            version_unknown, out_osd_report);
+      if (out_osd_report->ok_to_upgrade()) {
+        // Found a safe subset! Break and generate the output.
+        dout(20) << "found " << osd_subset_count << " OSDs that are "
+                 << "safe to upgrade." << dendl;
+        break;
+      }
+    }
+    // The offline pg check failed. Trigger the reduction logic.
+    if (osd_subset_count == 1) {
+      // This means that there's no safe set of OSDs to upgrade.
+      // This probably indicates a problem with the cluster configuration.
+      osds.clear();
+      _update_upgraded_osds(orig_osds, osds, upgraded,
+        version_unknown, out_osd_report);
+      return;
+    }
+    // Reduce the number of OSDs in the set by the convergence factor.
+    osd_subset_count = std::max<size_t>(
+      1, static_cast<size_t>(osd_subset_count * convergence_factor));
+    // Prune the 'to-upgrade' set to hold the new subset of OSDs
+    osds.resize(osd_subset_count);
+  }
+
+  if (osds.size() == max) {
+   // already at max
+   dout(20) << "to_upgrade(" << osds.size() << ") == "
+            <<  " max(" << max << ")" << dendl;
+   return;
+  }
+
+  /**
+   * Handle case if 'max' criteria is not met and there are OSDs
+   * not yet considered from the to_upgrade vector. This can
+   * happen depending on the value of the convergence factor
+   * resulting in some residual OSDs in the crush bucket
+   * not participating in the initial offline pg check. Consider
+   * the residual OSDs and try maximizing the upgrade set.
+   */
+  if (osds.size() < max && osds.size() < to_upgrade.size()) {
+    // Avoid reallocations as we won't exceed max
+    osds.reserve(max);
+    int failed = 0;
+    dout(20) << "Maximization phase: testing candidate subset [ ";
+    for (auto it = to_upgrade.begin() + osd_subset_count;
+         it != to_upgrade.end();
+         ++it) {
+      *_dout << *it << " ";
+    }
+    *_dout << "]" << dendl;
+
+    for(size_t i = osd_subset_count;
+        i < to_upgrade.size() && osds.size() < max;
+        ++i) {
+      int candidate = to_upgrade[i];
+      osds.push_back(candidate);
+      // offline pg check with new osd
+      offline_pg_report _pg_report;
+      _check_offlines_pgs(osds, osdmap, pgmap, &_pg_report);
+      if (_pg_report.ok_to_stop()) {
+        upgrade_osd_report _osd_report;
+        _update_upgraded_osds(orig_osds, osds, upgraded,
+                              version_unknown, &_osd_report);
+        if (_osd_report.ok_to_upgrade()) {
+          // avoid deep copies as the reports may be huge
+          *out_pg_report = std::move(_pg_report);
+          *out_osd_report = std::move(_osd_report);
+          continue;
+        }
+      }
+      // pg check or osd report failed, disregard osd
+      osds.pop_back();
+      ++failed;
+    }
+    if (osds.size() == max) {
+      dout(20) << " hit max" << dendl;
+    }
+    if (osds.size() > osd_subset_count) {
+      dout(20) << "found " << osds.size() - osd_subset_count
+               << " additional OSD(s) to upgrade" << dendl;
+    }
+    if (failed) {
+      // we hit some failures; go with what we have
+      dout(20) << " hit some peer failures" << dendl;
+    }
+  }
+}
+
+std::optional<std::string> DaemonServer::get_osd_metadata(
+  const std::string& name,
+  const std::string& osd_id)
+{
+    if (g_conf().get_val<bool>("mgr_test_metadata_error")) {
+      return std::nullopt;
+    }
+
+    auto [key, valid] = DaemonKey::parse(osd_id);
+    if (!valid) {
+      derr << "invalid daemon name: use <type>.<id>" << dendl;
+      return std::nullopt;
+    }
+    DaemonStatePtr daemon = daemon_state.get(key);
+    if (!daemon) {
+      derr << "daemon " << osd_id << " not found!" << dendl;
+      return std::nullopt;
+    }
+
+    std::lock_guard l(daemon->lock);
+    auto p = daemon->metadata.find(name);
+    if (p != daemon->metadata.end() && !p->second.empty()) {
+      return p->second;
+    }
+    return std::nullopt;
+}
+
+void upgrade_osd_report::dump(Formatter *f) const {
+  f->dump_bool("ok_to_upgrade", ok_to_upgrade());
+  f->dump_bool("all_osds_upgraded", all_osds_upgraded());
+
+  f->open_array_section("osds_in_crush_bucket");
+  for (auto o : osds) {
+    f->dump_int("osd", o);
+  }
+  f->close_section();
+
+  f->open_array_section("osds_ok_to_upgrade");
+  for (auto o : ok_upgrade) {
+    f->dump_int("ok_upgrade", o);
+  }
+  f->close_section();
+
+  f->open_array_section("osds_upgraded");
+  for (auto o : ok_upgraded) {
+    f->dump_int("ok_upgraded", o);
+  }
+  f->close_section();
+
+  f->open_array_section("bad_no_version");
+  for (auto o : bad_no_version) {
+    f->dump_int("bad_no_version", o);
+  }
+  f->close_section();
+}
+
 bool DaemonServer::_handle_command(
   std::shared_ptr<CommandContext>& cmdctx)
 {
@@ -1082,7 +1588,7 @@ bool DaemonServer::_handle_command(
     session->inst.name = m->get_source();
   }
 
-  map<string,string> param_str_map;
+  std::map<string,string> param_str_map;
   std::stringstream ss;
   int r = 0;
 
@@ -1186,6 +1692,12 @@ bool DaemonServer::_handle_command(
     cct->get_admin_socket()->queue_tell_command(cmdctx->m_tell);
     return true;
   }
+
+  // Track non-admin mgr ops only
+  MessageRef mref = m.get();
+  MgrOpRequestRef op = op_tracker.create_request<MgrOpRequest, MessageRef>(mref);
+
+  op->mark_started();
 
   // ----------------
   // service map commands
@@ -1291,7 +1803,7 @@ bool DaemonServer::_handle_command(
     }
     for (auto& con : p->second) {
       assert(HAVE_FEATURE(con->get_features(), SERVER_OCTOPUS));
-      vector<spg_t> pgs = { spgid };
+      std::vector<spg_t> pgs = { spgid };
       con->send_message(new MOSDScrub2(monc->get_fsid(),
 				       epoch,
 				       pgs,
@@ -1307,10 +1819,10 @@ bool DaemonServer::_handle_command(
 	      prefix == "osd repair") {
     string whostr;
     cmd_getval(cmdctx->cmdmap, "who", whostr);
-    vector<string> pvec;
+    std::vector<string> pvec;
     get_str_vec(prefix, pvec);
 
-    set<int> osds;
+    std::set<int> osds;
     if (whostr == "*" || whostr == "all" || whostr == "any") {
       cluster_state.with_osdmap([&](const OSDMap& osdmap) {
 	  for (int i = 0; i < osdmap.get_max_osd(); i++)
@@ -1336,9 +1848,9 @@ bool DaemonServer::_handle_command(
 	return true;
       }
     }
-    set<int> sent_osds, failed_osds;
+    std::set<int> sent_osds, failed_osds;
     for (auto osd : osds) {
-      vector<spg_t> spgs;
+      std::vector<spg_t> spgs;
       epoch_t epoch;
       cluster_state.with_osdmap_and_pgmap([&](const OSDMap& osdmap, const PGMap& pgmap) {
 	  epoch = osdmap.get_epoch();
@@ -1384,7 +1896,7 @@ bool DaemonServer::_handle_command(
   } else if (prefix == "osd pool scrub" ||
              prefix == "osd pool deep-scrub" ||
              prefix == "osd pool repair") {
-    vector<string> pool_names;
+    std::vector<string> pool_names;
     cmd_getval(cmdctx->cmdmap, "who", pool_names);
     if (pool_names.empty()) {
       ss << "must specify one or more pool names";
@@ -1392,8 +1904,8 @@ bool DaemonServer::_handle_command(
       return true;
     }
     epoch_t epoch;
-    map<int32_t, vector<pg_t>> pgs_by_primary; // legacy
-    map<int32_t, vector<spg_t>> spgs_by_primary;
+    std::map<int32_t, std::vector<pg_t>> pgs_by_primary; // legacy
+    std::map<int32_t, std::vector<spg_t>> spgs_by_primary;
     cluster_state.with_osdmap([&](const OSDMap& osdmap) {
       epoch = osdmap.get_epoch();
       for (auto& pool_name : pool_names) {
@@ -1448,8 +1960,8 @@ bool DaemonServer::_handle_command(
       prefix == "osd test-reweight-by-pg" ||
       prefix == "osd test-reweight-by-utilization";
     int64_t oload = cmd_getval_or<int64_t>(cmdctx->cmdmap, "oload", 120);
-    set<int64_t> pools;
-    vector<string> poolnames;
+    std::set<int64_t> pools;
+    std::vector<string> poolnames;
     cmd_getval(cmdctx->cmdmap, "pools", poolnames);
     cluster_state.with_osdmap([&](const OSDMap& osdmap) {
 	for (const auto& poolname : poolnames) {
@@ -1525,7 +2037,8 @@ bool DaemonServer::_handle_command(
 	"\"prefix\": \"osd reweightn\", "
 	"\"weights\": \"" + s + "\""
 	"}";
-      auto on_finish = new ReplyOnFinish(cmdctx);
+      op->mark_start_mon_command();
+      auto on_finish = new ReplyOnFinish(cmdctx, op);
       monc->start_mon_command({cmd}, {},
 			      &on_finish->from_mon, &on_finish->outs, on_finish);
       return true;
@@ -1600,10 +2113,10 @@ bool DaemonServer::_handle_command(
   } else if (prefix == "osd safe-to-destroy" ||
 	     prefix == "osd destroy" ||
 	     prefix == "osd purge") {
-    set<int> osds;
+    std::set<int> osds;
     int r = 0;
     if (prefix == "osd safe-to-destroy") {
-      vector<string> ids;
+      std::vector<string> ids;
       cmd_getval(cmdctx->cmdmap, "ids", ids);
       cluster_state.with_osdmap([&](const OSDMap& osdmap) {
 				  r = osdmap.parse_osd_id_list(ids, &osds, &ss);
@@ -1625,7 +2138,7 @@ bool DaemonServer::_handle_command(
       cmdctx->reply(r, ss);
       return true;
     }
-    set<int> active_osds, missing_stats, stored_pgs, safe_to_destroy;
+    std::set<int> active_osds, missing_stats, stored_pgs, safe_to_destroy;
     int affected_pgs = 0;
     cluster_state.with_osdmap_and_pgmap([&](const OSDMap& osdmap, const PGMap& pg_map) {
 	if (pg_map.num_pg_unknown > 0) {
@@ -1755,13 +2268,14 @@ bool DaemonServer::_handle_command(
       "\"id\": " + stringify(osds) + ", "
       "\"yes_i_really_mean_it\": true"
       "}";
-    auto on_finish = new ReplyOnFinish(cmdctx);
+    op->mark_start_mon_command();
+    auto on_finish = new ReplyOnFinish(cmdctx, op);
     monc->start_mon_command({cmd}, {}, nullptr, &on_finish->outs, on_finish);
     return true;
   } else if (prefix == "osd ok-to-stop") {
-    vector<string> ids;
+    std::vector<string> ids;
     cmd_getval(cmdctx->cmdmap, "ids", ids);
-    set<int> osds;
+    std::set<int> osds;
     int64_t max = 1;
     cmd_getval(cmdctx->cmdmap, "max", max);
     int r;
@@ -1803,6 +2317,115 @@ bool DaemonServer::_handle_command(
       cmdctx->reply(0, ss);
     }
     return true;
+  } else if (prefix == "osd ok-to-upgrade") {
+    std::string crush_bucket_name;
+    cmd_getval(cmdctx->cmdmap, "crush_bucket", crush_bucket_name);
+    std::string ceph_version;
+    cmd_getval(cmdctx->cmdmap, "ceph_version", ceph_version);
+    int64_t max = 0; // default value
+    cmd_getval(cmdctx->cmdmap, "max", max);
+    int r;
+    std::vector<int> osds_in_crush_bucket;
+    // Validate max parameter
+    if (max < 0) {
+      ss << "Invalid 'max' value: " << max << ". 'max' must be non-negative.";
+      cmdctx->reply(-EINVAL, ss);
+      return true;
+    }
+    // Validate ceph_version format. The pattern is generic and  matches
+    // the upstream and downstream version formats. Note that the suffix
+    // matches either the upstream Git format or the downstream OS format.
+    std::regex ceph_version_pattern
+      (R"(^(\d+)\.(\d+)\.(\d+)-(\d+)(-g[0-9a-f]+|\.el\d+[a-z]+)$)");
+    std::smatch matches;
+    if (!std::regex_match(ceph_version, matches, ceph_version_pattern)) {
+      ss << "Invalid Ceph version (short) format. The format to use is the"
+         << " same as 'ceph_version_short' found in OSD metadata."
+         << " Examples: \"20.3.0-3803-g63ca1ffb5a2\", \"20.1.0-144.el9cp\".";
+      cmdctx->reply(-EINVAL, ss);
+      return true;
+    }
+    // Validate the crush bucket name & type. For this command the
+    // bucket type is limited to 'rack', 'chassis', 'host' or 'osd'.
+    // This is to help limit the number of OSDs and avoid
+    // performance issues during the upgrade check.
+    cluster_state.with_osdmap_and_pgmap([&](
+      const OSDMap& osdmap, const PGMap& pgmap) {
+        // Validate crush bucket
+        if (!osdmap.crush->name_exists(crush_bucket_name)) {
+          ss << "\"" << crush_bucket_name << "\" does not exist";
+          r = -ENOENT;
+          return;
+        }
+        int id = osdmap.crush->get_item_id(crush_bucket_name);
+        // get candidate additions that are beneath this point in the tree
+        r = _populate_crush_bucket_osds(id, osdmap, pgmap,
+                                        osds_in_crush_bucket, &ss);
+        if (r != 0) {
+          return;
+        }
+    });
+    if (r < 0) {
+      cmdctx->reply(r, ss);
+      return true;
+    }
+    dout(20) << "Crush Bucket OSDs: " << osds_in_crush_bucket << dendl;
+    if ((int)osds_in_crush_bucket.size() == 0) {
+      ss << "no osds found in crush bucket: \"" << crush_bucket_name << "\"";
+      cmdctx->reply(-ENOENT, ss);
+      return true;
+    }
+    // If 'max' is not specified, limit it to the number of osds
+    // in the crush bucket
+    if (max == 0) {
+      max = (int)osds_in_crush_bucket.size();
+      dout(0) << "Override 'max' to " << max << ", which is the total number "
+              << "of osds in crush bucket " << crush_bucket_name << dendl;
+    }
+    upgrade_osd_report osd_upgrade_report;
+    offline_pg_report pg_offline_report;
+    cluster_state.with_osdmap_and_pgmap([&](
+      const OSDMap& osdmap, const PGMap& pg_map) {
+        _maximize_ok_to_upgrade_set(
+          osds_in_crush_bucket, max, osdmap, pg_map, ceph_version,
+          &osd_upgrade_report, &pg_offline_report, &ss);
+      });
+    if (!f) {
+      f.reset(Formatter::create("json"));
+    }
+    f->dump_object("ok_to_upgrade", osd_upgrade_report);
+    f->flush(cmdctx->odata);
+    cmdctx->odata.append("\n");
+    if (!osd_upgrade_report.ok_to_upgrade()) {
+      if (!pg_offline_report.unknown.empty()) {
+        ss << pg_offline_report.unknown.size() << " pgs have unknown state; "
+           << "cannot draw any conclusions at this time; re-try after pgs "
+           << "transition to known states";
+        cmdctx->reply(-EBUSY, ss);
+      }
+      if (!osd_upgrade_report.bad_no_version.empty()) {
+        ss << osd_upgrade_report.bad_no_version.size()
+           << " osds have unknown version; cannot draw any conclusions";
+        cmdctx->reply(-EAGAIN, ss);
+      }
+      if (!pg_offline_report.ok_to_stop()) {
+        ss << "unsafe to upgrade OSD(s) at this time (one or more"
+           << " PG(s) will become offline if any OSD out of the "
+           << osds_in_crush_bucket.size() << " in CRUSH bucket '"
+           << crush_bucket_name << "' is stopped)";
+        cmdctx->reply(-EBUSY, ss);
+      }
+      // ok_to_upgrade() would be false in case all osds are upgraded
+      if (osd_upgrade_report.all_osds_upgraded()) {
+        ss << "all " << osds_in_crush_bucket.size()
+           << " osd(s) are running the new Ceph version("
+           << ceph_version << ")";
+        cmdctx->reply(0, ss);
+      }
+    } else {
+      cmdctx->reply(0, ss);
+    }
+    return true;
   } else if (prefix == "pg force-recovery" ||
   	     prefix == "pg force-backfill" ||
   	     prefix == "pg cancel-force-recovery" ||
@@ -1811,11 +2434,11 @@ bool DaemonServer::_handle_command(
              prefix == "osd pool force-backfill" ||
              prefix == "osd pool cancel-force-recovery" ||
              prefix == "osd pool cancel-force-backfill") {
-    vector<string> vs;
+    std::vector<string> vs;
     get_str_vec(prefix, vs);
     auto& granularity = vs.front();
     auto& forceop = vs.back();
-    vector<pg_t> pgs;
+    std::vector<pg_t> pgs;
 
     // figure out actual op just once
     int actual_op = 0;
@@ -1829,10 +2452,10 @@ bool DaemonServer::_handle_command(
       actual_op = OFR_RECOVERY | OFR_CANCEL;
     }
 
-    set<pg_t> candidates; // deduped
+    std::set<pg_t> candidates; // deduped
     if (granularity == "pg") {
       // covnert pg names to pgs, discard any invalid ones while at it
-      vector<string> pgids;
+      std::vector<string> pgids;
       cmd_getval(cmdctx->cmdmap, "pgid", pgids);
       for (auto& i : pgids) {
         pg_t pgid;
@@ -1845,7 +2468,7 @@ bool DaemonServer::_handle_command(
       }
     } else {
       // per pool
-      vector<string> pool_names;
+      std::vector<string> pool_names;
       cmd_getval(cmdctx->cmdmap, "who", pool_names);
       if (pool_names.empty()) {
         ss << "must specify one or more pool names";
@@ -1940,7 +2563,7 @@ bool DaemonServer::_handle_command(
     // message per distinct OSD
     cluster_state.with_osdmap([&](const OSDMap& osdmap) {
 	// group pgs to process by osd
-	map<int, vector<spg_t>> osdpgs;
+	std::map<int, std::vector<spg_t>> osdpgs;
 	for (auto& pgid : pgs) {
 	  int primary;
 	  spg_t spg;
@@ -1978,6 +2601,37 @@ bool DaemonServer::_handle_command(
       cmdctx->reply(-EINVAL, ss);
       return true;
     }
+    /*
+     *  RGW has the daemon name stored in the daemon metadata
+     *  and uses the GID as key in the service_map.
+     *  We need to match the user's query with the daemon name to
+     *  find the correct key for retrieving daemon state.
+     */
+    string daemon_name = key.name;
+    auto p = daemon_name.find("rgw");
+    if (p != daemon_name.npos) {
+      auto rgw_daemons = daemon_state.get_by_service("rgw");
+      for (auto& rgw_daemon : rgw_daemons) {
+	DaemonStatePtr daemon = rgw_daemon.second;
+	string name = daemon->metadata.find("id")->second;
+	/*
+	 * The id stored in the metadata is the port number
+	 * for the RGW daemon.
+	 * In the case of multiple RGW daemons, the user might
+	 * use the port number (rgw.8000) to specify the daemon.
+	 */
+	auto p = daemon_name.find('.');
+	if (p == key.name.npos) {
+          key = daemon->key;
+	} else {
+	  // if user has specified port number in the query
+	  if (daemon_name.substr(p + 1) == name) {
+	    key = daemon->key;
+	    break;
+	  }
+        }
+      }
+    }
     DaemonStatePtr daemon = daemon_state.get(key);
     if (!daemon) {
       ss << "no config state for daemon " << who;
@@ -2005,6 +2659,18 @@ bool DaemonServer::_handle_command(
 	auto q = defaults.find(name);
 	if (q != defaults.end()) {
 	  cmdctx->odata.append(q->second + "\n");
+	} else if (key.type == "mgr") {
+	  // check mgr module options (key format: "mgr/<module>/<option>")
+	  // name may already carry the "mgr/" prefix (e.g. "mgr/telemetry/contact")
+	  // or may omit it (e.g. "telemetry/contact"); normalise to the stored form.
+	  std::string lookup_key =
+	    name.starts_with("mgr/") ? name : ("mgr/" + name);
+	  std::string value;
+	  if (py_modules.get_module_option(lookup_key, &value)) {
+	    cmdctx->odata.append(value + "\n");
+	  } else {
+	    r = -ENOENT;
+	  }
 	} else {
 	  r = -ENOENT;
 	}
@@ -2072,6 +2738,22 @@ bool DaemonServer::_handle_command(
 	    }
 	    tbl << (daemon->ignored_mon_config.count(i.first) ? "mon" : "");
 	    tbl << TextTable::endrow;
+	  }
+	}
+	// also show mgr module options that were explicitly set
+	if (key.type == "mgr") {
+	  for (auto& [k, v] : py_modules.get_module_config_snapshot()) {
+	    // keys are "mgr/<module>/<option>"; strip the leading "mgr/"
+	    std::string_view opt = std::string_view(k).substr(4);
+	    if (f) {
+	      f->open_object_section("value");
+	      f->dump_string("name", opt);
+	      f->dump_string("value", v);
+	      f->dump_string("source", "mgr_module");
+	      f->close_section();
+	    } else {
+	      tbl << opt << v << "mgr_module" << "" << "" << TextTable::endrow;
+	    }
 	  }
 	}
       } else {
@@ -2144,6 +2826,40 @@ bool DaemonServer::_handle_command(
 	    }
 	  }
 	}
+	// also show mgr module options (set values and defaults) for mgr daemons
+	if (key.type == "mgr") {
+	  auto mod_config_snapshot = py_modules.get_module_config_snapshot();
+	  for (auto& module : py_modules.get_modules()) {
+	    if (!module->is_enabled()) {
+	      continue;
+	    }
+	    const std::string& mod_name = module->get_name();
+	    for (auto& [opt_name, opt] : module->get_options()) {
+	      std::string display_name = mod_name + "/" + opt_name;
+	      std::string config_key = "mgr/" + display_name;
+	      std::string value;
+	      std::string source;
+	      auto it = mod_config_snapshot.find(config_key);
+	      if (it != mod_config_snapshot.end()) {
+		value = it->second;
+		source = "mgr_module";
+	      } else {
+		value = opt.default_value;
+		source = "default";
+	      }
+	      if (f) {
+		f->open_object_section("value");
+		f->dump_string("name", display_name);
+		f->dump_string("value", value);
+		f->dump_string("source", source);
+		f->close_section();
+	      } else {
+		tbl << display_name << value << source << "" << ""
+		    << TextTable::endrow;
+	      }
+	    }
+	  }
+	}
       }
       if (f) {
 	f->close_section();
@@ -2155,7 +2871,7 @@ bool DaemonServer::_handle_command(
     cmdctx->reply(r, ss);
     return true;
   } else if (prefix == "device ls") {
-    set<string> devids;
+    std::set<string> devids;
     TextTable tbl;
     if (f) {
       f->open_array_section("devices");
@@ -2254,7 +2970,7 @@ bool DaemonServer::_handle_command(
   } else if (prefix == "device ls-by-host") {
     string host;
     cmd_getval(cmdctx->cmdmap, "host", host);
-    set<string> devids;
+    std::set<string> devids;
     daemon_state.list_devids_by_server(host, &devids);
     if (f) {
       f->open_array_section("devices");
@@ -2343,7 +3059,7 @@ bool DaemonServer::_handle_command(
       r = -EINVAL;
       cmdctx->reply(r, ss);
     } else {
-      map<string,string> meta;
+      std::map<string,string> meta;
       daemon_state.with_device_create(
 	devid,
 	[from, to, &meta] (DeviceState& dev) {
@@ -2361,14 +3077,15 @@ bool DaemonServer::_handle_command(
 	"\"prefix\": \"config-key set\", "
 	"\"key\": \"device/" + devid + "\""
 	"}";
-      auto on_finish = new ReplyOnFinish(cmdctx);
-      monc->start_mon_command({cmd}, json, nullptr, nullptr, on_finish);
+      op->mark_start_mon_command();
+      auto on_finish = new ReplyOnFinish(cmdctx, op);
+      monc->start_mon_command({cmd}, std::move(json), nullptr, nullptr, on_finish);
     }
     return true;
   } else if (prefix == "device rm-life-expectancy") {
     string devid;
     cmd_getval(cmdctx->cmdmap, "devid", devid);
-    map<string,string> meta;
+    std::map<string,string> meta;
     if (daemon_state.with_device_write(devid, [&meta] (DeviceState& dev) {
 	  dev.rm_life_expectancy();
 	  meta = dev.metadata;
@@ -2393,8 +3110,9 @@ bool DaemonServer::_handle_command(
 	  "\"key\": \"device/" + devid + "\""
 	  "}";
       }
-      auto on_finish = new ReplyOnFinish(cmdctx);
-      monc->start_mon_command({cmd}, json, nullptr, nullptr, on_finish);
+      op->mark_start_mon_command();
+      auto on_finish = new ReplyOnFinish(cmdctx, op);
+      monc->start_mon_command({std::move(cmd)}, std::move(json), nullptr, nullptr, on_finish);
     } else {
       cmdctx->reply(0, ss);
     }
@@ -2434,25 +3152,40 @@ bool DaemonServer::_handle_command(
     return true;
   }
 
+  // Validate that the module is enabled
+  auto& py_handler_name = py_command.module_name;
+  PyModuleRef module = py_modules.get_module(py_handler_name);
+  ceph_assert(module);
+  if (!module->is_enabled()) {
+    ss << "Module '" << py_handler_name << "' is not enabled (required by "
+          "command '" << prefix << "'): use `ceph mgr module enable "
+          << py_handler_name << "` to enable it";
+    dout(4) << ss.str() << dendl;
+    cmdctx->reply(-EOPNOTSUPP, ss);
+    return true;
+  }
+
+  // Validate that the module is active
+  auto& mod_name = py_command.module_name;
+  if (!py_modules.is_module_active(mod_name)) {
+    ss << "Module '" << mod_name << "' did not initialize in time (required by "
+          "command '" << prefix << "'): see https://docs.ceph.com/en/latest/rados/operations/health-checks/#mgr-module-error "
+	  "for troubleshooting tips.";
+    dout(4) << ss.str() << dendl;
+    cmdctx->reply(-ETIMEDOUT, ss);
+    return true;
+  }
+
+  op->mark_queued_for_module();
+
   dout(10) << "passing through command '" << prefix << "' size " << cmdctx->cmdmap.size() << dendl;
-  finisher.queue(new LambdaContext([this, cmdctx, session, py_command, prefix]
-                                   (int r_) mutable {
+  Finisher& mod_finisher = py_modules.get_active_module_finisher(mod_name);
+
+  mod_finisher.queue(new LambdaContext([this, cmdctx, session, py_command, prefix, op, py_handler_name, module]
+                                       (int r_) mutable {
     std::stringstream ss;
 
     dout(10) << "dispatching command '" << prefix << "' size " << cmdctx->cmdmap.size() << dendl;
-
-    // Validate that the module is enabled
-    auto& py_handler_name = py_command.module_name;
-    PyModuleRef module = py_modules.get_module(py_handler_name);
-    ceph_assert(module);
-    if (!module->is_enabled()) {
-      ss << "Module '" << py_handler_name << "' is not enabled (required by "
-            "command '" << prefix << "'): use `ceph mgr module enable "
-            << py_handler_name << "` to enable it";
-      dout(4) << ss.str() << dendl;
-      cmdctx->reply(-EOPNOTSUPP, ss);
-      return;
-    }
 
     // Hack: allow the self-test method to run on unhealthy modules.
     // Fix this in future by creating a special path for self test rather
@@ -2488,6 +3221,7 @@ bool DaemonServer::_handle_command(
 
     std::stringstream ds;
     bufferlist inbl = cmdctx->data;
+    op->mark_reached(py_command.module_name.c_str());
     int r = py_modules.handle_command(py_command, *session, cmdctx->cmdmap,
                                       inbl, &ds, &ss);
     if (r == -EACCES) {
@@ -2606,7 +3340,7 @@ void DaemonServer::send_report()
 	});
     });
 
-  map<daemon_metric, unique_ptr<DaemonHealthMetricCollector>> accumulated;
+  std::map<daemon_metric, unique_ptr<DaemonHealthMetricCollector>> accumulated;
   for (auto service : {"osd", "mon"} ) {
     auto daemons = daemon_state.get_by_service(service);
     for (const auto& [key,state] : daemons) {
@@ -2641,13 +3375,16 @@ void DaemonServer::send_report()
 void DaemonServer::adjust_pgs()
 {
   dout(20) << dendl;
-  unsigned max = std::max<int64_t>(1, g_conf()->mon_osd_max_creating_pgs);
+  uint64_t max = std::max<uint64_t>(
+    1,
+    g_conf().get_val<uint64_t>("mgr_max_pg_creating"));
   double max_misplaced = g_conf().get_val<double>("target_max_misplaced_ratio");
   bool aggro = g_conf().get_val<bool>("mgr_debug_aggressive_pg_num_changes");
 
-  map<string,unsigned> pg_num_to_set;
-  map<string,unsigned> pgp_num_to_set;
-  set<pg_t> upmaps_to_clear;
+  std::map<string,unsigned> pg_num_to_set;
+  std::map<string,unsigned> pgp_num_to_set;
+  std::set<pg_t> upmaps_to_clear;
+  std::map<uint64_t,string> current_pools; // pid -> pool_name
   cluster_state.with_osdmap_and_pgmap([&](const OSDMap& osdmap, const PGMap& pg_map) {
       unsigned creating_or_unknown = 0;
       for (auto& i : pg_map.num_pg_by_state) {
@@ -2682,7 +3419,8 @@ void DaemonServer::adjust_pgs()
 
       for (auto& i : osdmap.get_pools()) {
 	const pg_pool_t& p = i.second;
-
+        const auto& pool_name = osdmap.get_pool_name(i.first);
+        current_pools[i.first] = pool_name;
 	// adjust pg_num?
 	if (p.get_pg_num_target() != p.get_pg_num()) {
 	  dout(20) << "pool " << i.first
@@ -2717,7 +3455,7 @@ void DaemonServer::adjust_pgs()
 		       << dendl;
 	      ok = false;
 	    }
-	    vector<int32_t> source_acting;
+	    std::vector<int32_t> source_acting;
             for (auto &merge_participant : {merge_source, merge_target}) {
               bool is_merge_source = merge_participant == merge_source;
               if (osdmap.have_pg_upmaps(merge_participant)) {
@@ -2852,7 +3590,7 @@ void DaemonServer::adjust_pgs()
 		     << " pgp_num_target " << p.get_pgp_num_target()
 		     << " pgp_num " << p.get_pgp_num()
 		     << " - misplaced_ratio " << misplaced_ratio
-		     << " > max " << max_misplaced
+		     << " > max_misplaced " << max_misplaced
 		     << ", deferring pgp_num update" << dendl;
 	  } else {
 	    // NOTE: this calculation assumes objects are
@@ -2939,7 +3677,9 @@ void DaemonServer::adjust_pgs()
       "}";
     monc->start_mon_command({cmd}, {}, nullptr, nullptr, nullptr);
   }
+  std::set<uint64_t> affected_pools;
   for (auto pg : upmaps_to_clear) {
+    affected_pools.emplace(pg.pool());
     const string cmd =
       "{"
       "\"prefix\": \"osd rm-pg-upmap\", "
@@ -2952,6 +3692,20 @@ void DaemonServer::adjust_pgs()
       "\"pgid\": \"" + stringify(pg) + "\"" +
       "}";
     monc->start_mon_command({cmd2}, {}, nullptr, nullptr, nullptr);
+   }
+  // remove all pg_upmap_primary mappings from any pool where pg_num was changed.
+  for (auto pool_id : affected_pools) {
+   std::string pool_name;
+   auto it = current_pools.find(pool_id);
+   if (it != current_pools.end()) {
+     pool_name = it->second;
+     const string cmd =
+       "{"
+       "\"prefix\": \"osd rm-pg-upmap-primary-all\", "
+       "\"pool\": \"" + pool_name + "\"" +
+       "}";
+     monc->start_mon_command({cmd}, {}, nullptr, nullptr, nullptr);
+   }
   }
 }
 
@@ -3009,11 +3763,11 @@ void DaemonServer::got_service_map()
 void DaemonServer::got_mgr_map()
 {
   std::lock_guard l(lock);
-  set<std::string> have;
+  std::set<std::string> have;
   cluster_state.with_mgrmap([&](const MgrMap& mgrmap) {
       auto md_update = [&] (DaemonKey key) {
         std::ostringstream oss;
-        auto c = new MetadataUpdate(daemon_state, key);
+        auto c = new MetadataUpdate(daemon_state, cluster_state, key);
 	// FIXME remove post-nautilus: include 'id' for luminous mons
         oss << "{\"prefix\": \"mgr metadata\", \"who\": \""
 	    << key.name << "\", \"id\": \"" << key.name << "\"}";
@@ -3039,15 +3793,12 @@ void DaemonServer::got_mgr_map()
   daemon_state.cull("mgr", have);
 }
 
-const char** DaemonServer::get_tracked_conf_keys() const
+std::vector<std::string> DaemonServer::get_tracked_keys() const noexcept
 {
-  static const char *KEYS[] = {
-    "mgr_stats_threshold",
-    "mgr_stats_period",
-    nullptr
+  return {
+    "mgr_stats_threshold"s,
+    "mgr_stats_period"s
   };
-
-  return KEYS;
 }
 
 void DaemonServer::handle_conf_change(const ConfigProxy& conf,
@@ -3057,6 +3808,12 @@ void DaemonServer::handle_conf_change(const ConfigProxy& conf,
   if (changed.count("mgr_stats_threshold") || changed.count("mgr_stats_period")) {
     dout(4) << "Updating stats threshold/period on "
             << daemon_connections.size() << " clients" << dendl;
+    if (changed.count("mgr_stats_period")) {
+      int64_t new_period = g_conf().get_val<int64_t>("mgr_stats_period");
+      if (stats_autotuner->was_changed_by_user(new_period)) {
+        stats_autotuner->set_baseline_period(new_period); // user changed
+      }
+    }
     // Send a fresh MMgrConfigure to all clients, so that they can follow
     // the new policy for transmitting stats
     finisher.queue(new LambdaContext([this](int r) {
@@ -3124,4 +3881,75 @@ void DaemonServer::reregister_mds_perf_queries()
 int DaemonServer::get_mds_perf_counters(MDSPerfCollector *collector)
 {
   return mds_perf_metric_collector.get_counters(collector);
+}
+
+bool DaemonServer::asok_command(
+  std::string_view admin_command,
+  const cmdmap_t& cmdmap,
+  Formatter *f,
+  ostream& ss)
+{
+  int ret = 0;
+  std::lock_guard l(lock);
+  if (admin_command == "dump_ops_in_flight" ||
+      admin_command == "dump_blocked_ops" ||
+      admin_command == "dump_blocked_ops_count" ||
+      admin_command == "dump_historic_ops" ||
+      admin_command == "dump_historic_ops_by_duration" ||
+      admin_command == "dump_historic_slow_ops") {
+
+    const string error_str = "op_tracker tracking is not enabled now, so no ops are tracked currently, \
+even those get stuck. Please enable \"mgr_enable_op_tracker\", and the tracker \
+will start to track new ops received afterwards.";
+
+    std::set<string> filters;
+    std::vector<string> filter_str;
+    if (cmd_getval(cmdmap, "filterstr", filter_str)) {
+        copy(filter_str.begin(), filter_str.end(),
+           inserter(filters, filters.end()));
+    }
+
+    if (admin_command == "dump_ops_in_flight") {
+      if (!op_tracker.dump_ops_in_flight(f, false, filters)) {
+        ss << error_str;
+        ret = -EINVAL;
+        goto out;
+      }
+    } else if (admin_command == "dump_blocked_ops") {
+      if (!op_tracker.dump_ops_in_flight(f, true, filters)) {
+        ss << error_str;
+        ret = -EINVAL;
+        goto out;
+      }
+    } else if (admin_command == "dump_blocked_ops_count") {
+      if (!op_tracker.dump_ops_in_flight(f, true, filters, true)) {
+        ss << error_str;
+        ret = -EINVAL;
+        goto out;
+      }
+    } else if (admin_command == "dump_historic_ops") {
+      if (!op_tracker.dump_historic_ops(f, false, filters)) {
+        ss << error_str;
+        ret = -EINVAL;
+        goto out;
+      }
+    } else if (admin_command == "dump_historic_ops_by_duration") {
+      if (!op_tracker.dump_historic_ops(f, true, filters)) {
+        ss << error_str;
+        ret = -EINVAL;
+        goto out;
+      }
+    } else if (admin_command == "dump_historic_slow_ops") {
+      if (!op_tracker.dump_historic_ops(f, true, filters)) {
+        ss << error_str;
+        ret = -EINVAL;
+        goto out;
+      }
+    }
+  }
+  dout(10) << "ret := " << ret << dendl;
+  return true;
+
+out:
+  return false;
 }

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -8,13 +8,13 @@
  *
  * This is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
- * License version 2.1, as published by the Free Software 
+ * License version 2.1, as published by the Free Software
  * Foundation.  See file COPYING.
- * 
+ *
  */
 
 #pragma once
- 
+
 #include "rgw_rest_s3.h"
 
 class RGWHandler_REST_S3Website : public RGWHandler_REST_S3 {
@@ -71,6 +71,15 @@ public:
   ~RGWHandler_REST_Bucket_S3Website() override = default;
 };
 
+class RGWRESTMgr_S3Website : public RGWRESTMgr {
+  friend class RGWRESTMgr_S3; // for protected get_resource_mgr()
+public:
+  RGWHandler_REST *get_handler(rgw::sal::Driver* driver,
+                               req_state* s,
+                               const rgw::auth::StrategyRegistry& auth_registry,
+                               const std::string& frontend_prefix) override;
+};
+
 // TODO: do we actually need this?
 class  RGWGetObj_ObjStore_S3Website : public RGWGetObj_ObjStore_S3
 {
@@ -97,4 +106,5 @@ public:
         return RGWGetObj_ObjStore_S3::get_params(y);
       }
   }
+  std::string canonical_name() const override { return fmt::format("WEBSITE.{}.OBJECT", s->info.method); }
 };

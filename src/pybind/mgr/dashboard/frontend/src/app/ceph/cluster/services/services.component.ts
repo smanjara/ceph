@@ -1,13 +1,11 @@
-import { Component, Input, OnChanges, OnInit, ViewChild } from '@angular/core';
+import { Component, Input, OnChanges, OnInit, TemplateRef, ViewChild } from '@angular/core';
 import { Router } from '@angular/router';
-
-import { NgbModalRef } from '@ng-bootstrap/ng-bootstrap';
 import { delay } from 'rxjs/operators';
 
 import { CephServiceService } from '~/app/shared/api/ceph-service.service';
 import { OrchestratorService } from '~/app/shared/api/orchestrator.service';
 import { ListWithDetails } from '~/app/shared/classes/list-with-details.class';
-import { CriticalConfirmationModalComponent } from '~/app/shared/components/critical-confirmation-modal/critical-confirmation-modal.component';
+import { DeleteConfirmationModalComponent } from '~/app/shared/components/delete-confirmation-modal/delete-confirmation-modal.component';
 import { ActionLabelsI18n, URLVerbs } from '~/app/shared/constants/app.constants';
 import { TableComponent } from '~/app/shared/datatable/table/table.component';
 import { Icons } from '~/app/shared/enum/icons.enum';
@@ -19,14 +17,20 @@ import { FinishedTask } from '~/app/shared/models/finished-task';
 import { OrchestratorFeature } from '~/app/shared/models/orchestrator.enum';
 import { OrchestratorStatus } from '~/app/shared/models/orchestrator.interface';
 import { Permissions } from '~/app/shared/models/permissions';
-import { CephServiceSpec } from '~/app/shared/models/service.interface';
+import {
+  CephServiceSpec,
+  CERTIFICATE_STATUS_ICON_MAP
+} from '~/app/shared/models/service.interface';
+import { CdDatePipe } from '~/app/shared/pipes/cd-date.pipe';
 import { RelativeDatePipe } from '~/app/shared/pipes/relative-date.pipe';
 import { AuthStorageService } from '~/app/shared/services/auth-storage.service';
-import { ModalService } from '~/app/shared/services/modal.service';
 import { TaskWrapperService } from '~/app/shared/services/task-wrapper.service';
 import { URLBuilderService } from '~/app/shared/services/url-builder.service';
 import { PlacementPipe } from './placement.pipe';
 import { ServiceFormComponent } from './service-form/service-form.component';
+import { SettingsService } from '~/app/shared/api/settings.service';
+import { ModalCdsService } from '~/app/shared/services/modal-cds.service';
+import { CellTemplate } from '~/app/shared/enum/cell-template.enum';
 
 const BASE_URL = 'services';
 
@@ -34,11 +38,21 @@ const BASE_URL = 'services';
   selector: 'cd-services',
   templateUrl: './services.component.html',
   styleUrls: ['./services.component.scss'],
-  providers: [{ provide: URLBuilderService, useValue: new URLBuilderService(BASE_URL) }]
+  providers: [
+    CdDatePipe,
+    { provide: URLBuilderService, useValue: new URLBuilderService(BASE_URL) }
+  ],
+  standalone: false
 })
 export class ServicesComponent extends ListWithDetails implements OnChanges, OnInit {
   @ViewChild(TableComponent, { static: true })
   table: TableComponent;
+  @ViewChild('runningTpl', { static: true })
+  public runningTpl: TemplateRef<any>;
+  @ViewChild('urlTpl', { static: true })
+  public urlTpl: TemplateRef<any>;
+  @ViewChild('certificateStatusTpl', { static: true })
+  public certificateStatusTpl: TemplateRef<any>;
 
   @Input() hostname: string;
 
@@ -55,7 +69,6 @@ export class ServicesComponent extends ListWithDetails implements OnChanges, OnI
   tableActions: CdTableAction[];
   showDocPanel = false;
   count = 0;
-  bsModalRef: NgbModalRef;
 
   orchStatus: OrchestratorStatus;
   actionOrchFeatures = {
@@ -68,16 +81,22 @@ export class ServicesComponent extends ListWithDetails implements OnChanges, OnI
   services: Array<CephServiceSpec> = [];
   isLoadingServices = false;
   selection: CdTableSelection = new CdTableSelection();
+  icons = Icons;
+  serviceUrls = { grafana: '', prometheus: '', alertmanager: '' };
+  viewUrl = '/services';
+  isMgmtGateway: boolean = false;
+  statusIconMap = CERTIFICATE_STATUS_ICON_MAP;
 
   constructor(
     private actionLabels: ActionLabelsI18n,
     private authStorageService: AuthStorageService,
-    private modalService: ModalService,
     private orchService: OrchestratorService,
     private cephServiceService: CephServiceService,
     private relativeDatePipe: RelativeDatePipe,
     private taskWrapperService: TaskWrapperService,
-    private router: Router
+    private router: Router,
+    private settingsService: SettingsService,
+    private cdsModalService: ModalCdsService
   ) {
     super();
     this.permissions = this.authStorageService.getPermissions();
@@ -87,8 +106,8 @@ export class ServicesComponent extends ListWithDetails implements OnChanges, OnI
         icon: Icons.add,
         click: () => this.openModal(),
         name: this.actionLabels.CREATE,
-        canBePrimary: (selection: CdTableSelection) => !selection.hasSelection,
-        disable: (selection: CdTableSelection) => this.getDisable('create', selection)
+        canBePrimary: (selection: CdTableSelection) => !selection.hasSelection
+        // disable: (selection: CdTableSelection) => this.getDisable('create', selection)
       },
       {
         permission: 'update',
@@ -107,18 +126,20 @@ export class ServicesComponent extends ListWithDetails implements OnChanges, OnI
     ];
   }
 
-  openModal(edit = false) {
+  openModal(edit = false, payload?: { serviceName?: string; serviceType?: string } | string) {
+    const serviceNameFromPayload = typeof payload === 'string' ? payload : payload?.serviceName;
+    const serviceTypeFromPayload = typeof payload === 'string' ? undefined : payload?.serviceType;
+
+    const targetServiceName = serviceNameFromPayload ?? this.selection.first()?.service_name;
+    const targetServiceType = serviceTypeFromPayload ?? this.selection.first()?.service_type;
+
     if (this.routedModal) {
       edit
         ? this.router.navigate([
             BASE_URL,
             {
               outlets: {
-                modal: [
-                  URLVerbs.EDIT,
-                  this.selection.first().service_type,
-                  this.selection.first().service_name
-                ]
+                modal: [URLVerbs.EDIT, targetServiceType, targetServiceName]
               }
             }
           ])
@@ -127,8 +148,8 @@ export class ServicesComponent extends ListWithDetails implements OnChanges, OnI
       let initialState = {};
       edit
         ? (initialState = {
-            serviceName: this.selection.first()?.service_name,
-            serviceType: this.selection?.first()?.service_type,
+            serviceName: targetServiceName,
+            serviceType: targetServiceType,
             hiddenServices: this.hiddenServices,
             editing: edit
           })
@@ -136,7 +157,11 @@ export class ServicesComponent extends ListWithDetails implements OnChanges, OnI
             hiddenServices: this.hiddenServices,
             editing: edit
           });
-      this.bsModalRef = this.modalService.show(ServiceFormComponent, initialState, { size: 'lg' });
+      let modalRef = this.cdsModalService.show(ServiceFormComponent);
+      Object.assign(modalRef, initialState);
+      modalRef.serviceUpdated.subscribe(() => {
+        this.table?.reloadData();
+      });
     }
   }
 
@@ -145,7 +170,8 @@ export class ServicesComponent extends ListWithDetails implements OnChanges, OnI
       {
         name: $localize`Service`,
         prop: 'service_name',
-        flexGrow: 1
+        flexGrow: 1,
+        cellTemplate: this.urlTpl
       },
       {
         name: $localize`Placement`,
@@ -155,19 +181,31 @@ export class ServicesComponent extends ListWithDetails implements OnChanges, OnI
       },
       {
         name: $localize`Running`,
-        prop: 'status.running',
-        flexGrow: 1
-      },
-      {
-        name: $localize`Size`,
-        prop: 'status.size',
-        flexGrow: 1
+        prop: 'status',
+        flexGrow: 1,
+        cellTemplate: this.runningTpl
       },
       {
         name: $localize`Last Refreshed`,
         prop: 'status.last_refresh',
         pipe: this.relativeDatePipe,
         flexGrow: 1
+      },
+      {
+        name: $localize`Ports`,
+        prop: 'status.ports',
+        flexGrow: 1,
+        cellTransformation: CellTemplate.map,
+        customTemplateConfig: {
+          undefined: '-',
+          '': '-'
+        }
+      },
+      {
+        name: $localize`Certificate Status`,
+        prop: 'certificate.status',
+        flexGrow: 2,
+        cellTemplate: this.certificateStatusTpl
       }
     ];
 
@@ -179,6 +217,12 @@ export class ServicesComponent extends ListWithDetails implements OnChanges, OnI
       this.orchStatus = status;
       this.showDocPanel = !status.available;
     });
+
+    if (!this.isMgmtGateway) {
+      this.configureServiceUrl('api/grafana/url', 'grafana');
+      this.configureServiceUrl('ui-api/prometheus/prometheus-api-host', 'prometheus');
+      this.configureServiceUrl('ui-api/prometheus/alertmanager-api-host', 'alertmanager');
+    }
   }
 
   ngOnChanges() {
@@ -186,6 +230,10 @@ export class ServicesComponent extends ListWithDetails implements OnChanges, OnI
       this.services = [];
       this.table.reloadData();
     }
+  }
+
+  onServiceLinkClick(event: Event) {
+    event.stopPropagation();
   }
 
   getDisable(
@@ -220,6 +268,9 @@ export class ServicesComponent extends ListWithDetails implements OnChanges, OnI
         this.services = services;
         this.count = pagination_obs.count;
         this.services = this.services.filter((col: any) => {
+          if (col.service_type === 'mgmt-gateway' && col.status.running) {
+            this.isMgmtGateway = true;
+          }
           return !this.hiddenServices.includes(col.service_name);
         });
         this.isLoadingServices = false;
@@ -230,6 +281,15 @@ export class ServicesComponent extends ListWithDetails implements OnChanges, OnI
         context.error();
       }
     );
+    if (
+      this.isMgmtGateway &&
+      !this.services.find(
+        (service: CephServiceSpec) =>
+          service.service_type !== 'mgmt-gateway' && service.status.running > 0
+      )
+    ) {
+      this.isMgmtGateway = false;
+    }
   }
 
   updateSelection(selection: CdTableSelection) {
@@ -238,7 +298,7 @@ export class ServicesComponent extends ListWithDetails implements OnChanges, OnI
 
   deleteAction() {
     const service = this.selection.first();
-    this.modalService.show(CriticalConfirmationModalComponent, {
+    this.cdsModalService.show(DeleteConfirmationModalComponent, {
       itemDescription: $localize`Service`,
       itemNames: [service.service_name],
       actionDescription: 'delete',
@@ -257,6 +317,12 @@ export class ServicesComponent extends ListWithDetails implements OnChanges, OnI
             // the user experience.
             delay(5000)
           )
+    });
+  }
+
+  private configureServiceUrl(url: string, serviceType: string) {
+    this.settingsService.ifSettingConfigured(url, (url) => {
+      this.serviceUrls[serviceType] = url;
     });
   }
 }

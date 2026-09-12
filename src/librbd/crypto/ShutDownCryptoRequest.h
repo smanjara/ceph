@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_CRYPTO_SHUT_DOWN_CRYPTO_REQUEST_H
 #define CEPH_LIBRBD_CRYPTO_SHUT_DOWN_CRYPTO_REQUEST_H
@@ -26,8 +26,6 @@ public:
     void send();
     void shut_down_object_dispatch();
     void handle_shut_down_object_dispatch(int r);
-    void shut_down_image_dispatch();
-    void handle_shut_down_image_dispatch(int r);
     void finish(int r);
 
 private:

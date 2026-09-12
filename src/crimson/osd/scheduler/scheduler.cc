@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -19,26 +20,9 @@
 #include "crimson/osd/scheduler/scheduler.h"
 #include "crimson/osd/scheduler/mclock_scheduler.h"
 #include "common/WeightedPriorityQueue.h"
+#include "common/mclock_common.h"
 
 namespace crimson::osd::scheduler {
-
-std::ostream &operator<<(std::ostream &lhs, const scheduler_class_t &c)
-{
-  switch (c) {
-  case scheduler_class_t::background_best_effort:
-    return lhs << "background_best_effort";
-  case scheduler_class_t::background_recovery:
-    return lhs << "background_recovery";
-  case scheduler_class_t::client:
-    return lhs << "client";
-  case scheduler_class_t::repop:
-    return lhs << "repop";
-  case scheduler_class_t::immediate:
-    return lhs << "immediate";
-  default:
-    return lhs;
-  }
-}
 
 /**
  * Implements Scheduler in terms of OpQueue
@@ -50,37 +34,37 @@ std::ostream &operator<<(std::ostream &lhs, const scheduler_class_t &c)
  */
 template <typename T>
 class ClassedOpQueueScheduler final : public Scheduler {
-  const scheduler_class_t cutoff;
+  const SchedulerClass cutoff;
   T queue;
 
   using priority_t = uint64_t;
   std::array<
     priority_t,
-    static_cast<size_t>(scheduler_class_t::immediate)
+    static_cast<size_t>(SchedulerClass::immediate)
   > priority_map = {
     // Placeholder, gets replaced with configured values
     0, 0, 0
   };
 
-  static scheduler_class_t get_io_prio_cut(ConfigProxy &conf) {
+  static SchedulerClass get_io_prio_cut(ConfigProxy &conf) {
     if (conf.get_val<std::string>("osd_op_queue_cut_off") == "debug_random") {
       srand(time(NULL));
       return (rand() % 2 < 1) ?
-	scheduler_class_t::repop : scheduler_class_t::immediate;
+        SchedulerClass::repop : SchedulerClass::immediate;
     } else if (conf.get_val<std::string>("osd_op_queue_cut_off") == "high") {
-      return scheduler_class_t::immediate;
+      return SchedulerClass::immediate;
     } else {
-      return scheduler_class_t::repop;
+      return SchedulerClass::repop;
     }
   }
 
-  bool use_strict(scheduler_class_t kl) const {
+  bool use_strict(SchedulerClass kl) const {
     return static_cast<uint8_t>(kl) >= static_cast<uint8_t>(cutoff);
   }
 
-  priority_t get_priority(scheduler_class_t kl) const {
+  priority_t get_priority(SchedulerClass kl) const {
     ceph_assert(static_cast<size_t>(kl) <
-		static_cast<size_t>(scheduler_class_t::immediate));
+		static_cast<size_t>(SchedulerClass::immediate));
     return priority_map[static_cast<size_t>(kl)];
   }
 
@@ -91,44 +75,65 @@ public:
     queue(std::forward<Args>(args)...)
   {
     priority_map[
-      static_cast<size_t>(scheduler_class_t::background_best_effort)
+      static_cast<size_t>(SchedulerClass::background_best_effort)
     ] = conf.get_val<uint64_t>("osd_scrub_priority");
     priority_map[
-      static_cast<size_t>(scheduler_class_t::background_recovery)
+      static_cast<size_t>(SchedulerClass::background_recovery)
     ] = conf.get_val<uint64_t>("osd_recovery_op_priority");
     priority_map[
-      static_cast<size_t>(scheduler_class_t::client)
+      static_cast<size_t>(SchedulerClass::client)
     ] = conf.get_val<uint64_t>("osd_client_op_priority");
     priority_map[
-      static_cast<size_t>(scheduler_class_t::repop)
+      static_cast<size_t>(SchedulerClass::repop)
     ] = conf.get_val<uint64_t>("osd_client_op_priority");
   }
 
   void enqueue(item_t &&item) final {
-    if (use_strict(item.params.klass))
+     // immediate ops bypass class-based priority -- use message priority directly
+    // matching classic WPQ which uses numeric priority, not SchedulerClass
+    if (item.params.klass == SchedulerClass::immediate) {
+      queue.enqueue_strict(
+        item.params.owner,
+        item.params.priority,  // use message priority directly
+        std::move(item));
+      return;
+    }
+
+    if (use_strict(item.params.klass)) {
       queue.enqueue_strict(
 	item.params.owner, get_priority(item.params.klass), std::move(item));
-    else
+    } else {
       queue.enqueue(
 	item.params.owner, get_priority(item.params.klass),
 	item.params.cost, std::move(item));
+    }
   }
 
   void enqueue_front(item_t &&item) final {
-    if (use_strict(item.params.klass))
+    if (item.params.klass == SchedulerClass::immediate) {
+      // same for enqueue_front
+      queue.enqueue_strict_front(
+        item.params.owner,
+        item.params.priority,
+        std::move(item));
+      return;
+    }
+
+    if (use_strict(item.params.klass)) {
       queue.enqueue_strict_front(
 	item.params.owner, get_priority(item.params.klass), std::move(item));
-    else
+    } else {
       queue.enqueue_front(
 	item.params.owner, get_priority(item.params.klass),
 	item.params.cost, std::move(item));
+    }
   }
 
   bool empty() const final {
     return queue.empty();
   }
 
-  item_t dequeue() final {
+  WorkItem dequeue() final {
     return queue.dequeue();
   }
 
@@ -145,7 +150,8 @@ public:
   ~ClassedOpQueueScheduler() final {};
 };
 
-SchedulerRef make_scheduler(ConfigProxy &conf)
+SchedulerRef make_scheduler(CephContext *cct, ConfigProxy &conf, int whoami, uint32_t nshards, int sid,
+                            bool is_rotational, bool perf_cnt)
 {
   const std::string _type = conf.get_val<std::string>("osd_op_queue");
   const std::string *type = &_type;
@@ -166,7 +172,7 @@ SchedulerRef make_scheduler(ConfigProxy &conf)
 	conf->osd_op_pq_min_cost
       );
   } else if (*type == "mclock_scheduler") {
-    return std::make_unique<mClockScheduler>(conf);
+    return std::make_unique<mClockScheduler>(cct, whoami, nshards, sid, is_rotational, perf_cnt);
   } else {
     ceph_assert("Invalid choice of wq" == 0);
     return std::unique_ptr<mClockScheduler>();

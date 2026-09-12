@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -12,6 +13,7 @@
  *
  */
 
+#include <cerrno>
 #include <limits>
 #include <unistd.h>
 #include <stdlib.h>
@@ -20,11 +22,13 @@
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/mman.h>
+#include <chrono>
 
 #include <boost/container/flat_map.hpp>
 #include <boost/lockfree/queue.hpp>
 
 #include "KernelDevice.h"
+#include "log/Log.h"
 #include "include/buffer_raw.h"
 #include "include/intarith.h"
 #include "include/types.h"
@@ -33,7 +37,9 @@
 #include "include/str_map.h"
 #include "common/blkdev.h"
 #include "common/buffer_instrumentation.h"
+#include "common/Clock.h" // for ceph_clock_now()
 #include "common/errno.h"
+#include "BlockDevice.h"
 #if defined(__FreeBSD__)
 #include "bsm/audit_errno.h"
 #endif
@@ -42,6 +48,12 @@
 
 #include "global/global_context.h"
 #include "io_uring.h"
+
+#ifdef WITH_CRIMSON
+#include "crimson/common/perf_counters_collection.h"
+#else
+#include "common/perf_counters_collection.h"
+#endif
 
 #define dout_context cct
 #define dout_subsys ceph_subsys_bdev
@@ -52,6 +64,7 @@ using std::list;
 using std::map;
 using std::string;
 using std::vector;
+using namespace std::literals;
 
 using ceph::bufferlist;
 using ceph::bufferptr;
@@ -59,18 +72,16 @@ using ceph::make_timespan;
 using ceph::mono_clock;
 using ceph::operator <<;
 
-KernelDevice::KernelDevice(CephContext* cct, aio_callback_t cb, void *cbpriv, aio_callback_t d_cb, void *d_cbpriv)
+KernelDevice::KernelDevice(CephContext* cct, aio_callback_t cb, void *cbpriv, aio_callback_t d_cb, void *d_cbpriv, const char* dev_name)
   : BlockDevice(cct, cb, cbpriv),
     aio(false), dio(false),
     discard_callback(d_cb),
     discard_callback_priv(d_cbpriv),
     aio_stop(false),
-    discard_started(false),
-    discard_stop(false),
     aio_thread(this),
-    discard_thread(this),
     injecting_crash(0)
 {
+  cct->_conf.add_observer(this);
   fd_directs.resize(WRITE_LIFE_MAX, -1);
   fd_buffereds.resize(WRITE_LIFE_MAX, -1);
 
@@ -90,6 +101,28 @@ KernelDevice::KernelDevice(CephContext* cct, aio_callback_t cb, void *cbpriv, ai
     }
     io_queue = std::make_unique<aio_queue_t>(iodepth);
   }
+
+  char name[128];
+  sprintf(name, "blk-kernel-device-%s", dev_name);
+  PerfCountersBuilder b(cct, name,
+                       l_blk_kernel_device_first, l_blk_kernel_device_last);
+  b.set_prio_default(PerfCountersBuilder::PRIO_USEFUL);
+  b.add_u64_counter(l_blk_kernel_device_discard_op, "discard_op",
+            "Number of discard ops issued to kernel device");
+  b.add_u64_counter(l_blk_kernel_discard_threads, "discard_threads",
+            "Number of discard threads running");
+
+  logger.reset(b.create_perf_counters());
+  cct->get_perfcounters_collection()->add(logger.get());
+}
+
+KernelDevice::~KernelDevice()
+{
+  if (logger) {
+    cct->get_perfcounters_collection()->remove(logger.get());
+    logger.reset();
+  }
+  cct->_conf.remove_observer(this);
 }
 
 int KernelDevice::_lock()
@@ -133,8 +166,25 @@ int KernelDevice::open(const string& p)
   int r = 0, i = 0;
   dout(1) << __func__ << " path " << path << dendl;
 
+  struct stat statbuf;
+  bool is_block;
+  r = stat(path.c_str(), &statbuf);
+  if (r != 0) {
+    derr << __func__ << " stat got: " << cpp_strerror(r) << dendl;
+    goto out_fail;
+  }
+  is_block = (statbuf.st_mode & S_IFMT) == S_IFBLK;
   for (i = 0; i < WRITE_LIFE_MAX; i++) {
-    int fd = ::open(path.c_str(), O_RDWR | O_DIRECT);
+    int flags = 0;
+    if (lock_exclusive && is_block && (i == 0)) {
+      // If opening block device use O_EXCL flag. It gives us best protection,
+      // as no other process can overwrite the data for as long as we are running.
+      // For block devices ::flock is not enough,
+      // since 2 different inodes with same major/minor can be locked.
+      // Exclusion by O_EXCL works in containers too.
+      flags |= O_EXCL;
+    }
+    int fd = ::open(path.c_str(), O_RDWR | O_DIRECT | flags);
     if (fd  < 0) {
       r = -errno;
       break;
@@ -187,6 +237,10 @@ int KernelDevice::open(const string& p)
   }
 
   if (lock_exclusive) {
+    // We need to keep soft locking (via flock()) because O_EXCL does not work for regular files.
+    // This is as good as we can get. Other processes can still overwrite the data,
+    // but at least we are protected from mounting same device twice in ceph processes.
+    // We also apply soft locking for block devices, as it populates /proc/locks. (see lslocks)
     r = _lock();
     if (r < 0) {
       derr << __func__ << " failed to lock " << path << ": " << cpp_strerror(r)
@@ -195,40 +249,14 @@ int KernelDevice::open(const string& p)
     }
   }
 
-  struct stat st;
-  r = ::fstat(fd_directs[WRITE_LIFE_NOT_SET], &st);
+  r = refresh_size();
   if (r < 0) {
     r = -errno;
-    derr << __func__ << " fstat got " << cpp_strerror(r) << dendl;
     goto out_fail;
   }
 
-  // Operate as though the block size is 4 KB.  The backing file
-  // blksize doesn't strictly matter except that some file systems may
-  // require a read/modify/write if we write something smaller than
-  // it.
-  block_size = cct->_conf->bdev_block_size;
-  if (block_size != (unsigned)st.st_blksize) {
-    dout(1) << __func__ << " backing device/file reports st_blksize "
-	    << st.st_blksize << ", using bdev_block_size "
-	    << block_size << " anyway" << dendl;
-  }
-
-
   {
-    BlkDev blkdev_direct(fd_directs[WRITE_LIFE_NOT_SET]);
     BlkDev blkdev_buffered(fd_buffereds[WRITE_LIFE_NOT_SET]);
-
-    if (S_ISBLK(st.st_mode)) {
-      int64_t s;
-      r = blkdev_direct.get_size(&s);
-      if (r < 0) {
-	goto out_fail;
-      }
-      size = s;
-    } else {
-      size = st.st_size;
-    }
 
     char partition[PATH_MAX], devname[PATH_MAX];
     if ((r = blkdev_buffered.partition(partition, PATH_MAX)) ||
@@ -242,12 +270,6 @@ int KernelDevice::open(const string& p)
       support_discard = blkdev_buffered.support_discard();
       optimal_io_size = blkdev_buffered.get_optimal_io_size();
       this->devname = devname;
-      // check if any extended block device plugin recognizes this device
-      // detect_vdo has moved into the VDO plugin
-      int rc = extblkdev::detect_device(cct, devname, ebd_impl);
-      if (rc != 0) {
-	dout(20) << __func__ << " no plugin volume maps to " << devname << dendl;
-      }
     }
   }
 
@@ -256,16 +278,16 @@ int KernelDevice::open(const string& p)
     goto out_fail;
   }
 
-  r = _aio_start();
-  if (r < 0) {
-    goto out_fail;
-  }
-  if (support_discard && cct->_conf->bdev_enable_discard && cct->_conf->bdev_async_discard) {
-    _discard_start();
+  if (size >= block_size) {
+    r = _aio_start();
+    if (r < 0) {
+      goto out_fail;
+    }
+  } else {
+    aio = false;
   }
 
-  // round size down to an even block
-  size &= ~(block_size - 1);
+  _discard_update_threads();
 
   dout(1) << __func__
 	  << " size " << size
@@ -305,11 +327,54 @@ int KernelDevice::get_devices(std::set<std::string> *ls) const
   return 0;
 }
 
+int KernelDevice::refresh_size()
+{
+  if (fd_directs.empty() || fd_directs[WRITE_LIFE_NOT_SET] < 0) {
+    return -ENODEV;
+  }
+
+  struct stat st;
+  int r = ::fstat(fd_directs[WRITE_LIFE_NOT_SET], &st);
+  if (r < 0) {
+    r = -errno;
+    derr << __func__ << " fstat failed: " << cpp_strerror(r) << dendl;
+    return r;
+  }
+
+  // Operate as though the block size is 4 KB.  The backing file
+  // blksize doesn't strictly matter except that some file systems may
+  // require a read/modify/write if we write something smaller than
+  // it.
+  block_size = cct->_conf->bdev_block_size;
+  if (block_size != (unsigned)st.st_blksize) {
+    dout(1) << __func__ << " backing device/file reports st_blksize "
+	    << st.st_blksize << ", using bdev_block_size "
+	    << block_size << " anyway" << dendl;
+  }
+
+  // logic taken from open() for block vs file
+  int64_t new_size;
+  if (S_ISBLK(st.st_mode)) {
+    BlkDev blkdev(fd_directs[WRITE_LIFE_NOT_SET]);
+    r = blkdev.get_size(&new_size);
+    if (r < 0) {
+      derr << __func__ << " ioctl failed: " << cpp_strerror(r) << dendl;
+      return r;
+    }
+  } else {
+    new_size = st.st_size;
+  }
+
+  // round size down to an even block
+  size = p2align(new_size, int64_t(block_size));
+  return 0;
+}
+
 void KernelDevice::close()
 {
   dout(1) << __func__ << dendl;
   _aio_stop();
-  if (discard_thread.is_started()) {
+  if (_discard_started()) {
     _discard_stop();
   }
   _pre_close();
@@ -317,11 +382,11 @@ void KernelDevice::close()
   extblkdev::release_device(ebd_impl);
 
   for (int i = 0; i < WRITE_LIFE_MAX; i++) {
-    assert(fd_directs[i] >= 0);
+    ceph_assert(fd_directs[i] >= 0);
     VOID_TEMP_FAILURE_RETRY(::close(fd_directs[i]));
     fd_directs[i] = -1;
 
-    assert(fd_buffereds[i] >= 0);
+    ceph_assert(fd_buffereds[i] >= 0);
     VOID_TEMP_FAILURE_RETRY(::close(fd_buffereds[i]));
     fd_buffereds[i] = -1;
   }
@@ -422,6 +487,22 @@ int KernelDevice::get_ebd_state(ExtBlkDevState &state) const
   return -ENOENT;
 }
 
+int KernelDevice::detect_ebd(std::string& id)
+{
+  // check if any extended block device plugin recognizes this device
+  // detect_vdo has moved into the VDO plugin
+  if (!ebd_impl) {
+    int rc = extblkdev::detect_device(cct, devname, ebd_impl);
+    if (rc != 0) {
+      dout(20) << __func__ << " no plugin volume maps to " << devname << dendl;
+    }
+  }
+  if (ebd_impl) {
+    return ebd_impl->get_plugin_id(id);
+  }
+  return -ENOENT;
+}
+
 int KernelDevice::choose_fd(bool buffered, int write_hint) const
 {
 #if defined(F_SET_FILE_RW_HINT)
@@ -503,41 +584,90 @@ void KernelDevice::_aio_stop()
   if (aio) {
     dout(10) << __func__ << dendl;
     aio_stop = true;
+
+    IOContext wakeup_ctx(cct, nullptr, false);
+    bufferlist bl;
+    aio_read(0, block_size, &bl, &wakeup_ctx);
+    aio_submit(&wakeup_ctx);
+
     aio_thread.join();
+
+    if (cct->_conf->bdev_debug_aio) {
+      for (auto& i: wakeup_ctx.running_aios) {
+	debug_aio_unlink(i);
+      }
+    }
+
     aio_stop = false;
     io_queue->shutdown();
   }
 }
 
-void KernelDevice::_discard_start()
+void KernelDevice::_discard_update_threads(bool discard_stop)
 {
-    discard_thread.create("bstore_discard");
+  std::unique_lock l(discard_lock);
+
+  uint64_t oldcount = discard_threads.size();
+  uint64_t newcount = cct->_conf.get_val<uint64_t>("bdev_async_discard_threads");
+  if (newcount == 0) {
+    //backward compatibility mode to make sure legacy "bdev_async_discard" is
+    // taken into account if set.
+    newcount = cct->_conf.get_val<bool>("bdev_async_discard") ? 1 : 0;
+  }
+  if (!cct->_conf.get_val<bool>("bdev_enable_discard") || !support_discard || discard_stop) {
+    newcount = 0;
+  }
+
+  // Increase? Spawn now, it's quick
+  if (newcount > oldcount) {
+    dout(10) << __func__ << " starting " << (newcount - oldcount) << " additional discard threads" << dendl;
+    discard_threads.reserve(newcount);
+    for(uint64_t i = oldcount; i < newcount; i++)
+    {
+      // All threads created with the same name
+      discard_threads.emplace_back(new DiscardThread(this));
+      discard_threads.back()->create("bstore_discard");
+    }
+  // Decrease? Signal threads after telling them to stop
+  } else if (newcount < oldcount) {
+    std::vector<DiscardThread*> discard_threads_to_stop;
+    dout(10) << __func__ << " stopping " << (oldcount - newcount) << " existing discard threads" << dendl;
+
+    // Signal the last threads to quit, and stop tracking them
+    for(uint64_t i = oldcount; i > newcount; i--) {
+      discard_threads[i-1]->stop = true;
+      discard_threads_to_stop.push_back(discard_threads[i-1]);
+    }
+    discard_cond.notify_all();
+    discard_threads.resize(newcount);
+    l.unlock();
+    for (auto t : discard_threads_to_stop) {
+      t->join();
+      delete t;
+    }
+  }
+  logger->set(l_blk_kernel_discard_threads, discard_threads.size());
 }
 
 void KernelDevice::_discard_stop()
 {
   dout(10) << __func__ << dendl;
-  {
-    std::unique_lock l(discard_lock);
-    while (!discard_started) {
-      discard_cond.wait(l);
-    }
-    discard_stop = true;
-    discard_cond.notify_all();
-  }
-  discard_thread.join();
-  {
-    std::lock_guard l(discard_lock);
-    discard_stop = false;
-  }
+  _discard_update_threads(true);
   dout(10) << __func__ << " stopped" << dendl;
+}
+
+bool KernelDevice::_discard_started()
+{
+  std::unique_lock l(discard_lock);
+  return !discard_threads.empty();
 }
 
 void KernelDevice::discard_drain()
 {
   dout(10) << __func__ << dendl;
   std::unique_lock l(discard_lock);
-  while (!discard_queued.empty() || discard_running) {
+  while (!discard_queued.empty() || (discard_running > 0)) {
+    need_notify = true;
     discard_cond.wait(l);
   }
 }
@@ -546,7 +676,7 @@ static bool is_expected_ioerr(const int r)
 {
   // https://lxr.missinglinkelectronics.com/linux+v4.15/block/blk-core.c#L135
   return (r == -EOPNOTSUPP || r == -ETIMEDOUT || r == -ENOSPC ||
-	  r == -ENOLINK || r == -EREMOTEIO  || r == -EAGAIN || r == -EIO ||
+	  r == -ENOLINK || r == -EREMOTEIO || r == -EAGAIN || r == -EIO ||
 	  r == -ENODATA || r == -EILSEQ || r == -ENOMEM ||
 #if defined(__linux__)
 	  r == -EREMCHG || r == -EBADE
@@ -677,70 +807,143 @@ void KernelDevice::_aio_thread()
   dout(10) << __func__ << " end" << dendl;
 }
 
-void KernelDevice::_discard_thread()
+void KernelDevice::swap_discard_queued(interval_set<uint64_t>& other)
 {
   std::unique_lock l(discard_lock);
-  ceph_assert(!discard_started);
-  discard_started = true;
+  discard_queued.swap(other);
+}
+
+void KernelDevice::_discard_thread(DiscardThread* thr)
+{
+  dout(10) << __func__ << " thread " << thr << " start" << dendl;
+
+  // Thread-local list of processing discards
+  interval_set<uint64_t> discard_processing;
+
+  std::unique_lock l(discard_lock);
   discard_cond.notify_all();
+
   while (true) {
-    ceph_assert(discard_finishing.empty());
+    ceph_assert(discard_processing.empty());
     if (discard_queued.empty()) {
-      if (discard_stop)
+      if (thr->stop)
 	break;
       dout(20) << __func__ << " sleep" << dendl;
-      discard_cond.notify_all(); // for the thread trying to drain...
+      if (need_notify) {
+        discard_cond.notify_all(); // for the thread trying to drain...
+        need_notify = false;
+      }
       discard_cond.wait(l);
       dout(20) << __func__ << " wake" << dendl;
     } else {
-      discard_finishing.swap(discard_queued);
-      discard_running = true;
+      // If there are non-stopped discard threads and we have been requested
+      // to stop, do so now. Otherwise, we need to proceed because
+      // discard_queued is non-empty and at least one thread is needed to
+      // drain it.
+      if (thr->stop && !discard_threads.empty())
+        break;
+
+      if (cct->_conf->bdev_debug_discard_sleep > 0)
+        std::this_thread::sleep_for(std::chrono::milliseconds(cct->_conf->bdev_debug_discard_sleep));
+
+      // Limit local processing to MAX_LOCAL_DISCARD items.
+      // This will allow threads to work in parallel
+      //      instead of a single thread taking over the whole discard_queued.
+      // It will also allow threads to finish in a timely manner.
+      constexpr unsigned MAX_LOCAL_DISCARD = 32;
+      unsigned count = 0;
+      size_t bytes_discarded = 0;
+      for (auto it = discard_queued.begin();
+           it != discard_queued.end() && count < MAX_LOCAL_DISCARD;
+           ++count) {
+        discard_processing.insert(it.get_start(), it.get_len());
+	bytes_discarded += it.get_len();
+        it = discard_queued.erase(it);
+      }
+      discard_queue_bytes -= bytes_discarded;
+      discard_queue_length = discard_queued.num_intervals();
+
+      // there are multiple active threads -> must use a counter instead of a flag
+      discard_running ++;
       l.unlock();
       dout(20) << __func__ << " finishing" << dendl;
-      for (auto p = discard_finishing.begin();p != discard_finishing.end(); ++p) {
-	_discard(p.get_start(), p.get_len());
+      for (auto p = discard_processing.begin(); p != discard_processing.end(); ++p) {
+        _discard(p.get_start(), p.get_len());
       }
+      logger->inc(l_blk_kernel_device_discard_op, discard_processing.num_intervals());
 
-      discard_callback(discard_callback_priv, static_cast<void*>(&discard_finishing));
-      discard_finishing.clear();
+      discard_callback(discard_callback_priv, static_cast<void*>(&discard_processing));
+      discard_processing.clear();
       l.lock();
-      discard_running = false;
+      discard_running --;
+      ceph_assert(discard_running >= 0);
     }
   }
-  dout(10) << __func__ << " finish" << dendl;
-  discard_started = false;
+
+  dout(10) << __func__ << " thread " << thr << " finish" << dendl;
 }
 
-int KernelDevice::_queue_discard(interval_set<uint64_t> &to_release)
+// this is private and is expected that the caller checks that discard
+// threads are running via _discard_started()
+bool KernelDevice::_queue_discard(interval_set<uint64_t> &to_release)
 {
-  // if bdev_async_discard enabled on the fly, discard_thread is not started here, fallback to sync discard
-  if (!discard_thread.is_started())
-    return -1;
-
   if (to_release.empty())
-    return 0;
-
-  std::lock_guard l(discard_lock);
-  discard_queued.insert(to_release);
-  discard_cond.notify_all();
-  return 0;
-}
-
-// return true only if _queue_discard succeeded, so caller won't have to do alloc->release
-// otherwise false
-bool KernelDevice::try_discard(interval_set<uint64_t> &to_release, bool async)
-{
-  if (!support_discard || !cct->_conf->bdev_enable_discard)
     return false;
 
-  if (async && discard_thread.is_started()) {
-    return 0 == _queue_discard(to_release);
+  auto max_pending = cct->_conf->bdev_async_discard_max_pending;
+
+  std::lock_guard l(discard_lock);
+
+  if (max_pending > 0 && discard_queued.num_intervals() >= max_pending) {
+    discard_cond.notify_one();
+    return false;
+  }
+
+  if(discard_queue_bytes >= cct->_conf->bdev_discard_max_bytes) {
+    discard_cond.notify_one();
+    return false;
+  }
+
+  discard_queued.insert(to_release);
+
+  size_t discarded_bytes = 0;
+  for(auto p = to_release.begin(); p != to_release.end(); ++p){
+    discarded_bytes += p.get_len();
+  }
+  discard_queue_bytes += discarded_bytes;
+
+  discard_queue_length = discard_queued.num_intervals();
+
+  discard_cond.notify_one();
+  return true;
+}
+
+// return true only if discard was queued, so caller won't have to do
+// alloc->release, otherwise return false
+bool KernelDevice::try_discard(interval_set<uint64_t> &to_release,
+                               bool async,
+                               bool force)
+{
+  if (!support_discard || !(force || cct->_conf->bdev_enable_discard))
+    return false;
+
+  if (async && _discard_started()) {
+    return _queue_discard(to_release);
   } else {
     for (auto p = to_release.begin(); p != to_release.end(); ++p) {
       _discard(p.get_start(), p.get_len());
     }
+    logger->inc(l_blk_kernel_device_discard_op, to_release.num_intervals());
   }
   return false;
+}
+
+void KernelDevice::collect_alerts(osd_alert_list_t& alerts, const std::string& device_name)
+{
+  BlockDevice::collect_alerts(alerts, device_name);
+  if (ebd_impl) {
+    ebd_impl->collect_alerts(alerts);
+  }
 }
 
 void KernelDevice::_aio_log_start(
@@ -844,11 +1047,15 @@ void KernelDevice::aio_submit(IOContext *ioc)
   }
 
   void *priv = static_cast<void*>(ioc);
+  int retry_max = cct->_conf->bdev_aio_submit_retry_max;
+  int initial_delay_us = cct->_conf->bdev_aio_submit_retry_initial_delay_us;
+  dout(20) << __func__
+	   << " bdev_aio_submit_retry_max " << retry_max
+	   << " bdev_aio_submit_retry_initial_delay_us " << initial_delay_us
+	   << dendl;
   int r, retries = 0;
-  // num of pending aios should not overflow when passed to submit_batch()
-  assert(pending <= std::numeric_limits<uint16_t>::max());
   r = io_queue->submit_batch(ioc->running_aios.begin(), e,
-			     pending, priv, &retries);
+			     priv, &retries, retry_max, initial_delay_us);
 
   if (retries)
     derr << __func__ << " retries " << retries << dendl;
@@ -1050,10 +1257,23 @@ int KernelDevice::_discard(uint64_t offset, uint64_t len)
 	       << dendl;
     return 0;
   }
-  dout(10) << __func__
-	   << " 0x" << std::hex << offset << "~" << len << std::dec
-	   << dendl;
-  r = BlkDev{fd_directs[WRITE_LIFE_NOT_SET]}.discard((int64_t)offset, (int64_t)len);
+  uint64_t max_len = cct->_conf->bdev_max_discard_length;
+  if (max_len) {
+    while (len > 0 && r == 0) {
+      auto l = std::min(max_len, len);
+      dout(10) << __func__
+               << " 0x" << std::hex << offset << "~" << l << std::dec
+               << dendl;
+      r = BlkDev{fd_directs[WRITE_LIFE_NOT_SET]}.discard((int64_t)offset, (int64_t)l);
+      offset += l;
+      len -= l;
+    }
+  } else {
+    dout(10) << __func__
+             << " 0x" << std::hex << offset << "~" << len << std::dec
+             << dendl;
+    r = BlkDev{fd_directs[WRITE_LIFE_NOT_SET]}.discard((int64_t)offset, (int64_t)len);
+  }
   return r;
 }
 
@@ -1245,6 +1465,7 @@ int KernelDevice::read(uint64_t off, uint64_t len, bufferlist *pbl,
 	 << " since " << start1 << ", timeout is "
 	 << age
 	 << "s" << dendl;
+    add_stalled_read_event();
   }
   if (r < 0) {
     if (ioc->allow_eio && is_expected_ioerr(-errno)) {
@@ -1318,6 +1539,7 @@ int KernelDevice::direct_read_unaligned(uint64_t off, uint64_t len, char *buf)
 	 << " since " << start1 << ", timeout is "
 	 << age
 	 << "s" << dendl;
+    add_stalled_read_event();
   }
 
   if (r < 0) {
@@ -1381,6 +1603,7 @@ int KernelDevice::read_random(uint64_t off, uint64_t len, char *buf,
            << " (buffered) since " << start1 << ", timeout is "
 	   << age
 	   << "s" << dendl;
+      add_stalled_read_event();
     }
   } else {
     //direct and aligned read
@@ -1391,6 +1614,7 @@ int KernelDevice::read_random(uint64_t off, uint64_t len, char *buf,
            << " (direct) since " << start1 << ", timeout is "
 	   << age
 	   << "s" << dendl;
+      add_stalled_read_event();
     }
     if (r < 0) {
       r = -errno;
@@ -1425,4 +1649,23 @@ int KernelDevice::invalidate_cache(uint64_t off, uint64_t len)
 	 << " error: " << cpp_strerror(r) << dendl;
   }
   return r;
+}
+
+std::vector<std::string> KernelDevice::get_tracked_keys()
+    const noexcept
+{
+  return {
+    "bdev_async_discard_threads"s,
+    "bdev_async_discard"s,
+    "bdev_enable_discard"s,
+  };
+}
+
+void KernelDevice::handle_conf_change(const ConfigProxy& conf,
+			     const std::set <std::string> &changed)
+{
+  if (changed.count("bdev_async_discard_threads") || changed.count("bdev_async_discard") ||
+      changed.count("bdev_enable_discard")) {
+    _discard_update_threads();
+  }
 }

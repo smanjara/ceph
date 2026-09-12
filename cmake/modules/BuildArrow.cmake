@@ -3,6 +3,7 @@
 function(build_arrow)
   # only enable the parquet component
   set(arrow_CMAKE_ARGS -DARROW_PARQUET=ON)
+  list(APPEND arrow_CMAKE_ARGS ${CEPH_EXTERNAL_PROJECT_CMAKE_ARGS})
 
   # only use preinstalled dependencies for arrow, don't fetch/build any
   list(APPEND arrow_CMAKE_ARGS -DARROW_DEPENDENCY_SOURCE=SYSTEM)
@@ -12,11 +13,21 @@ function(build_arrow)
   list(APPEND arrow_CMAKE_ARGS -DARROW_BUILD_STATIC=ON)
 
   # arrow only supports its own bundled version of jemalloc, so can't
-  # share the version ceph is using
-  list(APPEND arrow_CMAKE_ARGS -DARROW_JEMALLOC=OFF)
+  # share the version ceph is using,
+  # arrow builds and uses mimalloc by default, let's reduce the build time
+  # and simplify the linkage.
+  list(APPEND arrow_CMAKE_ARGS
+    -DARROW_JEMALLOC=OFF
+    -DARROW_MIMALLOC=OFF)
 
   # transitive dependencies
-  list(APPEND arrow_INTERFACE_LINK_LIBRARIES thrift)
+  if (thrift_VERSION VERSION_GREATER_EQUAL 0.17)
+    # build arrow with system thrift, and include the transitive dependency on the Arrow::Arrow target
+    list(APPEND arrow_INTERFACE_LINK_LIBRARIES thrift)
+  else()
+    # build arrow with bundled thrift to work around missing boost dependency
+    list(APPEND arrow_CMAKE_ARGS -DThrift_SOURCE=BUNDLED -DARROW_THRIFT_USE_SHARED=OFF)
+  endif()
 
   if (NOT WITH_SYSTEM_UTF8PROC)
     # forward utf8proc_ROOT from build_utf8proc()
@@ -69,6 +80,10 @@ function(build_arrow)
     list(APPEND arrow_DEPENDS Boost)
   endif()
 
+  # Arrow requires xsimd >= 9.0.1 (see arrow/cpp/thirdparty/versions.txt).
+  # Use AUTO to let Arrow detect system xsimd and fall back to bundled if needed.
+  list(APPEND arrow_CMAKE_ARGS -Dxsimd_SOURCE=AUTO)
+
   # cmake doesn't properly handle arguments containing ";", such as
   # CMAKE_PREFIX_PATH, for which reason we'll have to use some other separator.
   string(REPLACE ";" "!" CMAKE_PREFIX_PATH_ALT_SEP "${CMAKE_PREFIX_PATH}")
@@ -86,6 +101,9 @@ function(build_arrow)
   else()
     list(APPEND arrow_CMAKE_ARGS -DCMAKE_BUILD_TYPE=Release)
   endif()
+  # don't add -Werror or debug package builds fail with:
+  #warning _FORTIFY_SOURCE requires compiling with optimization (-O)
+  list(APPEND arrow_CMAKE_ARGS -DBUILD_WARNING_LEVEL=PRODUCTION)
 
   # we use an external project and copy the sources to bin directory to ensure
   # that object files are built outside of the source tree.

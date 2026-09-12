@@ -1,11 +1,13 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "node.h"
 
 #include <cassert>
 #include <exception>
 #include <sstream>
+
+#include <fmt/std.h>  // for fmt::formatter<std::error_code>
 
 #include "common/likely.h"
 #include "crimson/common/utility.h"
@@ -93,7 +95,7 @@ void tree_cursor_t::assert_next_to(
     }
   } else {
     assert(is_invalid());
-    ceph_abort("impossible");
+    ceph_abort_msg("impossible");
   }
 #endif
 }
@@ -240,7 +242,7 @@ void tree_cursor_t::Cache::maybe_duplicate(const node_version_t& current_version
     p_node_base = current_p_node_base;
   } else {
     // It is impossible to change state backwards, see node_types.h.
-    ceph_abort("impossible");
+    ceph_abort_msg("impossible");
   }
 }
 
@@ -319,6 +321,9 @@ level_t Node::level() const
 eagain_ifuture<Node::search_result_t> Node::lower_bound(
     context_t c, const key_hobj_t& key)
 {
+#ifdef CRIMSON_DETAILED_SAMPLING
+  ++c.t.get_onode_tree_stats().lookup_count;
+#endif
   return seastar::do_with(
     MatchHistory(), [this, c, &key](auto& history) {
       return lower_bound_tracked(c, key, history);
@@ -332,6 +337,9 @@ eagain_ifuture<std::pair<Ref<tree_cursor_t>, bool>> Node::insert(
     value_config_t vconf,
     Ref<Node>&& this_ref)
 {
+#ifdef CRIMSON_DETAILED_SAMPLING
+  ++c.t.get_onode_tree_stats().lookup_count;
+#endif
   return seastar::do_with(
     MatchHistory(), [this, c, &key, vconf,
                      this_ref = std::move(this_ref)] (auto& history) mutable {
@@ -428,15 +436,13 @@ eagain_ifuture<Ref<Node>> Node::load_root(context_t c, RootNodeTracker& root_tra
   return c.nm.get_super(c.t, root_tracker
   ).handle_error_interruptible(
     eagain_iertr::pass_further{},
-    crimson::ct_error::input_output_error::handle([FNAME, c] {
-      ERRORT("EIO during get_super()", c.t);
-      ceph_abort("fatal error");
-    })
+    crimson::ct_error::input_output_error::assert_failure(fmt::format(
+        "{} EIO during get_super()", FNAME).c_str())
   ).si_then([c, &root_tracker, FNAME](auto&& _super) {
     assert(_super);
     auto root_addr = _super->get_root_laddr();
     assert(root_addr != L_ADDR_NULL);
-    TRACET("loading root_addr={:x} ...", c.t, root_addr);
+    TRACET("loading root_addr={} ...", c.t, root_addr);
     return Node::load(c, root_addr, true
     ).si_then([c, _super = std::move(_super),
                  &root_tracker, FNAME](auto root) mutable {
@@ -479,7 +485,7 @@ Super::URef Node::deref_super()
   return ret;
 }
 
-eagain_ifuture<> Node::upgrade_root(context_t c, laddr_t hint)
+eagain_ifuture<> Node::upgrade_root(context_t c, laddr_hint_t hint)
 {
   LOG_PREFIX(OTree::Node::upgrade_root);
   assert(impl->field_type() == field_type_t::N0);
@@ -692,73 +698,56 @@ eagain_ifuture<Ref<Node>> Node::load(
   return c.nm.read_extent(c.t, addr
   ).handle_error_interruptible(
     eagain_iertr::pass_further{},
-    crimson::ct_error::input_output_error::handle(
-        [FNAME, c, addr, expect_is_level_tail] {
-      ERRORT("EIO -- addr={:x}, is_level_tail={}",
-             c.t, addr, expect_is_level_tail);
-      ceph_abort("fatal error");
-    }),
-    crimson::ct_error::invarg::handle(
-        [FNAME, c, addr, expect_is_level_tail] {
-      ERRORT("EINVAL -- addr={:x}, is_level_tail={}",
-             c.t, addr, expect_is_level_tail);
-      ceph_abort("fatal error");
-    }),
-    crimson::ct_error::enoent::handle(
-        [FNAME, c, addr, expect_is_level_tail] {
-      ERRORT("ENOENT -- addr={:x}, is_level_tail={}",
-             c.t, addr, expect_is_level_tail);
-      ceph_abort("fatal error");
-    }),
-    crimson::ct_error::erange::handle(
-        [FNAME, c, addr, expect_is_level_tail] {
-      ERRORT("ERANGE -- addr={:x}, is_level_tail={}",
-             c.t, addr, expect_is_level_tail);
-      ceph_abort("fatal error");
+    crimson::ct_error::all_same_way(
+      [FNAME, c, addr, expect_is_level_tail](const auto &e) {
+      ERRORT("{} -- addr={}, is_level_tail={}",
+        c.t, e, addr, expect_is_level_tail);
+      ceph_abort();
+      return eagain_iertr::make_ready_future<NodeExtentRef>();
     })
   ).si_then([FNAME, c, addr, expect_is_level_tail](auto extent)
 	      -> eagain_ifuture<Ref<Node>> {
     assert(extent);
     auto header = extent->get_header();
     auto field_type = header.get_field_type();
-    if (!field_type) {
-      ERRORT("load addr={:x}, is_level_tail={} error, "
+    if (unlikely(!field_type)) {
+      ERRORT("load addr={}, is_level_tail={} error, "
              "got invalid header -- {}",
              c.t, addr, expect_is_level_tail, fmt::ptr(extent));
-      ceph_abort("fatal error");
+      ceph_abort_msg("fatal error");
     }
-    if (header.get_is_level_tail() != expect_is_level_tail) {
-      ERRORT("load addr={:x}, is_level_tail={} error, "
+    if (unlikely(header.get_is_level_tail() != expect_is_level_tail)) {
+      ERRORT("load addr={}, is_level_tail={} error, "
              "is_level_tail mismatch -- {}",
              c.t, addr, expect_is_level_tail, fmt::ptr(extent));
-      ceph_abort("fatal error");
+      ceph_abort_msg("fatal error");
     }
 
     auto node_type = header.get_node_type();
     if (node_type == node_type_t::LEAF) {
-      if (extent->get_length() != c.vb.get_leaf_node_size()) {
-        ERRORT("load addr={:x}, is_level_tail={} error, "
+      if (unlikely(extent->get_length() != c.vb.get_leaf_node_size())) {
+        ERRORT("load addr={}, is_level_tail={} error, "
                "leaf length mismatch -- {}",
                c.t, addr, expect_is_level_tail, fmt::ptr(extent));
-        ceph_abort("fatal error");
+        ceph_abort_msg("fatal error");
       }
       auto impl = LeafNodeImpl::load(extent, *field_type);
       auto *derived_ptr = impl.get();
       return eagain_iertr::make_ready_future<Ref<Node>>(
 	new LeafNode(derived_ptr, std::move(impl)));
     } else if (node_type == node_type_t::INTERNAL) {
-      if (extent->get_length() != c.vb.get_internal_node_size()) {
-        ERRORT("load addr={:x}, is_level_tail={} error, "
+      if (unlikely(extent->get_length() != c.vb.get_internal_node_size())) {
+        ERRORT("load addr={}, is_level_tail={} error, "
                "internal length mismatch -- {}",
                c.t, addr, expect_is_level_tail, fmt::ptr(extent));
-        ceph_abort("fatal error");
+        ceph_abort_msg("fatal error");
       }
       auto impl = InternalNodeImpl::load(extent, *field_type);
       auto *derived_ptr = impl.get();
       return eagain_iertr::make_ready_future<Ref<Node>>(
 	new InternalNode(derived_ptr, std::move(impl)));
     } else {
-      ceph_abort("impossible path");
+      ceph_abort_msg("impossible path");
     }
   });
 }
@@ -969,7 +958,7 @@ eagain_ifuture<> InternalNode::erase_child(context_t c, Ref<Node>&& child_ref)
           //
           // In order to preserve the invariant, we need to make sure the new
           // internal root also has at least 2 children.
-          ceph_abort("trying to erase the last item from the internal root node");
+          ceph_abort_msg("trying to erase the last item from the internal root node");
         }
 
         // track erase
@@ -1089,7 +1078,7 @@ eagain_ifuture<> InternalNode::apply_children_merge(
   auto left_addr = left_child->impl->laddr();
   auto& right_pos = right_child->parent_info().position;
   auto right_addr = right_child->impl->laddr();
-  DEBUGT("apply {}'s child {} (was {:#x}) at pos({}), "
+  DEBUGT("apply {}'s child {} (was {}) at pos({}), "
          "to merge with {} at pos({}), update_index={} ...",
          c.t, get_name(), left_child->get_name(), origin_left_addr, left_pos,
          right_child->get_name(), right_pos, update_index);
@@ -1234,7 +1223,7 @@ eagain_ifuture<std::pair<Ref<Node>, Ref<Node>>> InternalNode::get_child_peers(
 }
 
 eagain_ifuture<Ref<InternalNode>> InternalNode::allocate_root(
-    context_t c, laddr_t hint, level_t old_root_level,
+    context_t c, laddr_hint_t hint, level_t old_root_level,
     laddr_t old_root_addr, Super::URef&& super)
 {
   // support tree height up to 256
@@ -1284,7 +1273,15 @@ eagain_ifuture<Node::search_result_t>
 InternalNode::lower_bound_tracked(
     context_t c, const key_hobj_t& key, MatchHistory& history)
 {
+#ifdef CRIMSON_DETAILED_SAMPLING
+  auto& tstats = c.t.get_onode_tree_stats();
+  ++tstats.nodes_visited;
+  auto cmp0 = key.ncmp_str;
   auto result = impl->lower_bound(key, history);
+  tstats.string_cmp_count += key.ncmp_str - cmp0;
+#else
+  auto result = impl->lower_bound(key, history);
+#endif
   return get_or_track_child(c, result.position, result.p_value->value
   ).si_then([c, &key, &history](auto child) {
     // XXX(multi-type): pass result.mstat to child
@@ -1400,14 +1397,16 @@ eagain_ifuture<> InternalNode::test_clone_root(
   assert(impl->is_level_tail());
   assert(impl->field_type() == field_type_t::N0);
   Ref<const Node> this_ref = this;
-  return InternalNode::allocate(c_other, L_ADDR_MIN, field_type_t::N0, true, impl->level()
+  return InternalNode::allocate(
+    c_other, laddr_hint_t::create_global_md_hint(),
+    field_type_t::N0, true, impl->level()
   ).si_then([this, c_other, &tracker_other](auto fresh_other) {
     impl->test_copy_to(fresh_other.mut);
     auto cloned_root = fresh_other.node;
     return c_other.nm.get_super(c_other.t, tracker_other
     ).handle_error_interruptible(
       eagain_iertr::pass_further{},
-      crimson::ct_error::assert_all{"Invalid error during test clone"}
+      crimson::ct_error::assert_all("Invalid error during test clone")
     ).si_then([c_other, cloned_root](auto&& super_other) {
       assert(super_other);
       cloned_root->make_root_new(c_other, std::move(super_other));
@@ -1511,14 +1510,14 @@ eagain_ifuture<Ref<InternalNode>> InternalNode::insert_or_split(
 
   // proceed to split with insert
   // assume I'm already ref-counted by caller
-  laddr_t left_hint, right_hint;
+  laddr_hint_t left_hint, right_hint;
   {
     key_view_t left_key;
     impl->get_slot(search_position_t::begin(), &left_key, nullptr);
-    left_hint = left_key.get_hint();
+    left_hint = left_key.create_onode_hint();
     key_view_t right_key;
     impl->get_largest_slot(nullptr, &right_key, nullptr);
-    right_hint = right_key.get_hint();
+    right_hint = right_key.create_onode_hint();
   }
   return (is_root() ? upgrade_root(c, left_hint) : eagain_iertr::now()
   ).si_then([this, c, right_hint] {
@@ -1577,12 +1576,12 @@ eagain_ifuture<Ref<Node>> InternalNode::get_or_track_child(
   return [this, position, child_addr, c, FNAME] {
     auto found = tracked_child_nodes.find(position);
     if (found != tracked_child_nodes.end()) {
-      TRACET("loaded child tracked {} at pos({}) addr={:x}",
+      TRACET("loaded child tracked {} at pos({}) addr={}",
               c.t, found->second->get_name(), position, child_addr);
       return eagain_iertr::make_ready_future<Ref<Node>>(found->second);
     }
     // the child is not loaded yet
-    TRACET("loading child at pos({}) addr={:x} ...",
+    TRACET("loading child at pos({}) addr={} ...",
            c.t, position, child_addr);
     bool level_tail = position.is_end();
     return Node::load(c, child_addr, level_tail
@@ -1592,7 +1591,7 @@ eagain_ifuture<Ref<Node>> InternalNode::get_or_track_child(
       if (child->level() + 1 != level()) {
         ERRORT("loaded child {} error from parent {} at pos({}), level mismatch",
                c.t, child->get_name(), get_name(), position);
-        ceph_abort("fatal error");
+        ceph_abort_msg("fatal error");
       }
       child->as_child(position, this);
       return child;
@@ -1767,7 +1766,7 @@ void InternalNode::validate_child_inconsistent(const Node& child) const
 }
 
 eagain_ifuture<InternalNode::fresh_node_t> InternalNode::allocate(
-    context_t c, laddr_t hint, field_type_t field_type, bool is_level_tail, level_t level)
+    context_t c, laddr_hint_t hint, field_type_t field_type, bool is_level_tail, level_t level)
 {
   return InternalNodeImpl::allocate(c, hint, field_type, is_level_tail, level
   ).si_then([](auto&& fresh_impl) {
@@ -1917,14 +1916,14 @@ LeafNode::erase<false>(context_t, const search_position_t&, bool);
 eagain_ifuture<> LeafNode::extend_value(
     context_t c, const search_position_t& pos, value_size_t extend_size)
 {
-  ceph_abort("not implemented");
+  ceph_abort_msg("not implemented");
   return eagain_iertr::now();
 }
 
 eagain_ifuture<> LeafNode::trim_value(
     context_t c, const search_position_t& pos, value_size_t trim_size)
 {
-  ceph_abort("not implemented");
+  ceph_abort_msg("not implemented");
   return eagain_iertr::now();
 }
 
@@ -1971,7 +1970,15 @@ LeafNode::lower_bound_tracked(
     context_t c, const key_hobj_t& key, MatchHistory& history)
 {
   key_view_t index_key;
+#ifdef CRIMSON_DETAILED_SAMPLING
+  auto& tstats = c.t.get_onode_tree_stats();
+  ++tstats.nodes_visited;
+  auto cmp0 = key.ncmp_str;
   auto result = impl->lower_bound(key, history, &index_key);
+  tstats.string_cmp_count += key.ncmp_str - cmp0;
+#else
+  auto result = impl->lower_bound(key, history, &index_key);
+#endif
   Ref<tree_cursor_t> cursor;
   if (result.position.is_end()) {
     assert(!result.p_value);
@@ -2047,14 +2054,15 @@ eagain_ifuture<> LeafNode::test_clone_root(
   assert(impl->is_level_tail());
   assert(impl->field_type() == field_type_t::N0);
   Ref<const Node> this_ref = this;
-  return LeafNode::allocate(c_other, L_ADDR_MIN, field_type_t::N0, true
+  return LeafNode::allocate(
+    c_other, laddr_hint_t::create_global_md_hint(), field_type_t::N0, true
   ).si_then([this, c_other, &tracker_other](auto fresh_other) {
     impl->test_copy_to(fresh_other.mut);
     auto cloned_root = fresh_other.node;
     return c_other.nm.get_super(c_other.t, tracker_other
     ).handle_error_interruptible(
       eagain_iertr::pass_further{},
-      crimson::ct_error::assert_all{"Invalid error during test clone"}
+      crimson::ct_error::assert_all("Invalid error during test clone")
     ).si_then([c_other, cloned_root](auto&& super_other) {
       assert(super_other);
       cloned_root->make_root_new(c_other, std::move(super_other));
@@ -2095,14 +2103,14 @@ eagain_ifuture<Ref<tree_cursor_t>> LeafNode::insert_value(
   }
   // split and insert
   Ref<Node> this_ref = this;
-  laddr_t left_hint, right_hint;
+  laddr_hint_t left_hint, right_hint;
   {
     key_view_t left_key;
     impl->get_slot(search_position_t::begin(), &left_key, nullptr);
-    left_hint = left_key.get_hint();
+    left_hint = left_key.create_onode_hint();
     key_view_t right_key;
     impl->get_largest_slot(nullptr, &right_key, nullptr);
-    right_hint = right_key.get_hint();
+    right_hint = right_key.create_onode_hint();
   }
   return (is_root() ? upgrade_root(c, left_hint) : eagain_iertr::now()
   ).si_then([this, c, right_hint] {
@@ -2144,16 +2152,15 @@ eagain_ifuture<Ref<LeafNode>> LeafNode::allocate_root(
     context_t c, RootNodeTracker& root_tracker)
 {
   LOG_PREFIX(OTree::LeafNode::allocate_root);
-  return LeafNode::allocate(c, L_ADDR_MIN, field_type_t::N0, true
+  return LeafNode::allocate(
+    c, laddr_hint_t::create_global_md_hint(), field_type_t::N0, true
   ).si_then([c, &root_tracker, FNAME](auto fresh_node) {
     auto root = fresh_node.node;
     return c.nm.get_super(c.t, root_tracker
     ).handle_error_interruptible(
       eagain_iertr::pass_further{},
-      crimson::ct_error::input_output_error::handle([FNAME, c] {
-        ERRORT("EIO during get_super()", c.t);
-        ceph_abort("fatal error");
-      })
+      crimson::ct_error::input_output_error::assert_failure(fmt::format(
+        "{} EIO during get_super()", FNAME).c_str())
     ).si_then([c, root](auto&& super) {
       assert(super);
       root->make_root_new(c, std::move(super));
@@ -2268,7 +2275,7 @@ void LeafNode::track_erase(
 }
 
 eagain_ifuture<LeafNode::fresh_node_t> LeafNode::allocate(
-    context_t c, laddr_t hint, field_type_t field_type, bool is_level_tail)
+    context_t c, laddr_hint_t hint, field_type_t field_type, bool is_level_tail)
 {
   return LeafNodeImpl::allocate(c, hint, field_type, is_level_tail
   ).si_then([](auto&& fresh_impl) {

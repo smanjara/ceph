@@ -31,8 +31,10 @@ class TestVolume(object):
         stdout, stderr = capsys.readouterr()
         assert '--cluster' in stdout
         assert '--log-path' in stdout
+        assert '--log-level' in stdout
+        assert 'defaults to info' in stdout
 
-    def test_log_ignoring_missing_ceph_conf(self, caplog):
+    def test_log_ignoring_missing_ceph_conf(self, caplog, fake_filesystem):
         with pytest.raises(SystemExit) as error:
             main.Volume(argv=['ceph-volume', '--cluster', 'barnacle', 'lvm', '--help'])
         # make sure we aren't causing an actual error
@@ -41,7 +43,7 @@ class TestVolume(object):
         assert log.message == 'ignoring inability to load ceph.conf'
         assert log.levelname == 'WARNING'
 
-    def test_logs_current_command(self, caplog):
+    def test_logs_current_command(self, caplog, fake_filesystem):
         with pytest.raises(SystemExit) as error:
             main.Volume(argv=['ceph-volume', '--cluster', 'barnacle', 'lvm', '--help'])
         # make sure we aren't causing an actual error
@@ -50,7 +52,7 @@ class TestVolume(object):
         assert log.message == 'Running command: ceph-volume --cluster barnacle lvm --help'
         assert log.levelname == 'INFO'
 
-    def test_logs_set_level_warning(self, caplog):
+    def test_logs_set_level_warning(self, caplog, fake_filesystem):
         with pytest.raises(SystemExit) as error:
             main.Volume(argv=['ceph-volume', '--log-level', 'warning', '--cluster', 'barnacle', 'lvm', '--help'])
         # make sure we aren't causing an actual error

@@ -1,11 +1,15 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef _MSG_ASYNC_PROTOCOL_V1_
 #define _MSG_ASYNC_PROTOCOL_V1_
 
 #include "Protocol.h"
+#include "AsyncConnection.h"
 
+#include <deque>
+
+struct AuthSessionHandler;
 class ProtocolV1;
 using CtPtr = Ct<ProtocolV1>*;
 
@@ -100,17 +104,29 @@ protected:
     return statenames[state];
   }
 
-  char *temp_buffer;
+  std::array<char, 4096> temp_buffer;
 
   enum class WriteStatus { NOWRITE, REPLACING, CANWRITE, CLOSED };
-  std::atomic<WriteStatus> can_write;
-  std::list<Message *> sent;  // the first ceph::buffer::list need to inject seq
+  std::atomic<WriteStatus> can_write = WriteStatus::NOWRITE;
+  std::deque<MessageRef> sent;  // the first ceph::buffer::list need to inject seq
+  //struct for outbound msgs
+  struct out_q_entry_t {
+    ceph::buffer::list bl;
+    MessageRef m;
+    bool is_prepared {false};
+  };
   // priority queue for outbound msgs
-  std::map<int, std::list<std::pair<ceph::buffer::list, Message *>>> out_q;
-  bool keepalive;
+
+  /**
+   * A queue for each priority value, highest priority first.
+   */
+  std::map<int, std::deque<out_q_entry_t>, std::greater<int>> out_q;
+
+  bool keepalive = false;
   bool write_in_progress = false;
 
-  __u32 connect_seq, peer_global_seq;
+  __u32 connect_seq = 0;
+  __u32 peer_global_seq = 0;
   std::atomic<uint64_t> in_seq{0};
   std::atomic<uint64_t> out_seq{0};
   std::atomic<uint64_t> ack_left{0};
@@ -126,23 +142,24 @@ protected:
   utime_t backoff;  // backoff time
   utime_t recv_stamp;
   utime_t throttle_stamp;
-  unsigned msg_left;
-  uint64_t cur_msg_size;
+  unsigned msg_left = 0;
+  uint64_t cur_msg_size = 0;
   ceph_msg_header current_header;
   ceph::buffer::list data_buf;
   ceph::buffer::list::iterator data_blp;
   ceph::buffer::list front, middle, data;
 
-  bool replacing;  // when replacing process happened, we will reply connect
+  bool replacing = false;  // when replacing process happened, we will reply connect
                    // side with RETRY tag and accept side will clear replaced
                    // connection. So when connect side reissue connect_msg,
                    // there won't exists conflicting connection so we use
                    // "replacing" to skip RESETSESSION to avoid detect wrong
                    // presentation
-  bool is_reset_from_peer;
-  bool once_ready;
+  bool is_reset_from_peer = false;
+  bool once_ready = false;
+  bool shutting_down = false;
 
-  State state;
+  State state = NONE;
 
   void run_continuation(CtPtr pcontinuation);
   CtPtr read(CONTINUATION_RX_TYPE<ProtocolV1> &next, int len,
@@ -194,10 +211,10 @@ protected:
   void session_reset();
   void randomize_out_seq();
 
-  Message *_get_next_outgoing(ceph::buffer::list *bl);
+  out_q_entry_t _get_next_outgoing();
 
-  void prepare_send_message(uint64_t features, Message *m, ceph::buffer::list &bl);
-  ssize_t write_message(Message *m, ceph::buffer::list &bl, bool more);
+  void prepare_send_message(uint64_t features, const MessageRef& m, ceph::buffer::list &bl);
+  ssize_t write_message(const MessageRef& m, ceph::buffer::list &bl, bool more);
 
   void requeue_sent();
   uint64_t discard_requeued_up_to(uint64_t out_seq, uint64_t seq);
@@ -215,18 +232,22 @@ public:
   virtual void connect() override;
   virtual void accept() override;
   virtual bool is_connected() override;
+  virtual void shutdown() override;
   virtual void stop() override;
   virtual void fault() override;
-  virtual void send_message(Message *m) override;
+  virtual void send_message(MessageRef&& m) override;
   virtual void send_keepalive() override;
 
   virtual void read_event() override;
+  virtual bool sent_queue_empty() const override;
   virtual void write_event() override;
   virtual bool is_queued() override;
 
+  virtual void dump(Formatter *f) override;
+
   // Client Protocol
 private:
-  int global_seq;
+  int global_seq = 0;
 
   CONTINUATION_DECL(ProtocolV1, send_client_banner);
   WRITE_HANDLER_CONTINUATION_DECL(ProtocolV1, handle_client_banner_write);
@@ -258,7 +279,7 @@ private:
 
   // Server Protocol
 protected:
-  bool wait_for_seq;
+  bool wait_for_seq = false;
 
   CONTINUATION_DECL(ProtocolV1, send_server_banner);
   WRITE_HANDLER_CONTINUATION_DECL(ProtocolV1, handle_server_banner_write);

@@ -1,29 +1,29 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "include/compat.h"
-#include "common/ceph_context.h"
-#include "common/config.h"
 #include "common/snap_types.h"
 #include "common/Clock.h"
 #include "common/bit_vector.hpp"
-#include "include/encoding.h"
-#include "include/types.h"
-#include "include/rados/librados.h"
+#include "include/rados/librados.hpp"
 #include "include/rbd/object_map_types.h"
 #include "include/rbd_types.h"
 #include "include/stringify.h"
-#include "cls/rbd/cls_rbd.h"
 #include "cls/rbd/cls_rbd_client.h"
 #include "cls/rbd/cls_rbd_types.h"
 #include "librbd/Types.h"
 
 #include "gtest/gtest.h"
 #include "test/librados/test_cxx.h"
+#include "test/librados/test_pool_types.h"
 
 #include <errno.h>
 #include <string>
 #include <vector>
+using ceph::test::PoolType;
+using ceph::test::pool_type_name;
+using ceph::test::create_pool_by_type;
+using ceph::test::destroy_pool_by_type;
 
 using namespace std;
 using namespace librbd::cls_client;
@@ -31,8 +31,6 @@ using cls::rbd::MIRROR_PEER_DIRECTION_RX;
 using cls::rbd::MIRROR_PEER_DIRECTION_TX;
 using cls::rbd::MIRROR_PEER_DIRECTION_RX_TX;
 using ::librbd::ParentImageInfo;
-using ceph::encode;
-using ceph::decode;
 
 static int snapshot_add(librados::IoCtx *ioctx, const std::string &oid,
                         uint64_t snap_id, const std::string &snap_name) {
@@ -74,56 +72,42 @@ static bool is_sparse_read_supported(librados::IoCtx &ioctx,
                                      const std::string &oid) {
   EXPECT_EQ(0, ioctx.create(oid, true));
   bufferlist inbl;
-  inbl.append(std::string(1, 'X'));
-  EXPECT_EQ(0, ioctx.write(oid, inbl, inbl.length(), 1));
-  EXPECT_EQ(0, ioctx.write(oid, inbl, inbl.length(), 3));
+  inbl.append(std::string(4096, 'X'));
+  EXPECT_EQ(0, ioctx.write(oid, inbl, inbl.length(), 4096));
+  EXPECT_EQ(0, ioctx.write(oid, inbl, inbl.length(), 4096 * 3));
 
   std::map<uint64_t, uint64_t> m;
   bufferlist outbl;
-  int r = ioctx.sparse_read(oid, m, outbl, 4, 0);
+  int r = ioctx.sparse_read(oid, m, outbl, 4096 * 4, 0);
   ioctx.remove(oid);
 
   int expected_r = 2;
-  std::map<uint64_t, uint64_t> expected_m = {{1, 1}, {3, 1}};
+  std::map<uint64_t, uint64_t> expected_m = {{4096, 4096}, {4096 * 3, 4096}};
   bufferlist expected_outbl;
-  expected_outbl.append(std::string(2, 'X'));
+  expected_outbl.append(std::string(4096 * 2, 'X'));
 
   return (r == expected_r && m == expected_m &&
           outbl.contents_equal(expected_outbl));
 }
 
-class TestClsRbd : public ::testing::Test {
+class TestClsRbd : public ceph::test::ClsTestFixture {
+  // Inherits: rados, ioctx, pool_name, pool_type, SetUp(), TearDown()
 public:
+  uint64_t image_number = 0;
 
-  static void SetUpTestCase() {
-    _pool_name = get_temp_pool_name();
-    ASSERT_EQ("", create_one_pool_pp(_pool_name, _rados));
-  }
-
-  static void TearDownTestCase() {
-    ASSERT_EQ(0, destroy_one_pool_pp(_pool_name, _rados));
+  void SetUp() override {
+    ceph::test::ClsTestFixture::SetUp();
+    image_number = 0;
   }
 
   std::string get_temp_image_name() {
-    ++_image_number;
-    return "image" + stringify(_image_number);
+    ++image_number;
+    return "image" + stringify(image_number);
   }
-
-  static std::string _pool_name;
-  static librados::Rados _rados;
-  static uint64_t _image_number;
-
 };
 
-std::string TestClsRbd::_pool_name;
-librados::Rados TestClsRbd::_rados;
-uint64_t TestClsRbd::_image_number = 0;
-
-TEST_F(TestClsRbd, get_all_features)
+TEST_P(TestClsRbd, get_all_features)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
   ASSERT_EQ(0, ioctx.create(oid, false));
 
@@ -132,14 +116,10 @@ TEST_F(TestClsRbd, get_all_features)
   ASSERT_EQ(static_cast<uint64_t>(RBD_FEATURES_ALL),
             static_cast<uint64_t>(all_features & RBD_FEATURES_ALL));
 
-  ioctx.close();
 }
 
-TEST_F(TestClsRbd, copyup)
+TEST_P(TestClsRbd, copyup)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
   bufferlist inbl, outbl;
 
@@ -180,14 +160,10 @@ TEST_F(TestClsRbd, copyup)
   ASSERT_TRUE(outbl.contents_equal(inbl));
 
   ASSERT_EQ(0, ioctx.remove(oid));
-  ioctx.close();
 }
 
-TEST_F(TestClsRbd, sparse_copyup)
+TEST_P(TestClsRbd, sparse_copyup)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
   ioctx.remove(oid);
 
@@ -205,7 +181,7 @@ TEST_F(TestClsRbd, sparse_copyup)
   // create some data to write
   inbl.append(std::string(4096, '1'));
   inbl.append(std::string(4096, '2'));
-  m = {{1024, 4096}, {8192, 4096}};
+  m = {{4096, 4096}, {4096 * 3, 4096}};
 
   // copyup to nonexistent object should create new object
   ioctx.remove(oid);
@@ -214,9 +190,9 @@ TEST_F(TestClsRbd, sparse_copyup)
   // and its contents should match
   bufferlist outbl;
   bufferlist expected_outbl;
-  expected_outbl.append(std::string(1024, '\0'));
+  expected_outbl.append(std::string(4096, '\0'));
   expected_outbl.append(std::string(4096, '1'));
-  expected_outbl.append(std::string(8192 - 4096 - 1024, '\0'));
+  expected_outbl.append(std::string(4096, '\0'));
   expected_outbl.append(std::string(4096, '2'));
   ASSERT_EQ((int)expected_outbl.length(),
             ioctx.read(oid, outbl, expected_outbl.length() + 1, 0));
@@ -248,14 +224,10 @@ TEST_F(TestClsRbd, sparse_copyup)
   ASSERT_TRUE(outbl.contents_equal(expected_outbl));
 
   ASSERT_EQ(0, ioctx.remove(oid));
-  ioctx.close();
 }
 
-TEST_F(TestClsRbd, get_and_set_id)
+TEST_P(TestClsRbd, get_and_set_id)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
   string id;
   string valid_id = "0123abcxyzZYXCBA";
@@ -276,14 +248,10 @@ TEST_F(TestClsRbd, get_and_set_id)
   ASSERT_EQ(0, get_id(&ioctx, oid, &id));
   ASSERT_EQ(id, valid_id);
 
-  ioctx.close();
 }
 
-TEST_F(TestClsRbd, add_remove_child)
+TEST_P(TestClsRbd, add_remove_child)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
   ASSERT_EQ(0, ioctx.create(oid, true));
 
@@ -322,14 +290,10 @@ TEST_F(TestClsRbd, add_remove_child)
   // try to remove again, validate -ENOENT to that as well
   ASSERT_EQ(-ENOENT, remove_child(&ioctx, oid, pspec, "child2"));
 
-  ioctx.close();
 }
 
-TEST_F(TestClsRbd, directory_methods)
+TEST_P(TestClsRbd, directory_methods)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
   string id, name;
   string imgname = get_temp_image_name();
@@ -442,14 +406,10 @@ TEST_F(TestClsRbd, directory_methods)
   ASSERT_EQ(0, dir_list(&ioctx, oid, "", 30, &images));
   ASSERT_EQ(0u, images.size());
 
-  ioctx.close();
 }
 
-TEST_F(TestClsRbd, create)
+TEST_P(TestClsRbd, create)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
   uint64_t size = 20ULL << 30;
   uint64_t features = 0;
@@ -485,16 +445,14 @@ TEST_F(TestClsRbd, create)
                                   123));
 
   bufferlist inbl, outbl;
-  ASSERT_EQ(-EINVAL, ioctx.exec(oid, "rbd", "create", inbl, outbl));
-
-  ioctx.close();
+  int rval;
+  librados::ObjectWriteOperation write_operation;
+  write_operation.exec(cls::rbd::method::create, inbl, &outbl, &rval);
+  ASSERT_EQ(-EINVAL, ioctx.operate("myobject", &write_operation));
 }
 
-TEST_F(TestClsRbd, get_features)
+TEST_P(TestClsRbd, get_features)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
 
   uint64_t features;
@@ -506,14 +464,10 @@ TEST_F(TestClsRbd, get_features)
   ASSERT_EQ(0, get_features(&ioctx, oid, false, &features,
                             &incompatible_features));
   ASSERT_EQ(0u, features);
-  ioctx.close();
 }
 
-TEST_F(TestClsRbd, get_object_prefix)
+TEST_P(TestClsRbd, get_object_prefix)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
 
   string object_prefix;
@@ -523,14 +477,10 @@ TEST_F(TestClsRbd, get_object_prefix)
   ASSERT_EQ(0, get_object_prefix(&ioctx, oid, &object_prefix));
   ASSERT_EQ(oid, object_prefix);
 
-  ioctx.close();
 }
 
-TEST_F(TestClsRbd, get_create_timestamp)
+TEST_P(TestClsRbd, get_create_timestamp)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
   ASSERT_EQ(0, create_image(&ioctx, oid, 0, 22, 0, oid, -1));
 
@@ -538,14 +488,10 @@ TEST_F(TestClsRbd, get_create_timestamp)
   ASSERT_EQ(0, get_create_timestamp(&ioctx, oid, &timestamp));
   ASSERT_LT(0U, timestamp.tv.tv_sec);
 
-  ioctx.close();
 }
 
-TEST_F(TestClsRbd, get_access_timestamp)
+TEST_P(TestClsRbd, get_access_timestamp)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
   ASSERT_EQ(0, create_image(&ioctx, oid, 0, 22, 0, oid, -1));
 
@@ -553,13 +499,9 @@ TEST_F(TestClsRbd, get_access_timestamp)
   ASSERT_EQ(0, get_access_timestamp(&ioctx, oid, &timestamp));
   ASSERT_LT(0U, timestamp.tv.tv_sec);
 
-  ioctx.close();
 }
-TEST_F(TestClsRbd, get_modify_timestamp)
+TEST_P(TestClsRbd, get_modify_timestamp)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
   ASSERT_EQ(0, create_image(&ioctx, oid, 0, 22, 0, oid, -1));
 
@@ -567,13 +509,9 @@ TEST_F(TestClsRbd, get_modify_timestamp)
   ASSERT_EQ(0, get_modify_timestamp(&ioctx, oid, &timestamp));
   ASSERT_LT(0U, timestamp.tv.tv_sec);
 
-  ioctx.close();
 }
-TEST_F(TestClsRbd, get_data_pool)
+TEST_P(TestClsRbd, get_data_pool)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
 
   int64_t data_pool_id;
@@ -588,11 +526,8 @@ TEST_F(TestClsRbd, get_data_pool)
   ASSERT_EQ(12, data_pool_id);
 }
 
-TEST_F(TestClsRbd, get_size)
+TEST_P(TestClsRbd, get_size)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
   uint64_t size;
   uint8_t order;
@@ -611,14 +546,10 @@ TEST_F(TestClsRbd, get_size)
 
   ASSERT_EQ(-ENOENT, get_size(&ioctx, oid, 1, &size, &order));
 
-  ioctx.close();
 }
 
-TEST_F(TestClsRbd, set_size)
+TEST_P(TestClsRbd, set_size)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
   ASSERT_EQ(-ENOENT, set_size(&ioctx, oid, 5));
 
@@ -639,14 +570,10 @@ TEST_F(TestClsRbd, set_size)
   ASSERT_EQ(3u << 22, size);
   ASSERT_EQ(22, order);
 
-  ioctx.close();
 }
 
-TEST_F(TestClsRbd, protection_status)
+TEST_P(TestClsRbd, protection_status)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
   string oid2 = get_temp_image_name();
   uint8_t status = RBD_PROTECTION_STATUS_UNPROTECTED;
@@ -708,14 +635,10 @@ TEST_F(TestClsRbd, protection_status)
   ASSERT_EQ(0, snapshot_remove(&ioctx, oid, 10));
   ASSERT_EQ(0, snapshot_remove(&ioctx, oid, 20));
 
-  ioctx.close();
 }
 
-TEST_F(TestClsRbd, snapshot_limits)
+TEST_P(TestClsRbd, snapshot_limits)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   librados::ObjectWriteOperation op;
   string oid = get_temp_image_name();
   uint64_t limit;
@@ -742,14 +665,10 @@ TEST_F(TestClsRbd, snapshot_limits)
   ASSERT_EQ(0, snapshot_remove(&ioctx, oid, 10));
   ASSERT_EQ(0, snapshot_remove(&ioctx, oid, 20));
 
-  ioctx.close();
 }
 
-TEST_F(TestClsRbd, parents_v1)
+TEST_P(TestClsRbd, parents_v1)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   cls::rbd::ParentImageSpec pspec;
   uint64_t size;
 
@@ -917,14 +836,10 @@ TEST_F(TestClsRbd, parents_v1)
   ASSERT_EQ(0, get_parent(&ioctx, oid, CEPH_NOSNAP, &pspec, &size));
   ASSERT_EQ(-1, pspec.pool_id);
 
-  ioctx.close();
 }
 
-TEST_F(TestClsRbd, parents_v2)
+TEST_P(TestClsRbd, parents_v2)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   std::string oid = get_temp_image_name();
   cls::rbd::ParentImageSpec parent_image_spec;
   std::optional<uint64_t> parent_overlap;
@@ -1055,11 +970,9 @@ TEST_F(TestClsRbd, parents_v2)
   ASSERT_FALSE(on_disk_parent_image_spec.exists());
 }
 
-TEST_F(TestClsRbd, snapshots)
+TEST_P(TestClsRbd, snapshots)
 {
   cls::rbd::SnapshotNamespace userSnapNamespace = cls::rbd::UserSnapshotNamespace();
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
 
   string oid = get_temp_image_name();
   ASSERT_EQ(-ENOENT, snapshot_add(&ioctx, oid, 0, "snap1"));
@@ -1189,14 +1102,10 @@ TEST_F(TestClsRbd, snapshots)
   ASSERT_EQ(0, get_snapcontext(&ioctx, oid, &snapc));
   ASSERT_EQ(0u, snapc.snaps.size());
   ASSERT_EQ(large_snap_id, snapc.seq);
-  ioctx.close();
 }
 
-TEST_F(TestClsRbd, snapid_race)
+TEST_P(TestClsRbd, snapid_race)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   buffer::list bl;
   buffer::ptr bp(4096);
   bp.zero();
@@ -1208,14 +1117,10 @@ TEST_F(TestClsRbd, snapid_race)
   ASSERT_EQ(0, old_snapshot_add(&ioctx, oid, 3, "test3"));
   ASSERT_EQ(-ESTALE, old_snapshot_add(&ioctx, oid, 2, "test2"));
 
-  ioctx.close();
 }
 
-TEST_F(TestClsRbd, stripingv2)
+TEST_P(TestClsRbd, stripingv2)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
   string oid2 = get_temp_image_name();
   ASSERT_EQ(0, create_image(&ioctx, oid, 10, 22, 0, oid, -1));
@@ -1246,14 +1151,10 @@ TEST_F(TestClsRbd, stripingv2)
   ASSERT_EQ(-EINVAL, set_stripe_unit_count(&ioctx, oid2, 1, 0));
   ASSERT_EQ(-EINVAL, set_stripe_unit_count(&ioctx, oid2, 0, 0));
 
-  ioctx.close();
 }
 
-TEST_F(TestClsRbd, object_map_save)
+TEST_P(TestClsRbd, object_map_save)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
   BitVector<2> ref_bit_vector;
   ref_bit_vector.resize(32);
@@ -1270,11 +1171,8 @@ TEST_F(TestClsRbd, object_map_save)
   ASSERT_EQ(ref_bit_vector, osd_bit_vector);
 }
 
-TEST_F(TestClsRbd, object_map_resize)
+TEST_P(TestClsRbd, object_map_resize)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
   BitVector<2> ref_bit_vector;
   ref_bit_vector.resize(32);
@@ -1314,14 +1212,10 @@ TEST_F(TestClsRbd, object_map_resize)
   ASSERT_EQ(0, object_map_load(&ioctx, oid, &osd_bit_vector));
   ASSERT_EQ(ref_bit_vector, osd_bit_vector);
 
-  ioctx.close();
 }
 
-TEST_F(TestClsRbd, object_map_update)
+TEST_P(TestClsRbd, object_map_update)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
   BitVector<2> ref_bit_vector;
   ref_bit_vector.resize(16);
@@ -1355,26 +1249,18 @@ TEST_F(TestClsRbd, object_map_update)
   ASSERT_EQ(0, object_map_load(&ioctx, oid, &osd_bit_vector));
   ASSERT_EQ(ref_bit_vector, osd_bit_vector);
 
-  ioctx.close();
 }
 
-TEST_F(TestClsRbd, object_map_load_enoent)
+TEST_P(TestClsRbd, object_map_load_enoent)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
   BitVector<2> osd_bit_vector;
   ASSERT_EQ(-ENOENT, object_map_load(&ioctx, oid, &osd_bit_vector));
 
-  ioctx.close();
 }
 
-TEST_F(TestClsRbd, object_map_snap_add)
+TEST_P(TestClsRbd, object_map_snap_add)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
   BitVector<2> ref_bit_vector;
   ref_bit_vector.resize(16);
@@ -1413,11 +1299,8 @@ TEST_F(TestClsRbd, object_map_snap_add)
   ASSERT_EQ(ref_bit_vector, osd_bit_vector);
 }
 
-TEST_F(TestClsRbd, object_map_snap_remove)
+TEST_P(TestClsRbd, object_map_snap_remove)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
   BitVector<2> ref_bit_vector;
   ref_bit_vector.resize(16);
@@ -1462,11 +1345,8 @@ TEST_F(TestClsRbd, object_map_snap_remove)
   ASSERT_EQ(ref_bit_vector, osd_bit_vector);
 }
 
-TEST_F(TestClsRbd, flags)
+TEST_P(TestClsRbd, flags)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
   ASSERT_EQ(0, create_image(&ioctx, oid, 0, 22, 0, oid, -1));
 
@@ -1490,14 +1370,10 @@ TEST_F(TestClsRbd, flags)
   ASSERT_EQ(0, get_flags(&ioctx, oid, snap_id, &flags));
   ASSERT_EQ(6U, flags);
 
-  ioctx.close();
 }
 
-TEST_F(TestClsRbd, metadata)
+TEST_P(TestClsRbd, metadata)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
   ASSERT_EQ(0, create_image(&ioctx, oid, 0, 22, 0, oid, -1));
 
@@ -1554,14 +1430,10 @@ TEST_F(TestClsRbd, metadata)
     ASSERT_TRUE(it->second.contents_equal(pairs[it->first]));
   }
 
-  ioctx.close();
 }
 
-TEST_F(TestClsRbd, set_features)
+TEST_P(TestClsRbd, set_features)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
   uint64_t base_features = RBD_FEATURE_LAYERING | RBD_FEATURE_DEEP_FLATTEN;
   ASSERT_EQ(0, create_image(&ioctx, oid, 0, 22, base_features, oid, -1));
@@ -1597,16 +1469,16 @@ TEST_F(TestClsRbd, set_features)
   ASSERT_EQ(-EINVAL, set_features(&ioctx, oid, 0, RBD_FEATURE_OPERATIONS));
 }
 
-TEST_F(TestClsRbd, mirror) {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
+TEST_P(TestClsRbd, mirror) {
   ioctx.remove(RBD_MIRRORING);
 
   std::vector<cls::rbd::MirrorPeer> peers;
   ASSERT_EQ(-ENOENT, mirror_peer_list(&ioctx, &peers));
 
   std::string uuid;
+  std::string remote_ns;
   ASSERT_EQ(-ENOENT, mirror_uuid_get(&ioctx, &uuid));
+  ASSERT_EQ(-ENOENT, mirror_remote_namespace_get(&ioctx, &remote_ns));
   ASSERT_EQ(-EINVAL, mirror_peer_add(&ioctx, {"uuid1", MIRROR_PEER_DIRECTION_RX,
                                               "siteA", "client",
                                               "mirror uuid"}));
@@ -1622,11 +1494,16 @@ TEST_F(TestClsRbd, mirror) {
   ASSERT_EQ(0, mirror_uuid_get(&ioctx, &uuid));
   ASSERT_EQ("mirror-uuid", uuid);
 
+  ASSERT_EQ(0, mirror_remote_namespace_set(&ioctx, "remote-ns"));
+  ASSERT_EQ(0, mirror_remote_namespace_get(&ioctx, &remote_ns));
+  ASSERT_EQ("remote-ns", remote_ns);
+
   ASSERT_EQ(0, mirror_mode_set(&ioctx, cls::rbd::MIRROR_MODE_IMAGE));
   ASSERT_EQ(0, mirror_mode_get(&ioctx, &mirror_mode));
   ASSERT_EQ(cls::rbd::MIRROR_MODE_IMAGE, mirror_mode);
 
   ASSERT_EQ(-EINVAL, mirror_uuid_set(&ioctx, "new-mirror-uuid"));
+  ASSERT_EQ(-EINVAL, mirror_remote_namespace_set(&ioctx, "new-remote-ns"));
 
   ASSERT_EQ(0, mirror_mode_set(&ioctx, cls::rbd::MIRROR_MODE_POOL));
   ASSERT_EQ(0, mirror_mode_get(&ioctx, &mirror_mode));
@@ -1726,11 +1603,10 @@ TEST_F(TestClsRbd, mirror) {
   ASSERT_EQ(0, mirror_mode_get(&ioctx, &mirror_mode));
   ASSERT_EQ(cls::rbd::MIRROR_MODE_DISABLED, mirror_mode);
   ASSERT_EQ(-ENOENT, mirror_uuid_get(&ioctx, &uuid));
+  ASSERT_EQ(-ENOENT, mirror_remote_namespace_get(&ioctx, &remote_ns));
 }
 
-TEST_F(TestClsRbd, mirror_image) {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
+TEST_P(TestClsRbd, mirror_image) {
   ioctx.remove(RBD_MIRRORING);
 
   std::map<std::string, std::string> mirror_image_ids;
@@ -1796,7 +1672,7 @@ TEST_F(TestClsRbd, mirror_image) {
   ASSERT_EQ(expected_mirror_image_ids, mirror_image_ids);
 }
 
-TEST_F(TestClsRbd, mirror_image_status) {
+TEST_P(TestClsRbd, mirror_image_status) {
   struct WatchCtx : public librados::WatchCtx2 {
     librados::IoCtx *m_ioctx;
 
@@ -1818,7 +1694,7 @@ TEST_F(TestClsRbd, mirror_image_status) {
   uint64_t watch_handle;
   librados::IoCtx ioctx;
 
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
+  ASSERT_EQ(0, rados.ioctx_create(pool_name.c_str(), ioctx));
   ioctx.remove(RBD_MIRRORING);
 
   int64_t instance_id = librados::Rados(ioctx).get_instance_id();
@@ -2144,11 +2020,9 @@ TEST_F(TestClsRbd, mirror_image_status) {
   ASSERT_EQ(0U, statuses.size());
 }
 
-TEST_F(TestClsRbd, mirror_image_map)
+TEST_P(TestClsRbd, mirror_image_map)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-  ioctx.remove(RBD_MIRRORING);
+  ioctx.remove(RBD_MIRROR_LEADER);
 
   std::map<std::string, cls::rbd::MirrorImageMap> image_mapping;
   ASSERT_EQ(-ENOENT, mirror_image_map_list(&ioctx, "", 0, &image_mapping));
@@ -2169,7 +2043,7 @@ TEST_F(TestClsRbd, mirror_image_map)
 
       mirror_image_map_update(&op, global_image_id, mirror_image_map);
     }
-    ASSERT_EQ(0, ioctx.operate(RBD_MIRRORING, &op));
+    ASSERT_EQ(0, ioctx.operate(RBD_MIRROR_LEADER, &op));
   }
 
   ASSERT_EQ(0, mirror_image_map_list(&ioctx, "", 1000, &image_mapping));
@@ -2195,7 +2069,7 @@ TEST_F(TestClsRbd, mirror_image_map)
   librados::ObjectWriteOperation op;
   mirror_image_map_remove(&op, "1");
   mirror_image_map_update(&op, "10", expected_mirror_image_map);
-  ASSERT_EQ(0, ioctx.operate(RBD_MIRRORING, &op));
+  ASSERT_EQ(0, ioctx.operate(RBD_MIRROR_LEADER, &op));
 
   ASSERT_EQ(0, mirror_image_map_list(&ioctx, "0", 1, &image_mapping));
   ASSERT_EQ(1U, image_mapping.size());
@@ -2205,9 +2079,7 @@ TEST_F(TestClsRbd, mirror_image_map)
   ASSERT_EQ(expected_mirror_image_map, updated_image_map.second);
 }
 
-TEST_F(TestClsRbd, mirror_instances) {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
+TEST_P(TestClsRbd, mirror_instances) {
   ioctx.remove(RBD_MIRROR_LEADER);
 
   std::vector<std::string> instance_ids;
@@ -2237,10 +2109,7 @@ TEST_F(TestClsRbd, mirror_instances) {
   ASSERT_EQ(0U, instance_ids.size());
 }
 
-TEST_F(TestClsRbd, mirror_snapshot) {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
+TEST_P(TestClsRbd, mirror_snapshot) {
   string oid = get_temp_image_name();
   ASSERT_EQ(0, create_image(&ioctx, oid, 10, 22, 0, oid, -1));
 
@@ -2275,14 +2144,14 @@ TEST_F(TestClsRbd, mirror_snapshot) {
   ASSERT_EQ(1U, sn->mirror_peer_uuids.size());
   ASSERT_EQ(1U, sn->mirror_peer_uuids.count("peer2"));
 
-  ASSERT_EQ(-ERESTART,
-            mirror_image_snapshot_unlink_peer(&ioctx, oid, 1, "peer2"));
+  ASSERT_EQ(0, mirror_image_snapshot_unlink_peer(&ioctx, oid, 1, "peer2"));
+  ASSERT_EQ(-ENOENT, mirror_image_snapshot_unlink_peer(&ioctx, oid, 1,
+                                                       "peer2"));
   ASSERT_EQ(0, snapshot_get(&ioctx, oid, 1, &snap));
   sn = std::get_if<cls::rbd::MirrorSnapshotNamespace>(
     &snap.snapshot_namespace);
   ASSERT_NE(nullptr, sn);
-  ASSERT_EQ(1U, sn->mirror_peer_uuids.size());
-  ASSERT_EQ(1U, sn->mirror_peer_uuids.count("peer2"));
+  ASSERT_EQ(0U, sn->mirror_peer_uuids.size());
 
   ASSERT_EQ(0, snapshot_get(&ioctx, oid, 2, &snap));
   auto nsn = std::get_if<cls::rbd::MirrorSnapshotNamespace>(
@@ -2309,10 +2178,7 @@ TEST_F(TestClsRbd, mirror_snapshot) {
   ASSERT_EQ(0, snapshot_remove(&ioctx, oid, 2));
 }
 
-TEST_F(TestClsRbd, group_dir_list) {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
+TEST_P(TestClsRbd, group_dir_list) {
   string group_id1 = "cgid1";
   string group_name1 = "cgname1";
   string group_id2 = "cgid2";
@@ -2344,9 +2210,7 @@ void add_group_to_dir(librados::IoCtx ioctx, string group_id, string group_name)
   ASSERT_EQ("name_" + group_name, *keys.rbegin());
 }
 
-TEST_F(TestClsRbd, group_dir_add) {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
+TEST_P(TestClsRbd, group_dir_add) {
   ioctx.remove(RBD_GROUP_DIRECTORY);
 
   string group_id = "cgid";
@@ -2354,9 +2218,7 @@ TEST_F(TestClsRbd, group_dir_add) {
   add_group_to_dir(ioctx, group_id, group_name);
 }
 
-TEST_F(TestClsRbd, dir_add_already_existing) {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
+TEST_P(TestClsRbd, dir_add_already_existing) {
   ioctx.remove(RBD_GROUP_DIRECTORY);
 
   string group_id = "cgidexisting";
@@ -2366,9 +2228,7 @@ TEST_F(TestClsRbd, dir_add_already_existing) {
   ASSERT_EQ(-EEXIST, group_dir_add(&ioctx, RBD_GROUP_DIRECTORY, group_name, group_id));
 }
 
-TEST_F(TestClsRbd, group_dir_rename) {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
+TEST_P(TestClsRbd, group_dir_rename) {
   ioctx.remove(RBD_GROUP_DIRECTORY);
 
   string group_id = "cgid";
@@ -2394,9 +2254,7 @@ TEST_F(TestClsRbd, group_dir_rename) {
                                       dest_name, src_name, group_id));
 }
 
-TEST_F(TestClsRbd, group_dir_remove) {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
+TEST_P(TestClsRbd, group_dir_remove) {
   ioctx.remove(RBD_GROUP_DIRECTORY);
 
   string group_id = "cgidtodel";
@@ -2410,9 +2268,7 @@ TEST_F(TestClsRbd, group_dir_remove) {
   ASSERT_EQ(0U, keys.size());
 }
 
-TEST_F(TestClsRbd, group_dir_remove_missing) {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
+TEST_P(TestClsRbd, group_dir_remove_missing) {
   ioctx.remove(RBD_GROUP_DIRECTORY);
 
   string group_id = "cgidtodelmissing";
@@ -2448,10 +2304,7 @@ void test_image_add(librados::IoCtx &ioctx, const string& group_id,
   ASSERT_EQ(image_key, *it);
 }
 
-TEST_F(TestClsRbd, group_image_add) {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
+TEST_P(TestClsRbd, group_image_add) {
   string group_id = "group_id";
   ASSERT_EQ(0, ioctx.create(group_id, true));
 
@@ -2460,10 +2313,7 @@ TEST_F(TestClsRbd, group_image_add) {
   test_image_add(ioctx, group_id, image_id, pool_id);
 }
 
-TEST_F(TestClsRbd, group_image_remove) {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
+TEST_P(TestClsRbd, group_image_remove) {
   string group_id = "group_id1";
   ASSERT_EQ(0, ioctx.create(group_id, true));
 
@@ -2478,10 +2328,7 @@ TEST_F(TestClsRbd, group_image_remove) {
   ASSERT_EQ(0U, keys.size());
 }
 
-TEST_F(TestClsRbd, group_image_list) {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
+TEST_P(TestClsRbd, group_image_list) {
   string group_id = "group_id2";
   ASSERT_EQ(0, ioctx.create(group_id, true));
 
@@ -2504,10 +2351,7 @@ TEST_F(TestClsRbd, group_image_list) {
   ASSERT_EQ(0U, images.size());
 }
 
-TEST_F(TestClsRbd, group_image_clean) {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
+TEST_P(TestClsRbd, group_image_clean) {
   string group_id = "group_id3";
   ASSERT_EQ(0, ioctx.create(group_id, true));
 
@@ -2536,10 +2380,7 @@ TEST_F(TestClsRbd, group_image_clean) {
   ASSERT_EQ(cls::rbd::GROUP_IMAGE_LINK_STATE_ATTACHED, ref_state);
 }
 
-TEST_F(TestClsRbd, image_group_add) {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
+TEST_P(TestClsRbd, image_group_add) {
   int64_t pool_id = ioctx.get_id();
   string image_id = "imageid";
 
@@ -2562,10 +2403,7 @@ TEST_F(TestClsRbd, image_group_add) {
   ASSERT_EQ(pool_id, val_spec.pool_id);
 }
 
-TEST_F(TestClsRbd, image_group_remove) {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
+TEST_P(TestClsRbd, image_group_remove) {
   int64_t pool_id = ioctx.get_id();
   string image_id = "image_id";
 
@@ -2586,10 +2424,7 @@ TEST_F(TestClsRbd, image_group_remove) {
   ASSERT_EQ(0U, vals.size());
 }
 
-TEST_F(TestClsRbd, image_group_get) {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
+TEST_P(TestClsRbd, image_group_get) {
   int64_t pool_id = ioctx.get_id();
   string image_id = "imageidgroupspec";
 
@@ -2608,10 +2443,7 @@ TEST_F(TestClsRbd, image_group_get) {
   ASSERT_EQ(pool_id, spec.pool_id);
 }
 
-TEST_F(TestClsRbd, group_snap_set_empty_name) {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
+TEST_P(TestClsRbd, group_snap_set_empty_name) {
   string group_id = "group_id_snap_add_empty_name";
   ASSERT_EQ(0, ioctx.create(group_id, true));
 
@@ -2620,10 +2452,7 @@ TEST_F(TestClsRbd, group_snap_set_empty_name) {
   ASSERT_EQ(-EINVAL, group_snap_set(&ioctx, group_id, snap));
 }
 
-TEST_F(TestClsRbd, group_snap_set_empty_id) {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
+TEST_P(TestClsRbd, group_snap_set_empty_id) {
   string group_id = "group_id_snap_add_empty_id";
   ASSERT_EQ(0, ioctx.create(group_id, true));
 
@@ -2632,10 +2461,7 @@ TEST_F(TestClsRbd, group_snap_set_empty_id) {
   ASSERT_EQ(-EINVAL, group_snap_set(&ioctx, group_id, snap));
 }
 
-TEST_F(TestClsRbd, group_snap_set_duplicate_id) {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
+TEST_P(TestClsRbd, group_snap_set_duplicate_id) {
   string group_id = "group_id_snap_add_duplicate_id";
   ASSERT_EQ(0, ioctx.create(group_id, true));
 
@@ -2647,10 +2473,7 @@ TEST_F(TestClsRbd, group_snap_set_duplicate_id) {
   ASSERT_EQ(-EEXIST, group_snap_set(&ioctx, group_id, snap1));
 }
 
-TEST_F(TestClsRbd, group_snap_set_duplicate_name) {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
+TEST_P(TestClsRbd, group_snap_set_duplicate_name) {
   string group_id = "group_id_snap_add_duplicate_name";
   ASSERT_EQ(0, ioctx.create(group_id, true));
 
@@ -2663,10 +2486,7 @@ TEST_F(TestClsRbd, group_snap_set_duplicate_name) {
   ASSERT_EQ(-EEXIST, group_snap_set(&ioctx, group_id, snap1));
 }
 
-TEST_F(TestClsRbd, group_snap_set) {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
+TEST_P(TestClsRbd, group_snap_set) {
   string group_id = "group_id_snap_add";
   ASSERT_EQ(0, ioctx.create(group_id, true));
 
@@ -2676,34 +2496,69 @@ TEST_F(TestClsRbd, group_snap_set) {
 
   set<string> keys;
   ASSERT_EQ(0, ioctx.omap_get_keys(group_id, "", 10, &keys));
+  ASSERT_EQ(3U, keys.size());
 
   auto it = keys.begin();
-  ASSERT_EQ(1U, keys.size());
-
-  string snap_key = "snapshot_" + stringify(snap.id);
-  ASSERT_EQ(snap_key, *it);
+  ASSERT_EQ("snap_max_order", *it++);
+  ASSERT_EQ("snap_order_" + snap.id, *it++);
+  ASSERT_EQ("snapshot_" + snap.id, *it);
 }
 
-TEST_F(TestClsRbd, group_snap_list) {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
+TEST_P(TestClsRbd, group_snap_list) {
   string group_id = "group_id_snap_list";
   ASSERT_EQ(0, ioctx.create(group_id, true));
 
   string snap_id1 = "snap_id1";
-  cls::rbd::GroupSnapshot snap1 = {snap_id1, "test_snapshot1", cls::rbd::GROUP_SNAPSHOT_STATE_INCOMPLETE};
+  cls::rbd::GroupSnapshot snap1 = {snap_id1, "test_snapshot1",
+				   cls::rbd::GROUP_SNAPSHOT_STATE_INCOMPLETE};
   ASSERT_EQ(0, group_snap_set(&ioctx, group_id, snap1));
 
+  string snap_id0 = "snap_id0";
+  cls::rbd::GroupSnapshot snap0 = {snap_id0, "test_snapshot0",
+				   cls::rbd::GROUP_SNAPSHOT_STATE_INCOMPLETE};
+  ASSERT_EQ(0, group_snap_set(&ioctx, group_id, snap0));
+
   string snap_id2 = "snap_id2";
-  cls::rbd::GroupSnapshot snap2 = {snap_id2, "test_snapshot2", cls::rbd::GROUP_SNAPSHOT_STATE_INCOMPLETE};
+  cls::rbd::GroupSnapshot snap2 = {snap_id2, "test_snapshot2",
+				   cls::rbd::GROUP_SNAPSHOT_STATE_INCOMPLETE};
   ASSERT_EQ(0, group_snap_set(&ioctx, group_id, snap2));
 
   std::vector<cls::rbd::GroupSnapshot> snapshots;
-  ASSERT_EQ(0, group_snap_list(&ioctx, group_id, cls::rbd::GroupSnapshot(), 10, &snapshots));
-  ASSERT_EQ(2U, snapshots.size());
-  ASSERT_EQ(snap_id1, snapshots[0].id);
-  ASSERT_EQ(snap_id2, snapshots[1].id);
+  ASSERT_EQ(0, group_snap_list(&ioctx, group_id, cls::rbd::GroupSnapshot(),
+                               10, &snapshots));
+  ASSERT_EQ(3U, snapshots.size());
+
+  ASSERT_EQ(snap_id0, snapshots[0].id);
+  ASSERT_EQ(snap_id1, snapshots[1].id);
+  ASSERT_EQ(snap_id2, snapshots[2].id);
+
+  std::map<std::string, uint64_t> snap_orders;
+  ASSERT_EQ(0, group_snap_list_order(&ioctx, group_id, "", 10, &snap_orders));
+  ASSERT_EQ(3U, snap_orders.size());
+
+  ASSERT_EQ(1, snap_orders[snap_id1]);
+  ASSERT_EQ(2, snap_orders[snap_id0]);
+  ASSERT_EQ(3, snap_orders[snap_id2]);
+
+  ASSERT_EQ(0, group_snap_remove(&ioctx, group_id, snap_id2));
+
+  ASSERT_EQ(0, group_snap_list_order(&ioctx, group_id, "", 10, &snap_orders));
+  ASSERT_EQ(2U, snap_orders.size());
+
+  ASSERT_EQ(1, snap_orders[snap_id1]);
+  ASSERT_EQ(2, snap_orders[snap_id0]);
+
+  string snap_id4 = "snap_id4";
+  cls::rbd::GroupSnapshot snap4 = {snap_id4, "test_snapshot4",
+				   cls::rbd::GROUP_SNAPSHOT_STATE_INCOMPLETE};
+  ASSERT_EQ(0, group_snap_set(&ioctx, group_id, snap4));
+
+  ASSERT_EQ(0, group_snap_list_order(&ioctx, group_id, "", 10, &snap_orders));
+  ASSERT_EQ(3U, snap_orders.size());
+
+  ASSERT_EQ(1, snap_orders[snap_id1]);
+  ASSERT_EQ(2, snap_orders[snap_id0]);
+  ASSERT_EQ(4, snap_orders[snap_id4]);
 }
 
 static std::string hexify(int v) {
@@ -2713,10 +2568,7 @@ static std::string hexify(int v) {
   return oss.str();
 }
 
-TEST_F(TestClsRbd, group_snap_list_max_return) {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
+TEST_P(TestClsRbd, group_snap_list_max_return) {
   string group_id = "group_id_snap_list_max_return";
   ASSERT_EQ(0, ioctx.create(group_id, true));
 
@@ -2738,7 +2590,6 @@ TEST_F(TestClsRbd, group_snap_list_max_return) {
   }
 
   cls::rbd::GroupSnapshot last_snap = *snapshots.rbegin();
-
   ASSERT_EQ(0, group_snap_list(&ioctx, group_id, last_snap, 10, &snapshots));
   ASSERT_EQ(5U, snapshots.size());
   for (int i = 10; i < 15; ++i) {
@@ -2747,10 +2598,7 @@ TEST_F(TestClsRbd, group_snap_list_max_return) {
   }
 }
 
-TEST_F(TestClsRbd, group_snap_list_max_read) {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
+TEST_P(TestClsRbd, group_snap_list_max_read) {
   string group_id = "group_id_snap_list_max_read";
   ASSERT_EQ(0, ioctx.create(group_id, true));
 
@@ -2773,11 +2621,7 @@ TEST_F(TestClsRbd, group_snap_list_max_read) {
   }
 }
 
-TEST_F(TestClsRbd, group_snap_remove) {
-  librados::IoCtx ioctx;
-
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
+TEST_P(TestClsRbd, group_snap_remove) {
   string group_id = "group_id_snap_remove";
   ASSERT_EQ(0, ioctx.create(group_id, true));
 
@@ -2787,12 +2631,12 @@ TEST_F(TestClsRbd, group_snap_remove) {
 
   set<string> keys;
   ASSERT_EQ(0, ioctx.omap_get_keys(group_id, "", 10, &keys));
+  ASSERT_EQ(3U, keys.size());
 
   auto it = keys.begin();
-  ASSERT_EQ(1U, keys.size());
-
-  string snap_key = "snapshot_" + stringify(snap.id);
-  ASSERT_EQ(snap_key, *it);
+  ASSERT_EQ("snap_max_order", *it++);
+  ASSERT_EQ("snap_order_" + snap.id, *it++);
+  ASSERT_EQ("snapshot_" + snap.id, *it);
 
   // Remove the snapshot
 
@@ -2800,14 +2644,40 @@ TEST_F(TestClsRbd, group_snap_remove) {
 
   ASSERT_EQ(0, ioctx.omap_get_keys(group_id, "", 10, &keys));
 
-  ASSERT_EQ(0U, keys.size());
+  ASSERT_EQ(1U, keys.size());
+  ASSERT_EQ("snap_max_order", *keys.begin());
 }
 
-TEST_F(TestClsRbd, group_snap_get_by_id) {
-  librados::IoCtx ioctx;
+TEST_P(TestClsRbd, group_snap_remove_without_order) {
+  string group_id = "group_id_snap_remove_without_order";
+  ASSERT_EQ(0, ioctx.create(group_id, true));
 
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
+  string snap_id = "snap_id";
+  cls::rbd::GroupSnapshot snap = {snap_id, "test_snapshot",
+                                  cls::rbd::GROUP_SNAPSHOT_STATE_INCOMPLETE};
+  ASSERT_EQ(0, group_snap_set(&ioctx, group_id, snap));
 
+  // Simulate an older snapshot by removing the order key
+  set<string> keys = {"snap_order_" + snap.id};
+  ASSERT_EQ(0, ioctx.omap_rm_keys(group_id, keys));
+
+  ASSERT_EQ(0, ioctx.omap_get_keys(group_id, "", 10, &keys));
+  ASSERT_EQ(2U, keys.size());
+
+  auto it = keys.begin();
+  ASSERT_EQ("snap_max_order", *it++);
+  ASSERT_EQ("snapshot_" + snap.id, *it);
+
+  // Remove the snapshot
+  ASSERT_EQ(0, group_snap_remove(&ioctx, group_id, snap_id));
+
+  ASSERT_EQ(0, ioctx.omap_get_keys(group_id, "", 10, &keys));
+  ASSERT_EQ(1U, keys.size());
+
+  ASSERT_EQ("snap_max_order", *keys.begin());
+}
+
+TEST_P(TestClsRbd, group_snap_get_by_id) {
   string group_id = "group_id_snap_get_by_id";
   ASSERT_EQ(0, ioctx.create(group_id, true));
 
@@ -2825,11 +2695,8 @@ TEST_F(TestClsRbd, group_snap_get_by_id) {
   ASSERT_EQ(snap.state, received_snap.state);
 }
 
-TEST_F(TestClsRbd, trash_methods)
+TEST_P(TestClsRbd, trash_methods)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string id = "123456789";
   string id2 = "123456780";
 
@@ -2889,14 +2756,10 @@ TEST_F(TestClsRbd, trash_methods)
   ASSERT_EQ(spec_res2.deletion_time, now1);
   ASSERT_EQ(spec_res2.deferment_end_time, now1_delay);
 
-  ioctx.close();
 }
 
-TEST_F(TestClsRbd, op_features)
+TEST_P(TestClsRbd, op_features)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
   ASSERT_EQ(0, create_image(&ioctx, oid, 0, 22, 0, oid, -1));
 
@@ -2943,11 +2806,8 @@ TEST_F(TestClsRbd, op_features)
   ASSERT_EQ(0u, features);
 }
 
-TEST_F(TestClsRbd, clone_parent)
+TEST_P(TestClsRbd, clone_parent)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
   ASSERT_EQ(0, create_image(&ioctx, oid, 0, 22, 0, oid, -1));
   ASSERT_EQ(0, snapshot_add(&ioctx, oid, 123, "user_snap"));
@@ -3024,11 +2884,8 @@ TEST_F(TestClsRbd, clone_parent)
   ASSERT_TRUE((op_features & expected_op_features) == 0);
 }
 
-TEST_F(TestClsRbd, clone_parent_ns)
+TEST_P(TestClsRbd, clone_parent_ns)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
   ASSERT_EQ(0, create_image(&ioctx, oid, 0, 22, 0, oid, -1));
   ASSERT_EQ(0, snapshot_add(&ioctx, oid, 123, "user_snap"));
@@ -3055,11 +2912,8 @@ TEST_F(TestClsRbd, clone_parent_ns)
   ASSERT_EQ(0, snapshot_remove(&ioctx, oid, 123));
 }
 
-TEST_F(TestClsRbd, clone_child)
+TEST_P(TestClsRbd, clone_child)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
   ASSERT_EQ(0, create_image(&ioctx, oid, 0, 22,
                             RBD_FEATURE_LAYERING | RBD_FEATURE_DEEP_FLATTEN,
@@ -3093,11 +2947,8 @@ TEST_F(TestClsRbd, clone_child)
   ASSERT_TRUE((op_features & RBD_OPERATION_FEATURE_CLONE_CHILD) == 0ULL);
 }
 
-TEST_F(TestClsRbd, namespace_methods)
+TEST_P(TestClsRbd, namespace_methods)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string name1 = "123456789";
   string name2 = "123456780";
 
@@ -3128,11 +2979,8 @@ TEST_F(TestClsRbd, namespace_methods)
   ASSERT_TRUE(entries.empty());
 }
 
-TEST_F(TestClsRbd, migration)
+TEST_P(TestClsRbd, migration)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
   ASSERT_EQ(0, create_image(&ioctx, oid, 0, 22, 0, oid, -1));
 
@@ -3195,14 +3043,10 @@ TEST_F(TestClsRbd, migration)
                             &incompatible_features));
   ASSERT_EQ(0U, features);
 
-  ioctx.close();
 }
 
-TEST_F(TestClsRbd, migration_v1)
+TEST_P(TestClsRbd, migration_v1)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   bufferlist header;
   header.append(RBD_HEADER_TEXT, sizeof(RBD_HEADER_TEXT));
   string oid = get_temp_image_name();
@@ -3251,14 +3095,10 @@ TEST_F(TestClsRbd, migration_v1)
             ioctx.read(oid, header, sizeof(RBD_HEADER_TEXT), 0));
   ASSERT_STREQ(RBD_HEADER_TEXT, header.c_str());
 
-  ioctx.close();
 }
 
-TEST_F(TestClsRbd, assert_snapc_seq)
+TEST_P(TestClsRbd, assert_snapc_seq)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
 
   ASSERT_EQ(0,
@@ -3313,11 +3153,8 @@ TEST_F(TestClsRbd, assert_snapc_seq)
   ASSERT_EQ(0, ioctx.selfmanaged_snap_remove(snapc_seq));
 }
 
-TEST_F(TestClsRbd, sparsify)
+TEST_P(TestClsRbd, sparsify)
 {
-  librados::IoCtx ioctx;
-  ASSERT_EQ(0, _rados.ioctx_create(_pool_name.c_str(), ioctx));
-
   string oid = get_temp_image_name();
   ioctx.remove(oid);
 
@@ -3424,5 +3261,12 @@ TEST_F(TestClsRbd, sparsify)
   ASSERT_TRUE(outbl.contents_equal(expected_outbl));
 
   ASSERT_EQ(0, ioctx.remove(oid));
-  ioctx.close();
 }
+
+
+INSTANTIATE_TEST_SUITE_P(, TestClsRbd,
+  ::testing::Values(PoolType::REPLICATED, PoolType::FAST_EC),
+  [](const ::testing::TestParamInfo<PoolType>& info) {
+  return pool_type_name(info.param);
+  }
+);

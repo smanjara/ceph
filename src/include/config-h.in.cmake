@@ -84,12 +84,6 @@
 /* Defined if you have libaio */
 #cmakedefine HAVE_LIBAIO
 
-/* Defined if you have libdml */
-#cmakedefine HAVE_LIBDML
-
-/* Defined if you have libzbd */
-#cmakedefine HAVE_LIBZBD
-
 /* Defined if you have liburing */
 #cmakedefine HAVE_LIBURING
 
@@ -116,9 +110,6 @@
 
 /* DPDK conditional compilation */
 #cmakedefine HAVE_DPDK
-
-/* PMEM_DEVICE (OSD) conditional compilation */
-#cmakedefine HAVE_BLUESTORE_PMEM
 
 /* Define if you have tcmalloc */
 #cmakedefine HAVE_LIBTCMALLOC
@@ -148,6 +139,9 @@
 /* define if kernel rbd enabled */
 #cmakedefine WITH_KRBD
 
+/* define if rbd ubbd enabled */
+#cmakedefine WITH_RBD_UBBD
+
 /* define if key-value-store is enabled */
 #cmakedefine WITH_KVS
 
@@ -156,6 +150,9 @@
 
 /* define if radosgw has openssl support */
 #cmakedefine WITH_CURL_OPENSSL
+
+/*define if D4N filter enabled */
+#cmakedefine WITH_RADOSGW_D4N 
 
 /* define if HAVE_THREAD_SAFE_RES_QUERY */
 #cmakedefine HAVE_THREAD_SAFE_RES_QUERY
@@ -247,8 +244,14 @@
 /* we have a recent nasm and are x86_64 */
 #cmakedefine HAVE_NASM_X64
 
+/* nasm can also build the isa-l:avx2 */
+#cmakedefine HAVE_NASM_X64_AVX2
+
 /* nasm can also build the isa-l:avx512 */
 #cmakedefine HAVE_NASM_X64_AVX512
+
+/* nasm can also build the isa-l:avx512 & vpclmulqdq */
+#cmakedefine HAVE_NASM_X64_AVX512_VPCLMUL
 
 /* Define if the erasure code isa-l plugin is compiled */
 #cmakedefine WITH_EC_ISA_PLUGIN
@@ -288,6 +291,15 @@
 
 /* Support ARMv8 CRC and CRYPTO intrinsics */
 #cmakedefine HAVE_ARMV8_CRC_CRYPTO_INTRINSICS
+
+/* Define if you have RISC-V Vector extension */
+#cmakedefine HAVE_RISCV_RVV 1
+
+/* Define if you have RISC-V ZVBC extension */
+#cmakedefine HAVE_RISCV_ZVBC 1
+
+/* Define if you have RISC-V ZBC extension */
+#cmakedefine HAVE_RISCV_ZBC 1
 
 /* Define if you have struct stat.st_mtimespec.tv_nsec */
 #cmakedefine HAVE_STAT_ST_MTIMESPEC_TV_NSEC
@@ -357,14 +369,20 @@
 /* Backend CORTX-DAOS for Rados Gateway */
 #cmakedefine WITH_RADOSGW_DAOS
 
+/* Backend POSIX for Rados Gateway */
+#cmakedefine WITH_RADOSGW_POSIX
+
+/* Backend RADOS for Rados Gateway */
+/* #cmakedefine WITH_RADOSGW_RADOS */
+
 /* Defined if std::map::merge() is supported */
 #cmakedefine HAVE_STDLIB_MAP_SPLICING
 
 /* Defined if Intel QAT compress/decompress is supported */
 #cmakedefine HAVE_QATZIP
 
-/* Define if seastar is available. */
-#cmakedefine HAVE_SEASTAR
+/* Defined if UADK compress/decompress is supported */
+#cmakedefine HAVE_UADK
 
 /* Define if unit tests are built. */
 #cmakedefine UNIT_TESTS_BUILT
@@ -384,10 +402,16 @@
 /* Define if libcryptsetup can be used (linux only) */
 #cmakedefine HAVE_LIBCRYPTSETUP
 
+/* Define if libnbd can be used */
+#cmakedefine HAVE_LIBNBD
+
 /* Shared library extension, such as .so, .dll or .dylib */
 #cmakedefine CMAKE_SHARED_LIBRARY_SUFFIX "@CMAKE_SHARED_LIBRARY_SUFFIX@"
 
 /* libexec directory path */
 #cmakedefine CMAKE_INSTALL_LIBEXECDIR "@CMAKE_INSTALL_LIBEXECDIR@"
+
+/* Define if breakpad is available */
+#cmakedefine HAVE_BREAKPAD
 
 #endif /* CONFIG_H */

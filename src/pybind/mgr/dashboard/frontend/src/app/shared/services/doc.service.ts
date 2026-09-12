@@ -27,7 +27,6 @@ export class DocService {
     const docVersion = release === 'main' ? 'latest' : release;
     const domain = `https://docs.ceph.com/en/${docVersion}/`;
     const domainCeph = `https://ceph.io`;
-    const domainCephOld = `https://old.ceph.com`;
 
     const sections = {
       iscsi: `${domain}mgr/dashboard/#enabling-iscsi-management`,
@@ -35,19 +34,30 @@ export class DocService {
       'nfs-ganesha': `${domain}mgr/dashboard/#configuring-nfs-ganesha-in-the-dashboard`,
       'rgw-nfs': `${domain}radosgw/nfs`,
       rgw: `${domain}mgr/dashboard/#enabling-the-object-gateway-management-frontend`,
+      'rgw-multisite': `${domain}/radosgw/multisite/#failover-and-disaster-recovery`,
+      multisite: `${domain}/radosgw/multisite`,
       dashboard: `${domain}mgr/dashboard`,
       grafana: `${domain}mgr/dashboard/#enabling-the-embedding-of-grafana-dashboards`,
       orch: `${domain}mgr/orchestrator`,
-      pgs: `${domainCephOld}/pgcalc`,
+      pgs: `${domain}/rados/operations/placement-groups/#choosing-number-of-placement-groups`,
       help: `${domainCeph}/en/users/`,
       security: `${domainCeph}/en/security/`,
       trademarks: `${domainCeph}/en/trademarks/`,
       'dashboard-landing-page-status': `${domain}mgr/dashboard/#dashboard-landing-page-status`,
       'dashboard-landing-page-performance': `${domain}mgr/dashboard/#dashboard-landing-page-performance`,
-      'dashboard-landing-page-capacity': `${domain}mgr/dashboard/#dashboard-landing-page-capacity`
+      'dashboard-landing-page-capacity': `${domain}mgr/dashboard/#dashboard-landing-page-capacity`,
+      'dashboard-side-panel': `${domain}/rados/operations/health-checks/`
     };
 
     return sections[section];
+  }
+
+  alertDocUrl(alertName: string, releaseVersion = ''): string | null {
+    const baseUrl = this.urlGenerator('managing-alerts', releaseVersion);
+    if (!baseUrl || !alertName) {
+      return null;
+    }
+    return `${baseUrl}#${encodeURIComponent(`managing-alerts__${alertName.toLowerCase()}`)}`;
   }
 
   subscribeOnce(

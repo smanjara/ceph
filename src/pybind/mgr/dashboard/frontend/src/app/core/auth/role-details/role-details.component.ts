@@ -8,7 +8,8 @@ import { CdTableColumn } from '~/app/shared/models/cd-table-column';
 @Component({
   selector: 'cd-role-details',
   templateUrl: './role-details.component.html',
-  styleUrls: ['./role-details.component.scss']
+  styleUrls: ['./role-details.component.scss'],
+  standalone: false
 })
 export class RoleDetailsComponent implements OnChanges, OnInit {
   @Input()
@@ -31,28 +32,28 @@ export class RoleDetailsComponent implements OnChanges, OnInit {
         prop: 'read',
         name: $localize`Read`,
         flexGrow: 1,
-        cellClass: 'text-center',
+        cellClass: 'text-left',
         cellTransformation: CellTemplate.checkIcon
       },
       {
         prop: 'create',
         name: $localize`Create`,
         flexGrow: 1,
-        cellClass: 'text-center',
+        cellClass: 'text-left',
         cellTransformation: CellTemplate.checkIcon
       },
       {
         prop: 'update',
         name: $localize`Update`,
         flexGrow: 1,
-        cellClass: 'text-center',
+        cellClass: 'text-left',
         cellTransformation: CellTemplate.checkIcon
       },
       {
         prop: 'delete',
         name: $localize`Delete`,
         flexGrow: 1,
-        cellClass: 'text-center',
+        cellClass: 'text-left',
         cellTransformation: CellTemplate.checkIcon
       }
     ];

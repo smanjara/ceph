@@ -1,14 +1,18 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
-#include <string>
+#include <iosfwd>
 #include <map>
+#include <string>
 
 #include "include/health.h"
+#include "include/types.h"
 #include "include/utime.h"
+#include "common/CanHasPrint.h"
 #include "common/Formatter.h"
+#include "common/dout.h"
 
 struct health_check_t {
   health_status_t severity;
@@ -39,6 +43,13 @@ struct health_check_t {
     return !(l == r);
   }
 
+  void print(std::ostream& os) const {
+    os << "hc"
+       << "(" << summary
+       << " count=" << count
+       << ")";
+  }
+
   void dump(ceph::Formatter *f, bool want_detail=true) const {
     f->dump_stream("severity") << severity;
 
@@ -58,13 +69,16 @@ struct health_check_t {
     }
   }
 
-  static void generate_test_instances(std::list<health_check_t*>& ls) {
-    ls.push_back(new health_check_t);
-    ls.push_back(new health_check_t);
-    ls.back()->severity = HEALTH_ERR;
-    ls.back()->summary = "summarization";
-    ls.back()->detail = {"one", "two", "three"};
-    ls.back()->count = 42;
+  static std::list<health_check_t> generate_test_instances() {
+    std::list<health_check_t> ls;
+    ls.emplace_back();
+    ls.back().severity = HEALTH_WARN;
+    ls.emplace_back();
+    ls.back().severity = HEALTH_ERR;
+    ls.back().summary = "summarization";
+    ls.back().detail = {"one", "two", "three"};
+    ls.back().count = 42;
+    return ls;
   }
 };
 WRITE_CLASS_DENC(health_check_t)
@@ -97,14 +111,16 @@ struct health_mute_t {
     f->dump_int("count", count);
   }
 
-  static void generate_test_instances(std::list<health_mute_t*>& ls) {
-    ls.push_back(new health_mute_t);
-    ls.push_back(new health_mute_t);
-    ls.back()->code = "OSD_DOWN";
-    ls.back()->ttl = utime_t(1, 2);
-    ls.back()->sticky = true;
-    ls.back()->summary = "foo bar";
-    ls.back()->count = 2;
+  static std::list<health_mute_t> generate_test_instances() {
+    std::list<health_mute_t> ls;
+    ls.emplace_back();
+    ls.emplace_back();
+    ls.back().code = "OSD_DOWN";
+    ls.back().ttl = utime_t(1, 2);
+    ls.back().sticky = true;
+    ls.back().summary = "foo bar";
+    ls.back().count = 2;
+    return ls;
   }
 };
 WRITE_CLASS_DENC(health_mute_t)
@@ -118,26 +134,40 @@ struct health_check_map_t {
     DENC_FINISH(p);
   }
 
+  static constexpr bool is_ephemeral() {
+    return true;
+  }
+
+  void print(std::ostream& os) const {
+    os << "health_check_map_t"
+       << "("
+       << checks
+       << ")";
+  }
+
   void dump(ceph::Formatter *f) const {
     for (auto& [code, check] : checks) {
       f->dump_object(code, check);
     }
   }
 
-  static void generate_test_instances(std::list<health_check_map_t*>& ls) {
-    ls.push_back(new health_check_map_t);
-    ls.push_back(new health_check_map_t);
+  static std::list<health_check_map_t> generate_test_instances() {
+    std::list<health_check_map_t> ls;
+
+    ls.emplace_back();
+    ls.emplace_back();
     {
-      auto& d = ls.back()->add("FOO", HEALTH_WARN, "foo", 2);
+      auto& d = ls.back().add("FOO", HEALTH_WARN, "foo", 2);
       d.detail.push_back("a");
       d.detail.push_back("b");
     }
     {
-      auto& d = ls.back()->add("BAR", HEALTH_ERR, "bar!", 3);
+      auto& d = ls.back().add("BAR", HEALTH_ERR, "bar!", 3);
       d.detail.push_back("c");
       d.detail.push_back("d");
       d.detail.push_back("e");
     }
+    return ls;
   }
 
   void clear() {

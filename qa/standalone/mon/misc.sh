@@ -23,7 +23,7 @@ function run() {
 
     export CEPH_MON="127.0.0.1:7102" # git grep '\<7102\>' : there must be only one
     export CEPH_ARGS
-    CEPH_ARGS+="--fsid=$(uuidgen) --auth-supported=none "
+    CEPH_ARGS+="--fsid=$(uuidgen) --auth_cluster_required=none --auth_service_required=none --auth_client_required=none "
     CEPH_ARGS+="--mon-host=$CEPH_MON "
 
     local funcs=${@:-$(set | sed -n -e 's/^\(TEST_[0-9a-z_]*\) .*/\1/p')}
@@ -108,7 +108,7 @@ function TEST_mon_add_to_single_mon() {
     MONA=127.0.0.1:7117 # git grep '\<7117\>' : there must be only one
     MONB=127.0.0.1:7118 # git grep '\<7118\>' : there must be only one
     CEPH_ARGS_orig=$CEPH_ARGS
-    CEPH_ARGS="--fsid=$fsid --auth-supported=none "
+    CEPH_ARGS="--fsid=$fsid --auth_cluster_required=none --auth_service_required=none --auth_client_required=none "
     CEPH_ARGS+="--mon-initial-members=a "
     CEPH_ARGS+="--mon-host=$MONA "
 
@@ -145,7 +145,7 @@ function TEST_no_segfault_for_bad_keyring() {
     ceph-authtool --create-keyring $dir/ceph.mon.keyring --gen-key -n mon. --cap mon 'allow *'
     ceph-authtool --create-keyring $dir/ceph.client.admin.keyring --gen-key -n client.admin --cap mon 'allow *'
     ceph-authtool $dir/ceph.mon.keyring --import-keyring $dir/ceph.client.admin.keyring
-    CEPH_ARGS_TMP="--fsid=$(uuidgen) --mon-host=127.0.0.1:7102 --auth-supported=cephx "
+    CEPH_ARGS_TMP="--fsid=$(uuidgen) --mon-host=127.0.0.1:7102 --auth_cluster_required=none --auth_service_required=none --auth_client_required=none "
     CEPH_ARGS_orig=$CEPH_ARGS
     CEPH_ARGS="$CEPH_ARGS_TMP --keyring=$dir/ceph.mon.keyring "
     run_mon $dir a
@@ -168,10 +168,10 @@ function TEST_mon_features() {
     MONB=127.0.0.1:7128 # git grep '\<7128\>' ; there must be only one
     MONC=127.0.0.1:7129 # git grep '\<7129\>' ; there must be only one
     CEPH_ARGS_orig=$CEPH_ARGS
-    CEPH_ARGS="--fsid=$fsid --auth-supported=none "
+    CEPH_ARGS="--fsid=$fsid --auth_cluster_required=none --auth_service_required=none --auth_client_required=none "
     CEPH_ARGS+="--mon-host=$MONA,$MONB,$MONC "
     CEPH_ARGS+="--mon-debug-no-initial-persistent-features "
-    CEPH_ARGS+="--mon-debug-no-require-reef "
+    CEPH_ARGS+="--mon-debug-no-require-umbrella"
 
     run_mon $dir a --public-addr $MONA || return 1
     run_mon $dir b --public-addr $MONB || return 1
@@ -183,7 +183,7 @@ function TEST_mon_features() {
     # quorum contains two monitors
     jq_success "$jqinput" '.quorum | length == 2' || return 1
     # quorum's monitor features contain kraken, luminous, mimic, nautilus,
-    # octopus, pacific, quincy
+    # octopus, pacific, quincy, reef
     jqfilter='.features.quorum_mon[]|select(. == "kraken")'
     jq_success "$jqinput" "$jqfilter" "kraken" || return 1
     jqfilter='.features.quorum_mon[]|select(. == "luminous")'
@@ -200,6 +200,12 @@ function TEST_mon_features() {
     jq_success "$jqinput" "$jqfilter" "quincy" || return 1
     jqfilter='.features.quorum_mon[]|select(. == "reef")'
     jq_success "$jqinput" "$jqfilter" "reef" || return 1
+    jqfilter='.features.quorum_mon[]|select(. == "squid")'
+    jq_success "$jqinput" "$jqfilter" "squid" || return 1
+    jqfilter='.features.quorum_mon[]|select(. == "tentacle")'
+    jq_success "$jqinput" "$jqfilter" "tentacle" || return 1
+    jqfilter='.features.quorum_mon[]|select(. == "umbrella")'
+    jq_success "$jqinput" "$jqfilter" "umbrella" || return 1
 
     # monmap must have no persistent features set, because we
     # don't currently have a quorum made out of all the monitors
@@ -214,7 +220,7 @@ function TEST_mon_features() {
     # validate 'mon feature ls'
 
     jqinput="$(ceph mon feature ls --format=json 2>/dev/null)"
-    # k l m n o p q are supported
+    # k l m n o p q r are supported
     jqfilter='.all.supported[] | select(. == "kraken")'
     jq_success "$jqinput" "$jqfilter" "kraken" || return 1
     jqfilter='.all.supported[] | select(. == "luminous")'
@@ -231,6 +237,12 @@ function TEST_mon_features() {
     jq_success "$jqinput" "$jqfilter" "quincy" || return 1
     jqfilter='.all.supported[] | select(. == "reef")'
     jq_success "$jqinput" "$jqfilter" "reef" || return 1
+    jqfilter='.all.supported[] | select(. == "squid")'
+    jq_success "$jqinput" "$jqfilter" "squid" || return 1
+    jqfilter='.all.supported[] | select(. == "tentacle")'
+    jq_success "$jqinput" "$jqfilter" "tentacle" || return 1
+    jqfilter='.all.supported[] | select(. == "umbrella")'
+    jq_success "$jqinput" "$jqfilter" "umbrella" || return 1
 
     # start third monitor
     run_mon $dir c --public-addr $MONC || return 1
@@ -265,12 +277,20 @@ function TEST_mon_features() {
     jq_success "$jqinput" "$jqfilter" "pacific" || return 1
     jqfilter='.monmap.features.persistent[]|select(. == "elector-pinging")'
     jq_success "$jqinput" "$jqfilter" "elector-pinging" || return 1
-    jqfilter='.monmap.features.persistent | length == 10'
-    jq_success "$jqinput" "$jqfilter" || return 1
     jqfilter='.monmap.features.persistent[]|select(. == "quincy")'
     jq_success "$jqinput" "$jqfilter" "quincy" || return 1
     jqfilter='.monmap.features.persistent[]|select(. == "reef")'
     jq_success "$jqinput" "$jqfilter" "reef" || return 1
+    jqfilter='.monmap.features.persistent[]|select(. == "squid")'
+    jq_success "$jqinput" "$jqfilter" "squid" || return 1
+    jqfilter='.monmap.features.persistent[]|select(. == "tentacle")'
+    jq_success "$jqinput" "$jqfilter" "tentacle" || return 1
+    jqfilter='.monmap.features.persistent[]|select(. == "nvmeof_beacon_diff")'
+    jq_success "$jqinput" "$jqfilter" "nvmeof_beacon_diff" || return 1
+    jqfilter='.monmap.features.persistent[]|select(. == "umbrella")'
+    jq_success "$jqinput" "$jqfilter" "umbrella" || return 1
+    jqfilter='.monmap.features.persistent | length == 14'
+    jq_success "$jqinput" "$jqfilter" || return 1
 
     CEPH_ARGS=$CEPH_ARGS_orig
     # that's all folks. thank you for tuning in.

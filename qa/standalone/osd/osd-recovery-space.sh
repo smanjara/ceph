@@ -23,7 +23,7 @@ function run() {
 
     export CEPH_MON="127.0.0.1:7221" # git grep '\<7221\>' : there must be only one
     export CEPH_ARGS
-    CEPH_ARGS+="--fsid=$(uuidgen) --auth-supported=none "
+    CEPH_ARGS+="--fsid=$(uuidgen) --auth_cluster_required=none --auth_service_required=none --auth_client_required=none "
     CEPH_ARGS+="--mon-host=$CEPH_MON "
     CEPH_ARGS+="--osd_max_backfills=10 "
     CEPH_ARGS+="--osd_mclock_override_recovery_settings=true "
@@ -76,6 +76,11 @@ function wait_for_state() {
 function wait_for_recovery_toofull() {
     local timeout=$1
     wait_for_state recovery_toofull $timeout
+    local ret=$?
+    if [ $ret -ne 0 ]; then
+      echo "Error: Recovery toofull timeout"
+      return 1
+    fi
 }
 
 
@@ -123,6 +128,18 @@ function TEST_recovery_test_simple() {
     done
     sleep 5
 
+    # Throttle recovery so that the target OSD's full-status check (driven by
+    # the periodic osd_stat/heartbeat update, ~every few seconds) reliably
+    # fires and marks the OSD full *while recovery is still in progress*.
+    # fake_statfs_for_testing only reports the OSD as full once the recovered
+    # data has actually landed, so on fast hardware the small (~3MB) recovery
+    # can complete (PG active+clean) before the OSD ever reports itself full,
+    # and recovery_toofull never triggers. 
+    for o in $(seq 0 $(expr $OSDS - 1))
+    do
+      ceph tell osd.$o injectargs '--osd_recovery_sleep 0.05' || return 1
+    done
+
     ceph pg dump pgs
 
     for p in $(seq 1 $pools)
@@ -131,7 +148,11 @@ function TEST_recovery_test_simple() {
     done
 
     # If this times out, we'll detected errors below
-    wait_for_recovery_toofull 30
+    wait_for_recovery_toofull 120
+    if [ $? -ne 0 ]; then
+      echo "Error: Recovery toofull timeout"
+      return 1
+    fi
 
     ERRORS=0
     if [ "$(ceph pg dump pgs | grep +recovery_toofull | wc -l)" != "1" ];

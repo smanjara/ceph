@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <sys/mman.h>
 #include <string.h>
@@ -31,7 +31,7 @@ device_config_t get_rbm_ephemeral_device_config(
          ++secondary_index) {
       device_id_t secondary_id = static_cast<device_id_t>(secondary_index);
       secondary_devices.insert({
-        secondary_index, device_spec_t{magic, type, secondary_id}
+        secondary_index, device_spec_t{magic, type, backend_type_t::RANDOM_BLOCK, secondary_id}
       });
     }
   } else { // index > 0
@@ -41,7 +41,7 @@ device_config_t get_rbm_ephemeral_device_config(
   device_id_t id = static_cast<device_id_t>(DEVICE_ID_RANDOM_BLOCK_MIN + index);
   seastore_meta_t meta = {};
   return {is_major_device,
-          device_spec_t{magic, type, id},
+          device_spec_t{magic, type, backend_type_t::RANDOM_BLOCK, id},
           meta,
           secondary_devices};
 }
@@ -51,6 +51,9 @@ paddr_t BlockRBManager::alloc_extent(size_t size)
   LOG_PREFIX(BlockRBManager::alloc_extent);
   assert(allocator);
   auto alloc = allocator->alloc_extent(size);
+  if (!alloc) {
+    return P_ADDR_NULL;
+  }
   ceph_assert((*alloc).num_intervals() == 1);
   auto extent = (*alloc).begin();
   ceph_assert(size == extent.get_len());
@@ -60,6 +63,36 @@ paddr_t BlockRBManager::alloc_extent(size_t size)
   DEBUG("allocated addr: {}, size: {}, requested size: {}",
 	paddr, extent.get_len(), size);
   return paddr;
+}
+
+BlockRBManager::allocate_ret_bare
+BlockRBManager::alloc_extents(size_t size, paddr_t hint)
+{
+  LOG_PREFIX(BlockRBManager::alloc_extents);
+  assert(allocator);
+  rbm_abs_addr rbm_hint =
+    (hint == P_ADDR_NULL ? 0 : convert_paddr_to_abs_addr(hint));
+  auto alloc = allocator->alloc_extents(size, rbm_hint);
+  if (!alloc) {
+    return {};
+  }
+  allocate_ret_bare ret;
+  size_t len = 0;
+  for (auto extent = (*alloc).begin();
+       extent != (*alloc).end();
+       extent++) {
+    len += extent.get_len();
+    paddr_t paddr = convert_abs_addr_to_paddr(
+      extent.get_start(),
+      device->get_device_id());
+    DEBUG("allocated addr: {}, size: {}, requested size: {}",
+         paddr, extent.get_len(), size);
+    ret.push_back(
+      {std::move(paddr),
+      static_cast<extent_len_t>(extent.get_len())});
+  }
+  ceph_assert(size == len);
+  return ret;
 }
 
 void BlockRBManager::complete_allocation(
@@ -73,39 +106,41 @@ void BlockRBManager::complete_allocation(
 BlockRBManager::open_ertr::future<> BlockRBManager::open()
 {
   assert(device);
-  return device->read_rbm_header(RBM_START_ADDRESS
-  ).safe_then([this](auto s)
-    -> open_ertr::future<> {
-    auto ool_start = get_start_rbm_addr();
-    allocator->init(
-      ool_start,
-      device->get_available_size() -
-      ool_start,
-      device->get_block_size());
-    return open_ertr::now();
-  }).handle_error(
-    open_ertr::pass_further{},
-    crimson::ct_error::assert_all{
-      "Invalid error read_rbm_header in BlockRBManager::open"
-    }
-  );
+  assert(device->get_available_size() > 0);
+  assert(device->get_block_size() > 0);
+  auto ool_start = get_start_rbm_addr();
+  allocator->init(
+    ool_start,
+    device->get_shard_end() -
+    ool_start,
+    device->get_block_size());
+  return open_ertr::now();
+}
+
+bool BlockRBManager::check_valid_range(rbm_abs_addr addr, bufferptr &bptr) {
+  LOG_PREFIX(BlockRBManager::check_valid_range);
+  rbm_abs_addr start = device->get_shard_start();
+  rbm_abs_addr end = device->get_shard_end();
+  if (addr < start || addr + bptr.length() > end) {
+    ERROR("out of range: start {}, end {}, addr {}, length {}",
+      start, end, addr, bptr.length());
+    return false;
+  }
+  return true;
 }
 
 BlockRBManager::write_ertr::future<> BlockRBManager::write(
   paddr_t paddr,
-  bufferptr &bptr)
+  bufferptr bptr)
 {
-  LOG_PREFIX(BlockRBManager::write);
   ceph_assert(device);
+  ceph_assert(bptr.is_page_aligned());
   rbm_abs_addr addr = convert_paddr_to_abs_addr(paddr);
-  rbm_abs_addr start = 0;
-  rbm_abs_addr end = device->get_available_size();
-  if (addr < start || addr + bptr.length() > end) {
-    ERROR("out of range: start {}, end {}, addr {}, length {}",
-      start, end, addr, bptr.length());
-    return crimson::ct_error::erange::make();
+  if (!check_valid_range(addr, bptr)) {
+    co_return co_await write_ertr::future<>(
+      crimson::ct_error::erange::make());
   }
-  return device->write(
+  co_return co_await device->write(
     addr,
     bptr);
 }
@@ -114,17 +149,14 @@ BlockRBManager::read_ertr::future<> BlockRBManager::read(
   paddr_t paddr,
   bufferptr &bptr)
 {
-  LOG_PREFIX(BlockRBManager::read);
   ceph_assert(device);
+  ceph_assert(bptr.is_page_aligned());
   rbm_abs_addr addr = convert_paddr_to_abs_addr(paddr);
-  rbm_abs_addr start = 0;
-  rbm_abs_addr end = device->get_available_size();
-  if (addr < start || addr + bptr.length() > end) {
-    ERROR("out of range: start {}, end {}, addr {}, length {}",
-      start, end, addr, bptr.length());
-    return crimson::ct_error::erange::make();
+  if (!check_valid_range(addr, bptr)) {
+    co_return co_await read_ertr::future<>(
+      crimson::ct_error::erange::make());
   }
-  return device->read(
+  co_return co_await device->read(
     addr,
     bptr);
 }
@@ -133,7 +165,7 @@ BlockRBManager::close_ertr::future<> BlockRBManager::close()
 {
   ceph_assert(device);
   allocator->close();
-  return device->close();
+  co_return co_await device->close();
 }
 
 BlockRBManager::write_ertr::future<> BlockRBManager::write(
@@ -151,20 +183,28 @@ BlockRBManager::write_ertr::future<> BlockRBManager::write(
     DEBUG("write: exception creating aligned buffer {}", e);
     ceph_assert(0 == "unhandled exception");
   }
-  return device->write(
+  co_return co_await device->write(
     addr,
-    bptr);
+    std::move(bptr));
 }
 
-std::ostream &operator<<(std::ostream &out, const rbm_metadata_header_t &header)
+#ifdef UNIT_TESTS_BUILT
+void BlockRBManager::prefill_fragmented_device()
 {
-  out << " rbm_metadata_header_t(size=" << header.size
-       << ", block_size=" << header.block_size
-       << ", feature=" << header.feature
-       << ", journal_size=" << header.journal_size
-       << ", crc=" << header.crc
-       << ", config=" << header.config;
-  return out << ")";
+  LOG_PREFIX(BlockRBManager::prefill_fragmented_device);
+  // the first 3 blocks must be allocated to lba root
+  // and backref root during mkfs
+  for (size_t block = get_block_size() * 3;
+      block <= get_size() - get_block_size() * 3;
+      block += get_block_size() * 2) {
+    DEBUG("marking {}~{} used",
+      get_start_rbm_addr() + block,
+      get_block_size());
+    allocator->mark_extent_used(
+      get_start_rbm_addr() + block,
+      get_block_size());
+  }
 }
+#endif
 
 }

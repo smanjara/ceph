@@ -59,8 +59,12 @@ describe('RbdService', () => {
     /* tslint:disable:no-empty */
     const context = new CdTableFetchDataContext(() => {});
     service.list(context.toParams()).subscribe();
-    const req = httpTesting.expectOne('api/block/image?offset=0&limit=10&search=&sort=+name');
+    const req = httpTesting.expectOne((req) => {
+      return req.url === 'api/block/image' && req.method === 'GET';
+    });
     expect(req.request.method).toBe('GET');
+    expect(req.request.params.get('limit')).toBe('10');
+    expect(req.request.params.get('sort')).toBe('+name');
   });
 
   it('should call copy', () => {
@@ -90,10 +94,13 @@ describe('RbdService', () => {
   });
 
   it('should call createSnapshot', () => {
-    service.createSnapshot(new ImageSpec('poolName', null, 'rbdName'), 'snapshotName').subscribe();
+    service
+      .createSnapshot(new ImageSpec('poolName', null, 'rbdName'), 'snapshotName', false)
+      .subscribe();
     const req = httpTesting.expectOne('api/block/image/poolName%2FrbdName/snap');
     expect(req.request.body).toEqual({
-      snapshot_name: 'snapshotName'
+      snapshot_name: 'snapshotName',
+      mirrorImageSnapshot: false
     });
     expect(req.request.method).toBe('POST');
   });

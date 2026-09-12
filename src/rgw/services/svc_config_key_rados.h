@@ -1,7 +1,5 @@
-
-
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -20,11 +18,9 @@
 
 #include <atomic>
 
-#include "rgw_service.h"
+#include "driver/rados/rgw_service.h"
 
 #include "svc_config_key.h"
-
-class RGWSI_RADOS;
 
 class RGWSI_ConfigKey_RADOS : public RGWSI_ConfigKey
 {
@@ -36,12 +32,10 @@ class RGWSI_ConfigKey_RADOS : public RGWSI_ConfigKey
   void warn_if_insecure();
 
 public:
-  struct Svc {
-    RGWSI_RADOS *rados{nullptr};
-  } svc;
+  librados::Rados* rados{nullptr};
 
-  void init(RGWSI_RADOS *rados_svc) {
-    svc.rados = rados_svc;
+  void init(librados::Rados* rados_) {
+    rados = rados_;
   }
 
   RGWSI_ConfigKey_RADOS(CephContext *cct) : RGWSI_ConfigKey(cct) {}
@@ -50,5 +44,3 @@ public:
 
   int get(const std::string& key, bool secure, bufferlist *result) override;
 };
-
-

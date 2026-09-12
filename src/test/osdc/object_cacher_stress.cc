@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <cstdlib>
 #include <ctime>
@@ -11,6 +11,7 @@
 #include "common/ceph_argparse.h"
 #include "common/ceph_mutex.h"
 #include "common/common_init.h"
+#include "common/Cond.h"
 #include "common/config.h"
 #include "common/snap_types.h"
 #include "global/global_init.h"
@@ -23,6 +24,7 @@
 #include "MemWriteback.h"
 
 #include <atomic>
+#include <iostream> // for std::cout
 
 using namespace std;
 
@@ -115,7 +117,7 @@ int stress_test(uint64_t num_ops, uint64_t num_objs,
 	ceph_assert(r == 0);
     } else {
       ObjectCacher::OSDWrite *wr = obc.prepare_write(snapc, bl,
-						     ceph::real_time::min(), 0,
+						     ceph::real_clock::zero(), 0,
 						     ++journal_tid);
       wr->extents.push_back(op->extent);
       lock.lock();
@@ -203,7 +205,7 @@ int correctness_test(uint64_t delay_ns)
   std::map<int, C_SaferCond> create_finishers;
   for (int i = 0; i < 4; ++i) {
     ObjectCacher::OSDWrite *wr = obc.prepare_write(snapc, zeroes_bl,
-						   ceph::real_time::min(), 0,
+						   ceph::real_clock::zero(), 0,
 						   ++journal_tid);
     ObjectExtent extent(oid, 0, zeroes_bl.length()*i, zeroes_bl.length(), 0);
     extent.oloc.pool = 0;
@@ -222,7 +224,7 @@ int correctness_test(uint64_t delay_ns)
   ones_bl.append(ones);
   for (int i = 1<<18; i < 1<<22; i+=1<<18) {
     ObjectCacher::OSDWrite *wr = obc.prepare_write(snapc, ones_bl,
-						   ceph::real_time::min(), 0,
+						   ceph::real_clock::zero(), 0,
 						   ++journal_tid);
     ObjectExtent extent(oid, 0, i, ones_bl.length(), 0);
     extent.oloc.pool = 0;
@@ -289,7 +291,7 @@ int correctness_test(uint64_t delay_ns)
   std::cout << "Data (correctly) not available without fetching" << std::endl;
 
   ObjectCacher::OSDWrite *verify_wr = obc.prepare_write(snapc, ones_bl,
-							ceph::real_time::min(), 0,
+							ceph::real_clock::zero(), 0,
 							++journal_tid);
   ObjectExtent verify_extent(oid, 0, (1<<18)+(1<<16), ones_bl.length(), 0);
   verify_extent.oloc.pool = 0;

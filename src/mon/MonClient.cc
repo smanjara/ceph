@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,6 +16,8 @@
 #include <algorithm>
 #include <iterator>
 #include <random>
+
+#include <boost/asio/post.hpp>
 #include <boost/range/adaptor/map.hpp>
 #include <boost/range/adaptor/filtered.hpp>
 #include <boost/range/algorithm/copy.hpp>
@@ -49,6 +52,7 @@
 #include "MonClient.h"
 #include "error_code.h"
 #include "MonMap.h"
+#include "mon_types.h" // for ceph::features::mon::*
 
 #include "auth/Auth.h"
 #include "auth/KeyRing.h"
@@ -57,9 +61,22 @@
 #include "auth/RotatingKeyRing.h"
 
 #define dout_subsys ceph_subsys_monc
+
+/* Used by both MonClient and MonConnection. */
+static int handle_auth_failure(CephContext* cct)
+{
+  int ecode = cct->_conf.get_val<int64_t>("auth_exit_on_failure");
+  if (ecode >= 0) {
+    lderr(cct) << __func__ << " exiting with " << ecode << " due to auth failure" << dendl;
+    _exit(ecode);
+  }
+  return -EACCES;
+}
+
 #undef dout_prefix
 #define dout_prefix *_dout << "monclient" << (_hunting() ? "(hunting)":"") << ": "
 
+namespace asio = boost::asio;
 namespace bs = boost::system;
 using std::string;
 using namespace std::literals;
@@ -129,7 +146,7 @@ int MonClient::get_monmap_and_config()
   messenger = Messenger::create_client_messenger(
     cct, "temp_mon_client");
   ceph_assert(messenger);
-  messenger->add_dispatcher_head(this);
+  messenger->add_dispatcher_head(this, Dispatcher::PRIORITY_HIGH);
   messenger->start();
   auto shutdown_msgr = make_scope_guard([this] {
     messenger->shutdown();
@@ -154,11 +171,8 @@ int MonClient::get_monmap_and_config()
     if (r < 0) {
       return r;
     }
-    r = authenticate(std::chrono::duration<double>(cct->_conf.get_val<std::chrono::seconds>("client_mount_timeout")).count());
-    if (r == -ETIMEDOUT) {
-      shutdown();
-      continue;
-    }
+    r = authenticate(
+      cct->_conf.get_val<std::chrono::seconds>("client_mount_timeout").count());
     if (r < 0) {
       break;
     }
@@ -258,7 +272,12 @@ int MonClient::ping_monitor(const string &mon_id, string *result_reply)
   auth_registry.refresh_config();
 
   KeyRing keyring;
-  keyring.from_ceph_context(cct);
+  CachedStackStringStream css;
+  int keyload = keyring.from_ceph_context(cct, css.get());
+  if (keyload < 0) {
+    ldout(cct, 10) << "could not load key: " << css->strv() << dendl;
+    return keyload;
+  }
   RotatingKeyRing rkeyring(cct, cct->get_module_type(), &keyring);
 
   MonClientPinger *pinger = new MonClientPinger(cct,
@@ -266,7 +285,7 @@ int MonClient::ping_monitor(const string &mon_id, string *result_reply)
 						result_reply);
 
   Messenger *smsgr = Messenger::create_client_messenger(cct, "temp_ping_client");
-  smsgr->add_dispatcher_head(pinger);
+  smsgr->add_dispatcher_head(pinger, Dispatcher::PRIORITY_HIGH);
   smsgr->set_auth_client(pinger);
   smsgr->start();
 
@@ -274,7 +293,7 @@ int MonClient::ping_monitor(const string &mon_id, string *result_reply)
   ldout(cct, 10) << __func__ << " ping mon." << new_mon_id
                  << " " << con->get_peer_addr() << dendl;
 
-  pinger->mc.reset(new MonConnection(cct, con, 0, &auth_registry));
+  pinger->mc.reset(new MonConnection(cct, con, 0, &auth_registry, monc_lock));
   pinger->mc->start(monmap.get_epoch(), entity_name);
   con->send_message(new MPing);
 
@@ -296,6 +315,7 @@ int MonClient::ping_monitor(const string &mon_id, string *result_reply)
 
 bool MonClient::ms_dispatch(Message *m)
 {
+  ldout(cct, 25) << __func__ << " processing " << m << dendl;
   // we only care about these message types
   switch (m->get_type()) {
   case CEPH_MSG_MON_MAP:
@@ -315,6 +335,12 @@ bool MonClient::ms_dispatch(Message *m)
   }
 
   std::lock_guard lock(monc_lock);
+
+  if (stopping) {
+    ldout(cct, 5) << " dropping because stopping: " << *m << dendl;
+    m->put();
+    return true;
+  }
 
   if (!m->get_connection()->is_anon() &&
       m->get_source().type() == CEPH_ENTITY_TYPE_MON) {
@@ -408,6 +434,7 @@ void MonClient::handle_monmap(MMonMap *m)
   auto con_addrs = m->get_source_addrs();
   string old_name = monmap.get_name(con_addrs);
   const auto old_epoch = monmap.get_epoch();
+  const auto old_auth_epoch = monmap.auth_epoch;
 
   auto p = m->monmapbl.cbegin();
   decode(monmap, p);
@@ -444,6 +471,11 @@ void MonClient::handle_monmap(MMonMap *m)
   }
 
   cct->set_mon_addrs(monmap);
+
+  if (old_auth_epoch < monmap.auth_epoch) {
+    ldout(cct, 1) << "auth epoch has changed: invalidating tickets and rotating secrets" << dendl;
+    _wipe_secrets_and_tickets();
+  }
 
   sub.got("monmap", monmap.get_epoch());
   map_cond.notify_all();
@@ -486,23 +518,33 @@ int MonClient::init()
 {
   ldout(cct, 10) << __func__ << dendl;
 
+  std::lock_guard l(monc_lock);
+  stopping = false;
+
   entity_name = cct->_conf->name;
 
   auth_registry.refresh_config();
 
-  std::lock_guard l(monc_lock);
   keyring.reset(new KeyRing);
+  CachedStackStringStream css;
+  int keyload = keyring->from_ceph_context(cct, css.get());
   if (auth_registry.is_supported_method(messenger->get_mytype(),
 					CEPH_AUTH_CEPHX)) {
     // this should succeed, because auth_registry just checked!
-    int r = keyring->from_ceph_context(cct);
-    if (r != 0) {
+    if (keyload < 0) {
       // but be somewhat graceful in case there was a race condition
-      lderr(cct) << "keyring not found" << dendl;
-      return r;
+      lderr(cct) << css->strv() << dendl;
+      return keyload;
     }
+  } else if (keyload < 0) {
+    ldout(cct, 5) << "Key loading failed with: " << css->strv() << dendl;
   }
   if (!auth_registry.any_supported_methods(messenger->get_mytype())) {
+    lderr(cct) << "No supported authentication method found! Is the keyring missing?" << dendl;
+    if (keyload < 0) {
+      lderr(cct) << "Key loading failed with: " << css->strv() << dendl;
+    }
+    lderr(cct) << "Try debugging using arguments: --debug_monc=20 --debug_auth=5" << dendl;
     return -ENOENT;
   }
 
@@ -512,7 +554,7 @@ int MonClient::init()
   initialized = true;
 
   messenger->set_auth_client(this);
-  messenger->add_dispatcher_head(this);
+  messenger->add_dispatcher_head(this, Dispatcher::PRIORITY_HIGH);
 
   timer.init();
   schedule_tick();
@@ -521,6 +563,10 @@ int MonClient::init()
     "rotate-key",
     this,
     "rotate live authentication key");
+  cct->get_admin_socket()->register_command(
+    "wipe-rotating-secrets",
+    this,
+    "wipe rotating secrets");
 
   return 0;
 }
@@ -534,10 +580,11 @@ void MonClient::shutdown()
   monc_lock.lock();
   stopping = true;
   while (!version_requests.empty()) {
-    ceph::async::post(std::move(version_requests.begin()->second),
-		      monc_errc::shutting_down, 0, 0);
     ldout(cct, 20) << __func__ << " canceling and discarding version request "
 		   << version_requests.begin()->first << dendl;
+    asio::post(service.get_executor(),
+               asio::append(std::move(version_requests.begin()->second),
+                            make_error_code(monc_errc::shutting_down), 0, 0));
     version_requests.erase(version_requests.begin());
   }
   while (!mon_commands.empty()) {
@@ -563,7 +610,6 @@ void MonClient::shutdown()
   }
   monc_lock.lock();
   timer.shutdown();
-  stopping = false;
   monc_lock.unlock();
 }
 
@@ -611,6 +657,15 @@ int MonClient::authenticate(double timeout)
   return authenticate_err;
 }
 
+void MonClient::_wipe_secrets_and_tickets()
+{
+  ceph_assert(ceph_mutex_is_locked_by_me(monc_lock));
+  ldout(cct, 5) << " wiping rotating secrets and invalidating tickets" << dendl;
+  rotating_secrets->wipe();
+  auth->invalidate_all_tickets();
+  _check_auth_tickets();
+}
+
 int MonClient::call(
     std::string_view command,
     const cmdmap_t& cmdmap,
@@ -634,6 +689,10 @@ int MonClient::call(
       errss << "cephx not enabled; no key to rotate";
       return -EINVAL;
     }
+  } else if (command == "wipe-rotating-secrets") {
+    ldout(cct, 1) << __func__ << ": " << command << dendl;
+    std::lock_guard l{monc_lock};
+    _wipe_secrets_and_tickets();
   }
   return 0;
 }
@@ -709,6 +768,13 @@ void MonClient::_finish_auth(int auth_err)
   if (!auth_err && active_con) {
     ceph_assert(auth);
     _check_auth_tickets();
+  } else if (auth_err == -EAGAIN && !active_con) {
+    ldout(cct,10) << __func__
+                  << " auth returned EAGAIN, reopening the session to try again"
+                  << dendl;
+    _reopen_session();
+  } else {
+    [[maybe_unused]] int rc = handle_auth_failure(cct);
   }
   auth_cond.notify_all();
 }
@@ -747,6 +813,10 @@ void MonClient::_reopen_session(int rank)
 
   _start_hunting();
 
+  if (rank == -1) {
+    rank = cct->_conf.get_val<int64_t>("mon_client_target_rank");
+  }
+
   if (rank >= 0) {
     _add_conn(rank);
   } else {
@@ -758,8 +828,11 @@ void MonClient::_reopen_session(int rank)
 
   // throw out version check requests
   while (!version_requests.empty()) {
-    ceph::async::post(std::move(version_requests.begin()->second),
-		      monc_errc::session_reset, 0, 0);
+    ldout(cct, 20) << __func__ << " canceling and discarding version request "
+		   << version_requests.begin()->first << dendl;
+    asio::post(service.get_executor(),
+               asio::append(std::move(version_requests.begin()->second),
+                            make_error_code(monc_errc::session_reset), 0, 0));
     version_requests.erase(version_requests.begin());
   }
 
@@ -774,9 +847,10 @@ void MonClient::_reopen_session(int rank)
 
 void MonClient::_add_conn(unsigned rank)
 {
+  ceph_assert(ceph_mutex_is_locked_by_me(monc_lock));
   auto peer = monmap.get_addrs(rank);
   auto conn = messenger->connect_to_mon(peer);
-  MonConnection mc(cct, conn, global_id, &auth_registry);
+  MonConnection mc(cct, conn, global_id, &auth_registry, monc_lock);
   if (auth) {
     mc.get_auth().reset(auth->clone());
   }
@@ -954,6 +1028,11 @@ void MonClient::tick()
 {
   ldout(cct, 10) << __func__ << dendl;
 
+  if (stopping) {
+    ldout(cct, 1) << "skipping tick on shutdown" << dendl;
+    return;
+  }
+
   utime_t now = ceph_clock_now();
 
   auto reschedule_tick = make_scope_guard([this] {
@@ -1091,11 +1170,13 @@ int MonClient::_check_auth_rotating()
     return 0;
   }
 
+  double auth_service_ticket_ttl = cct->_conf.get_val<double>("auth_service_ticket_ttl");
+
   utime_t now = ceph_clock_now();
   utime_t cutoff = now;
-  cutoff -= std::min(30.0, cct->_conf->auth_service_ticket_ttl / 4.0);
+  cutoff -= std::min(30.0, auth_service_ticket_ttl / 4.0);
   utime_t issued_at_lower_bound = now;
-  issued_at_lower_bound -= cct->_conf->auth_service_ticket_ttl;
+  issued_at_lower_bound -= auth_service_ticket_ttl;
   if (!rotating_secrets->need_new_secrets(cutoff)) {
     ldout(cct, 10) << "_check_auth_rotating have uptodate secrets (they expire after " << cutoff << ")" << dendl;
     rotating_secrets->dump_rotating();
@@ -1137,9 +1218,11 @@ int MonClient::wait_auth_rotating(double timeout)
   if (!rotating_secrets)
     return 0;
 
+  double auth_service_ticket_ttl = cct->_conf.get_val<double>("auth_service_ticket_ttl");
+
   ldout(cct, 10) << __func__ << " waiting for " << timeout << dendl;
   utime_t cutoff = ceph_clock_now();
-  cutoff -= std::min(30.0, cct->_conf->auth_service_ticket_ttl / 4.0);
+  cutoff -= std::min(30.0, auth_service_ticket_ttl / 4.0);
   if (auth_cond.wait_for(l, ceph::make_timespan(timeout), [this, cutoff] {
     return (!auth_principal_needs_rotating_keys(entity_name) ||
 	    !rotating_secrets->need_new_secrets(cutoff));
@@ -1154,12 +1237,31 @@ int MonClient::wait_auth_rotating(double timeout)
 
 // ---------
 
+MonClient::MonCommand::MonCommand(MonClient& monc, uint64_t t, CommandCompletion&& onfinish)
+  : tid(t), onfinish(std::move(onfinish)) {
+  auto timeout =
+      monc.cct->_conf.get_val<std::chrono::seconds>("rados_mon_op_timeout");
+  if (timeout.count() > 0) {
+    cancel_timer.emplace(monc.service, timeout);
+    cancel_timer->async_wait(
+      [this, &monc](boost::system::error_code ec) {
+        if (ec)
+          return;
+        std::scoped_lock l(monc.monc_lock);
+        monc._cancel_mon_command(tid);
+      });
+  }
+}
+
+MonClient::MonCommand::~MonCommand() = default;
+
 void MonClient::_send_command(MonCommand *r)
 {
   if (r->is_tell()) {
     ++r->send_attempts;
     if (r->send_attempts > cct->_conf->mon_client_directed_command_retry) {
-      _finish_command(r, monc_errc::mon_unavailable, "mon unavailable", {});
+      _finish_command(r, make_error_code(monc_errc::mon_unavailable),
+		      "mon unavailable", {});
       return;
     }
     // tell-style command
@@ -1171,7 +1273,8 @@ void MonClient::_send_command(MonCommand *r)
 	if (r->target_rank >= (int)monmap.size()) {
 	  ldout(cct, 10) << " target " << r->target_rank
 			 << " >= max mon " << monmap.size() << dendl;
-	  _finish_command(r, monc_errc::rank_dne, "mon rank dne"sv, {});
+	  _finish_command(r, make_error_code(monc_errc::rank_dne),
+			  "mon rank dne"sv, {});
 	  return;
 	}
 	r->target_con = messenger->connect_to_mon(
@@ -1180,7 +1283,8 @@ void MonClient::_send_command(MonCommand *r)
 	if (!monmap.contains(r->target_name)) {
 	  ldout(cct, 10) << " target " << r->target_name
 			 << " not present in monmap" << dendl;
-	  _finish_command(r, monc_errc::mon_dne, "mon dne"sv, {});
+	  _finish_command(r, make_error_code(monc_errc::mon_dne),
+			  "mon dne"sv, {});
 	  return;
 	}
 	r->target_con = messenger->connect_to_mon(
@@ -1188,7 +1292,7 @@ void MonClient::_send_command(MonCommand *r)
       }
 
       r->target_session.reset(new MonConnection(cct, r->target_con, 0,
-						&auth_registry));
+						&auth_registry, monc_lock));
       r->target_session->start(monmap.get_epoch(), entity_name);
       r->last_send_attempt = ceph_clock_now();
 
@@ -1215,7 +1319,8 @@ void MonClient::_send_command(MonCommand *r)
       if (r->target_rank >= (int)monmap.size()) {
 	ldout(cct, 10) << " target " << r->target_rank
 		       << " >= max mon " << monmap.size() << dendl;
-	_finish_command(r, monc_errc::rank_dne, "mon rank dne"sv, {});
+	_finish_command(r, make_error_code(monc_errc::rank_dne),
+			"mon rank dne"sv, {});
 	return;
       }
       _reopen_session(r->target_rank);
@@ -1230,7 +1335,8 @@ void MonClient::_send_command(MonCommand *r)
       if (!monmap.contains(r->target_name)) {
 	ldout(cct, 10) << " target " << r->target_name
 		       << " not present in monmap" << dendl;
-	_finish_command(r, monc_errc::mon_dne, "mon dne"sv, {});
+	_finish_command(r, make_error_code(monc_errc::mon_dne),
+			"mon dne"sv, {});
 	return;
       }
       _reopen_session(monmap.get_rank(r->target_name));
@@ -1240,6 +1346,7 @@ void MonClient::_send_command(MonCommand *r)
   }
 
   // normal CLI command
+  r->sent_name = active_con ? monmap.get_name(active_con->get_con()->get_peer_addr()) : "";
   ldout(cct, 10) << __func__ << " " << r->tid << " " << r->cmd << dendl;
   auto m = ceph::make_message<MMonCommand>(monmap.fsid);
   m->set_tid(r->tid);
@@ -1277,6 +1384,25 @@ void MonClient::_resend_mon_commands()
       // starting with octopus, tell commands use their own connetion and need no
       // special resend when we finish hunting.
     } else {
+      if (!cct->_conf->mon_client_hunt_on_resend) {
+        // Ensure the target name of the resend mon command matches the rank
+        // of the current active connection.
+        ldout(cct, 20) << __func__ << " " << cmd->tid << " " << cmd->cmd
+                       << " last sent_name " << cmd->sent_name << dendl;
+        if (!monmap.contains(cmd->sent_name)) {
+          ldout(cct, 20) << __func__ << " " << cmd->tid << " " << cmd->cmd
+                        << " sent_name " << cmd->sent_name << " not in monmap using mon:" <<
+                        monmap.get_name(active_con->get_con()->get_peer_addr()) << dendl;
+        } else if (active_con && cmd->sent_name.length() &&
+                   cmd->sent_name != monmap.get_name(active_con->get_con()->get_peer_addr()) &&
+                   monmap.contains(cmd->sent_name)) {
+          ldout(cct, 20) << __func__ << " " << cmd->tid << " " << cmd->cmd
+                         << " wants mon " << cmd->sent_name
+                         << " current connection is " << monmap.get_name(active_con->get_con()->get_peer_addr())
+                         << ", reopening session" << dendl;
+          _reopen_session(monmap.get_rank(cmd->sent_name));
+        }
+      }
       _send_command(cmd); // might remove cmd from mon_commands
     }
   }
@@ -1335,6 +1461,57 @@ void MonClient::handle_command_reply(MCommandReply *reply)
   reply->put();
 }
 
+class MonClient::ContextVerter {
+  std::string* outs;
+  ceph::bufferlist* outbl;
+  Context* onfinish;
+
+public:
+  ContextVerter(std::string* outs, ceph::bufferlist* outbl, Context* onfinish)
+    : outs(outs), outbl(outbl), onfinish(onfinish) {}
+  ~ContextVerter() = default;
+  ContextVerter(const ContextVerter&) = default;
+  ContextVerter& operator =(const ContextVerter&) = default;
+  ContextVerter(ContextVerter&&) = default;
+  ContextVerter& operator =(ContextVerter&&) = default;
+
+  void operator()(boost::system::error_code e,
+		  std::string s,
+		  ceph::bufferlist bl) {
+    if (outs)
+      *outs = std::move(s);
+    if (outbl)
+      *outbl = std::move(bl);
+    if (onfinish)
+      onfinish->complete(ceph::from_error_code(e));
+  }
+};
+
+void MonClient::start_mon_command(std::vector<std::string>&& cmd, bufferlist&& inbl,
+				  bufferlist *outbl, std::string *outs,
+				  Context *onfinish)
+{
+  start_mon_command(std::move(cmd), std::move(inbl),
+		    ContextVerter(outs, outbl, onfinish));
+}
+
+void MonClient::start_mon_command(int mon_rank, std::vector<std::string>&& cmd,
+				  bufferlist&& inbl, bufferlist *outbl, std::string *outs,
+				  Context *onfinish)
+{
+  start_mon_command(mon_rank, std::move(cmd), std::move(inbl),
+		    ContextVerter(outs, outbl, onfinish));
+}
+
+void MonClient::start_mon_command(std::string&& mon_name,  ///< mon name, with mon. prefix
+				  std::vector<std::string>&& cmd, bufferlist&& inbl,
+				  bufferlist *outbl, std::string *outs,
+				  Context *onfinish)
+{
+  start_mon_command(std::move(mon_name), std::move(cmd), std::move(inbl),
+		    ContextVerter(outs, outbl, onfinish));
+}
+
 int MonClient::_cancel_mon_command(uint64_t tid)
 {
   ceph_assert(ceph_mutex_is_locked(monc_lock));
@@ -1348,7 +1525,8 @@ int MonClient::_cancel_mon_command(uint64_t tid)
   ldout(cct, 10) << __func__ << " tid " << tid << dendl;
 
   MonCommand *cmd = it->second;
-  _finish_command(cmd, monc_errc::timed_out, "timed out"sv, {});
+  _finish_command(cmd, make_error_code(monc_errc::timed_out),
+		  "timed out"sv, {});
   return 0;
 }
 
@@ -1357,8 +1535,9 @@ void MonClient::_finish_command(MonCommand *r, bs::error_code ret,
 {
   ldout(cct, 10) << __func__ << " " << r->tid << " = " << ret << " " << rs
 		 << dendl;
-  ceph::async::post(std::move(r->onfinish), ret, std::string(rs),
-		    std::move(bl));
+  asio::post(service.get_executor(),
+	     asio::append(std::move(r->onfinish), ret, std::string(rs),
+			  std::move(bl)));
   if (r->target_con) {
     r->target_con->mark_down();
   }
@@ -1380,8 +1559,9 @@ void MonClient::handle_get_version_reply(MMonGetVersionReply* m)
     ldout(cct, 10) << __func__ << " finishing " << iter->first << " version "
 		   << m->version << dendl;
     version_requests.erase(iter);
-    ceph::async::post(std::move(req), bs::error_code(),
-		      m->version, m->oldest_version);
+    asio::post(service.get_executor(),
+	       asio::append(std::move(req), bs::error_code(),
+			    m->version, m->oldest_version));
   }
   m->put();
 }
@@ -1396,6 +1576,11 @@ int MonClient::get_auth_request(
   std::lock_guard l(monc_lock);
   ldout(cct,10) << __func__ << " con " << con << " auth_method " << *auth_method
 		<< dendl;
+
+  if (stopping) {
+    ldout(cct, 5) << __func__ << " dropping because stopping" << dendl;
+    return -ECANCELED;
+  }
 
   // connection to mon?
   if (con->get_peer_type() == CEPH_ENTITY_TYPE_MON) {
@@ -1446,6 +1631,11 @@ int MonClient::handle_auth_reply_more(
 {
   std::lock_guard l(monc_lock);
 
+  if (stopping) {
+    ldout(cct, 5) << __func__ << " dropping because stopping" << dendl;
+    return -ECANCELED;
+  }
+
   if (con->get_peer_type() == CEPH_ENTITY_TYPE_MON) {
     if (con->is_anon()) {
       for (auto& i : mon_commands) {
@@ -1482,8 +1672,14 @@ int MonClient::handle_auth_done(
   CryptoKey *session_key,
   std::string *connection_secret)
 {
+  std::lock_guard l(monc_lock);
+
+  if (stopping) {
+    ldout(cct, 5) << __func__ << " dropping because stopping" << dendl;
+    return -ECANCELED;
+  }
+
   if (con->get_peer_type() == CEPH_ENTITY_TYPE_MON) {
-    std::lock_guard l(monc_lock);
     if (con->is_anon()) {
       for (auto& i : mon_commands) {
 	if (i.second->target_con == con) {
@@ -1538,9 +1734,15 @@ int MonClient::handle_auth_bad_method(
   const std::vector<uint32_t>& allowed_methods,
   const std::vector<uint32_t>& allowed_modes)
 {
+  std::lock_guard l(monc_lock);
+
+  if (stopping) {
+    ldout(cct, 5) << __func__ << " dropping because stopping" << dendl;
+    return -ECANCELED;
+  }
+
   auth_meta->allowed_methods = allowed_methods;
 
-  std::lock_guard l(monc_lock);
   if (con->get_peer_type() == CEPH_ENTITY_TYPE_MON) {
     if (con->is_anon()) {
       for (auto& i : mon_commands) {
@@ -1584,7 +1786,7 @@ int MonClient::handle_auth_bad_method(
 		  << " result " << cpp_strerror(result)
 		  << " and auth is " << (auth ? auth->get_protocol() : 0)
 		  << dendl;
-    return -EACCES;
+    return handle_auth_failure(cct);
   }
 }
 
@@ -1596,19 +1798,27 @@ int MonClient::handle_auth_request(
   const ceph::buffer::list& payload,
   ceph::buffer::list *reply)
 {
+  std::lock_guard l(monc_lock);
+
+  if (stopping) {
+    ldout(cct, 5) << __func__ << " dropping because stopping" << dendl;
+    return -ECANCELED;
+  }
+
   if (payload.length() == 0) {
     // for some channels prior to nautilus (osd heartbeat), we
     // tolerate the lack of an authorizer.
     if (!con->get_messenger()->require_authorizer) {
-      handle_authentication_dispatcher->ms_handle_authentication(con);
-      return 1;
+      if (handle_authentication_dispatcher->ms_handle_fast_authentication(con)) {
+        return 1;
+      }
     }
-    return -EACCES;
+    return handle_auth_failure(cct);
   }
   auth_meta->auth_mode = payload[0];
   if (auth_meta->auth_mode < AUTH_MODE_AUTHORIZER ||
       auth_meta->auth_mode > AUTH_MODE_AUTHORIZER_MAX) {
-    return -EACCES;
+    return handle_auth_failure(cct);
   }
   AuthAuthorizeHandler *ah = get_auth_authorize_handler(con->get_peer_type(),
 							auth_method);
@@ -1638,8 +1848,10 @@ int MonClient::handle_auth_request(
     &auth_meta->connection_secret,
     ac);
   if (isvalid) {
-    handle_authentication_dispatcher->ms_handle_authentication(con);
-    return 1;
+    if (handle_authentication_dispatcher->ms_handle_fast_authentication(con)) {
+      return 1;
+    }
+    return handle_auth_failure(cct);
   }
   if (!more && !was_challenge && auth_meta->authorizer_challenge) {
     ldout(cct,10) << __func__ << " added challenge on " << con << dendl;
@@ -1648,7 +1860,7 @@ int MonClient::handle_auth_request(
   ldout(cct,10) << __func__ << " bad authorizer on " << con << dendl;
   // discard old challenge
   auth_meta->authorizer_challenge.reset();
-  return -EACCES;
+  return handle_auth_failure(cct);
 }
 
 AuthAuthorizer* MonClient::build_authorizer(int service_id) const {
@@ -1668,8 +1880,8 @@ AuthAuthorizer* MonClient::build_authorizer(int service_id) const {
 
 MonConnection::MonConnection(
   CephContext *cct, ConnectionRef con, uint64_t global_id,
-  AuthRegistry *ar)
-  : cct(cct), con(con), global_id(global_id), auth_registry(ar)
+  AuthRegistry *ar, ceph::mutex& m)
+  : cct(cct), con(con), global_id(global_id), auth_registry(ar), monc_lock(m)
 {}
 
 MonConnection::~MonConnection()
@@ -1727,13 +1939,14 @@ int MonConnection::get_auth_request(
   uint32_t want_keys,
   RotatingKeyRing* keyring)
 {
+  ceph_assert(ceph_mutex_is_locked_by_me(monc_lock));
   using ceph::encode;
   // choose method
   if (auth_method < 0) {
     std::vector<uint32_t> as;
     auth_registry->get_supported_methods(con->get_peer_type(), &as);
     if (as.empty()) {
-      return -EACCES;
+      return handle_auth_failure(cct);
     }
     auth_method = as.front();
   }
@@ -1743,7 +1956,7 @@ int MonConnection::get_auth_request(
   ldout(cct,10) << __func__ << " method " << *method
 		<< " preferred_modes " << *preferred_modes << dendl;
   if (preferred_modes->empty()) {
-    return -EACCES;
+    return handle_auth_failure(cct);
   }
 
   int r = _init_auth(*method, entity_name, want_keys, keyring, true);
@@ -1765,6 +1978,7 @@ int MonConnection::handle_auth_reply_more(
   const ceph::buffer::list& bl,
   ceph::buffer::list *reply)
 {
+  ceph_assert(ceph_mutex_is_locked_by_me(monc_lock));
   ldout(cct, 10) << __func__ << " payload " << bl.length() << dendl;
   ldout(cct, 30) << __func__ << " got\n";
   bl.hexdump(*_dout);
@@ -1797,6 +2011,7 @@ int MonConnection::handle_auth_done(
   CryptoKey *session_key,
   std::string *connection_secret)
 {
+  ceph_assert(ceph_mutex_is_locked_by_me(monc_lock));
   ldout(cct,10) << __func__ << " global_id " << new_global_id
 		<< " payload " << bl.length()
 		<< dendl;
@@ -1822,6 +2037,7 @@ int MonConnection::handle_auth_bad_method(
   const std::vector<uint32_t>& allowed_methods,
   const std::vector<uint32_t>& allowed_modes)
 {
+  ceph_assert(ceph_mutex_is_locked_by_me(monc_lock));
   ldout(cct,10) << __func__ << " old_auth_method " << old_auth_method
 		<< " result " << cpp_strerror(result)
 		<< " allowed_methods " << allowed_methods << dendl;
@@ -1829,13 +2045,21 @@ int MonConnection::handle_auth_bad_method(
   auth_registry->get_supported_methods(con->get_peer_type(), &auth_supported);
   auto p = std::find(auth_supported.begin(), auth_supported.end(),
 		     old_auth_method);
-  assert(p != auth_supported.end());
+  ceph_assert(p != auth_supported.end());
   p = std::find_first_of(std::next(p), auth_supported.end(),
 			 allowed_methods.begin(), allowed_methods.end());
   if (p == auth_supported.end()) {
-    lderr(cct) << __func__ << " server allowed_methods " << allowed_methods
-	       << " but i only support " << auth_supported << dendl;
-    return -EACCES;
+    auto s_allowed_methods = std::set<uint32_t>(allowed_methods.begin(), allowed_methods.end());
+    auto s_auth_supported = std::set<uint32_t>(auth_supported.begin(), auth_supported.end());
+    bool is_subset = std::includes(s_allowed_methods.begin(), s_allowed_methods.end(),
+                                   s_auth_supported.begin(), s_auth_supported.end());
+    if (!is_subset) {
+      lderr(cct) << __func__ << " server allowed_methods " << allowed_methods
+	         << " and I support " << auth_supported << dendl;
+    } else {
+      lderr(cct) << __func__ << " failed to auth with my available methods: " << cpp_strerror(result) << dendl;
+    }
+    return handle_auth_failure(cct);
   }
   auth_method = *p;
   ldout(cct,10) << __func__ << " will try " << auth_method << " next" << dendl;
@@ -1847,6 +2071,7 @@ int MonConnection::handle_auth(MAuthReply* m,
 			       uint32_t want_keys,
 			       RotatingKeyRing* keyring)
 {
+  ceph_assert(ceph_mutex_is_locked_by_me(monc_lock));
   if (state == State::NEGOTIATING) {
     int r = _negotiate(m, entity_name, want_keys, keyring);
     if (r) {
@@ -1885,6 +2110,7 @@ int MonConnection::_init_auth(
   RotatingKeyRing* keyring,
   bool msgr2)
 {
+  ceph_assert(ceph_mutex_is_locked_by_me(monc_lock));
   ldout(cct, 10) << __func__ << " method " << method << dendl;
   if (auth && auth->get_protocol() == (int)method) {
     ldout(cct, 10) << __func__ << " already have auth, reseting" << dendl;
@@ -1919,6 +2145,7 @@ int MonConnection::_init_auth(
 
 int MonConnection::authenticate(MAuthReply *m)
 {
+  ceph_assert(ceph_mutex_is_locked_by_me(monc_lock));
   ceph_assert(auth);
   if (!m->global_id) {
     ldout(cct, 1) << "peer sent an invalid global_id" << dendl;

@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -ex
 
-. $(dirname $0)/../../standalone/ceph-helpers.sh
-
 export RBD_FORCE_ALLOW_V1=1
 
 # make sure rbd pool is EMPTY.. this is a test script!!
@@ -25,6 +23,35 @@ remove_images() {
         (rbd snap purge $img || true) >/dev/null 2>&1
         (rbd rm $img || true) >/dev/null 2>&1
     done
+}
+
+# Verifies that the provided schedule status JSON represents a properly
+# staggered schedule for the given interval.
+are_schedules_staggered() {
+    # $1: Status JSON output of a scheduler in the rbd_support mgr module
+    #     (e.g. `rbd trash purge schedule status --format json`)
+    local status_json=$1
+    # $2: Schedule interval in minutes
+    local interval_min=$2
+
+    local unique_times=()
+    mapfile -t unique_times < <(jq -r '.[].schedule_time' <<< "$status_json" | sort -u)
+
+    # Expect one unique time slot per interval minute (1-minute scheduler granularity).
+    # Allow one extra time slot in case status is observed during cycle rollover
+    (( ${#unique_times[@]} == interval_min ||
+       ${#unique_times[@]} == interval_min + 1 )) || return 1
+
+    # Check that consecutive schedule times are exactly 1 minute apart
+    local prev_epoch
+    prev_epoch=$(date -d "${unique_times[0]}" +%s)
+    for ((i=1; i<${#unique_times[@]}; i++)); do
+        local curr
+        curr=$(date -d "${unique_times[i]}" +%s)
+        [ $((curr - prev_epoch)) -eq 60 ] || return 1
+        prev_epoch=$curr
+    done
+    return 0
 }
 
 test_others() {
@@ -385,19 +412,35 @@ test_clone() {
     rbd clone test1@s1 rbd2/clone
     rbd -p rbd2 ls | grep clone
     rbd -p rbd2 ls -l | grep clone | grep test1@s1
-    rbd ls | grep -v clone
+    test "$(rbd ls)" = 'test1'
     rbd flatten rbd2/clone
     rbd snap create rbd2/clone@s1
     rbd snap protect rbd2/clone@s1
     rbd clone rbd2/clone@s1 clone2
     rbd ls | grep clone2
     rbd ls -l | grep clone2 | grep rbd2/clone@s1
-    rbd -p rbd2 ls | grep -v clone2
+    test "$(rbd -p rbd2 ls)" = 'clone'
+
+    rbd clone rbd2/clone clone3 |& grep 'snapshot name was not specified'
+    rbd clone rbd2/clone@invalid clone3 |& grep 'failed to open parent image'
+    rbd clone rbd2/clone --snap-id 0 clone3 |& grep 'failed to open parent image'
+    rbd clone rbd2/clone@invalid --snap-id 0 clone3 |&
+        grep 'trying to access snapshot using both name and id'
+    SNAP_ID=$(rbd snap ls rbd2/clone --format json |
+        jq '.[] | select(.name == "s1") | .id')
+    rbd clone --snap-id $SNAP_ID rbd2/clone clone3
+    rbd ls | grep clone3
+    rbd ls -l | grep clone3 | grep rbd2/clone@s1
+    test "$(rbd -p rbd2 ls)" = 'clone'
+    test "$(rbd ls -l | grep -c rbd2/clone@s1)" = '2'
+    rbd flatten clone3
+    test "$(rbd ls -l | grep -c rbd2/clone@s1)" = '1'
 
     rbd rm clone2
     rbd snap unprotect rbd2/clone@s1
     rbd snap rm rbd2/clone@s1
     rbd rm rbd2/clone
+    rbd rm clone3
     rbd snap unprotect test1@s1
     rbd snap rm test1@s1
     rbd rm test1
@@ -432,6 +475,7 @@ test_trash() {
     rbd trash mv test2
     ID=`rbd trash ls | cut -d ' ' -f 1`
     rbd info --image-id $ID | grep "rbd image 'test2'"
+    rbd children --image-id $ID | wc -l | grep 0
 
     rbd trash restore $ID
     rbd ls | grep test2
@@ -449,6 +493,7 @@ test_trash() {
     rbd create $RBD_CREATE_ARGS -s 1 test1
     rbd snap create test1@snap1
     rbd snap protect test1@snap1
+    rbd clone test1@snap1 clone
     rbd trash mv test1
 
     rbd trash ls | grep test1
@@ -459,7 +504,10 @@ test_trash() {
     ID=`rbd trash ls | cut -d ' ' -f 1`
     rbd snap ls --image-id $ID | grep -v 'SNAPID' | wc -l | grep 1
     rbd snap ls --image-id $ID | grep '.*snap1.*'
+    rbd children --image-id $ID | wc -l | grep 1
+    rbd children --image-id $ID | grep 'clone'
 
+    rbd rm clone
     rbd snap unprotect --image-id $ID --snap snap1
     rbd snap rm --image-id $ID --snap snap1
     rbd snap ls --image-id $ID | grep -v 'SNAPID' | wc -l | grep 0
@@ -747,7 +795,9 @@ test_clone_v2() {
     rbd snap create test1@1
     rbd clone --rbd-default-clone-format=1 test1@1 test2 && exit 1 || true
     rbd clone --rbd-default-clone-format=2 test1@1 test2
-    rbd clone --rbd-default-clone-format=2 test1@1 test3
+    SNAP_ID=$(rbd snap ls test1 --format json |
+        jq '.[] | select(.name == "1") | .id')
+    rbd clone --rbd-default-clone-format=2 --snap-id $SNAP_ID test1 test3
 
     rbd snap protect test1@1
     rbd clone --rbd-default-clone-format=1 test1@1 test4
@@ -759,7 +809,7 @@ test_clone_v2() {
     rbd snap unprotect test1@1
 
     rbd snap remove test1@1
-    rbd snap list --all test1 | grep -E "trash \(1\) *$"
+    rbd snap list --all test1 | grep -E "trash \(user 1\) *$"
 
     rbd snap create test1@2
     rbd rm test1 2>&1 | grep 'image has snapshots'
@@ -893,6 +943,11 @@ test_namespace() {
 
     rbd group create rbd/test1/group1
     rbd group image add rbd/test1/group1 rbd/test1/image1
+    rbd group image add --group-pool rbd --group-namespace test1 --group group1 \
+        --image-pool rbd --image-namespace test1 --image image2
+    rbd group image rm --group-pool rbd --group-namespace test1 --group group1 \
+        --image-pool rbd --image-namespace test1 --image image1
+    rbd group image rm rbd/test1/group1 rbd/test1/image2
     rbd group rm rbd/test1/group1
 
     rbd trash move rbd/test1/image1
@@ -912,7 +967,7 @@ get_migration_state() {
     local image=$1
 
     rbd --format xml status $image |
-        $XMLSTARLET sel -t -v '//status/migration/state'
+        xmlstarlet sel -t -v '//status/migration/state'
 }
 
 test_migration() {
@@ -987,17 +1042,17 @@ test_migration() {
     rbd snap create test1@snap2
     rbd clone test1@snap1 clone_v1 --rbd_default_clone_format=1
     rbd clone test1@snap2 clone_v2 --rbd_default_clone_format=2
-    rbd info clone_v1 | fgrep 'parent: rbd/test1@snap1'
-    rbd info clone_v2 | fgrep 'parent: rbd/test1@snap2'
+    rbd info clone_v1 | grep -F 'parent: rbd/test1@snap1'
+    rbd info clone_v2 | grep -F 'parent: rbd/test1@snap2'
     rbd info clone_v2 |grep 'op_features: clone-child'
     test "$(rbd export clone_v1 - | md5sum)" = "${md5sum}"
     test "$(rbd export clone_v2 - | md5sum)" = "${md5sum}"
     test "$(rbd children test1@snap1)" = "rbd/clone_v1"
     test "$(rbd children test1@snap2)" = "rbd/clone_v2"
     rbd migration prepare test1 rbd2/test2
-    rbd info clone_v1 | fgrep 'parent: rbd2/test2@snap1'
-    rbd info clone_v2 | fgrep 'parent: rbd2/test2@snap2'
-    rbd info clone_v2 | fgrep 'op_features: clone-child'
+    rbd info clone_v1 | grep -F 'parent: rbd2/test2@snap1'
+    rbd info clone_v2 | grep -F 'parent: rbd2/test2@snap2'
+    rbd info clone_v2 | grep -F 'op_features: clone-child'
     test "$(rbd children rbd2/test2@snap1)" = "rbd/clone_v1"
     test "$(rbd children rbd2/test2@snap2)" = "rbd/clone_v2"
     rbd migration execute test1
@@ -1006,9 +1061,9 @@ test_migration() {
     test "$(rbd export clone_v1 - | md5sum)" = "${md5sum}"
     test "$(rbd export clone_v2 - | md5sum)" = "${md5sum}"
     rbd migration prepare rbd2/test2 test1
-    rbd info clone_v1 | fgrep 'parent: rbd/test1@snap1'
-    rbd info clone_v2 | fgrep 'parent: rbd/test1@snap2'
-    rbd info clone_v2 | fgrep 'op_features: clone-child'
+    rbd info clone_v1 | grep -F 'parent: rbd/test1@snap1'
+    rbd info clone_v2 | grep -F 'parent: rbd/test1@snap2'
+    rbd info clone_v2 | grep -F 'op_features: clone-child'
     test "$(rbd children test1@snap1)" = "rbd/clone_v1"
     test "$(rbd children test1@snap2)" = "rbd/clone_v2"
     rbd migration execute test1
@@ -1130,17 +1185,32 @@ test_trash_purge_schedule() {
     rbd namespace create rbd2/ns1
 
     test "$(ceph rbd trash purge schedule list)" = "{}"
-    ceph rbd trash purge schedule status | fgrep '"scheduled": []'
+    ceph rbd trash purge schedule status | grep -F '"scheduled": []'
 
     expect_fail rbd trash purge schedule ls
     test "$(rbd trash purge schedule ls -R --format json)" = "[]"
 
-    rbd trash purge schedule add -p rbd 1d 01:30
+    # check that remove fails when pool exists but no schedules are in place
+    expect_fail rbd trash purge schedule remove dummy
+    expect_fail rbd trash purge schedule remove 1d dummy
+    expect_fail rbd trash purge schedule remove -p rbd dummy
+    expect_fail rbd trash purge schedule remove -p rbd 1d dummy
 
-    rbd trash purge schedule ls -p rbd | grep 'every 1d starting at 01:30'
+    rbd trash purge schedule add -p rbd 1h 2100-01-01T19:00Z
+    test "$(rbd trash purge schedule ls -p rbd)" = 'every 1h starting at 2100-01-01 19:00:00'
+    for i in `seq 12`; do
+        rbd trash purge schedule status -p rbd | grep '2100-01-01 19:00:00' && break
+        sleep 10
+    done
+    test "$(rbd trash purge schedule status -p rbd --format xml |
+        xmlstarlet sel -t -v '//scheduled/item/schedule_time')" = '2100-01-01 19:00:00'
+    rbd trash purge schedule rm -p rbd
+
+    rbd trash purge schedule add -p rbd 1d 2020-01-14T07:00+05:30
+    rbd trash purge schedule ls -p rbd | grep 'every 1d starting at 2020-01-14 01:30:00'
     expect_fail rbd trash purge schedule ls
-    rbd trash purge schedule ls -R | grep 'every 1d starting at 01:30'
-    rbd trash purge schedule ls -R -p rbd | grep 'every 1d starting at 01:30'
+    rbd trash purge schedule ls -R | grep 'every 1d starting at 2020-01-14 01:30:00'
+    rbd trash purge schedule ls -R -p rbd | grep 'every 1d starting at 2020-01-14 01:30:00'
     expect_fail rbd trash purge schedule ls -p rbd2
     test "$(rbd trash purge schedule ls -p rbd2 -R --format json)" = "[]"
 
@@ -1152,56 +1222,56 @@ test_trash_purge_schedule() {
 
     for i in `seq 12`; do
         test "$(rbd trash purge schedule status --format xml |
-            $XMLSTARLET sel -t -v '//scheduled/item/pool')" = 'rbd' && break
+            xmlstarlet sel -t -v '//scheduled/item/pool')" = 'rbd' && break
         sleep 10
     done
     rbd trash purge schedule status
     test "$(rbd trash purge schedule status --format xml |
-        $XMLSTARLET sel -t -v '//scheduled/item/pool')" = 'rbd'
+        xmlstarlet sel -t -v '//scheduled/item/pool')" = 'rbd'
     test "$(rbd trash purge schedule status -p rbd --format xml |
-        $XMLSTARLET sel -t -v '//scheduled/item/pool')" = 'rbd'
+        xmlstarlet sel -t -v '//scheduled/item/pool')" = 'rbd'
 
-    rbd trash purge schedule add 2d 00:17
-    rbd trash purge schedule ls | grep 'every 2d starting at 00:17'
-    rbd trash purge schedule ls -R | grep 'every 2d starting at 00:17'
+    rbd trash purge schedule add 2d 2020-01-14T05:47+05:30
+    rbd trash purge schedule ls | grep 'every 2d starting at 2020-01-14 00:17:00'
+    rbd trash purge schedule ls -R | grep 'every 2d starting at 2020-01-14 00:17:00'
     expect_fail rbd trash purge schedule ls -p rbd2
-    rbd trash purge schedule ls -p rbd2 -R | grep 'every 2d starting at 00:17'
-    rbd trash purge schedule ls -p rbd2/ns1 -R | grep 'every 2d starting at 00:17'
+    rbd trash purge schedule ls -p rbd2 -R | grep 'every 2d starting at 2020-01-14 00:17:00'
+    rbd trash purge schedule ls -p rbd2/ns1 -R | grep 'every 2d starting at 2020-01-14 00:17:00'
     test "$(rbd trash purge schedule ls -R -p rbd2/ns1 --format xml |
-        $XMLSTARLET sel -t -v '//schedules/schedule/pool')" = "-"
+        xmlstarlet sel -t -v '//schedules/schedule/pool')" = "-"
     test "$(rbd trash purge schedule ls -R -p rbd2/ns1 --format xml |
-        $XMLSTARLET sel -t -v '//schedules/schedule/namespace')" = "-"
+        xmlstarlet sel -t -v '//schedules/schedule/namespace')" = "-"
     test "$(rbd trash purge schedule ls -R -p rbd2/ns1 --format xml |
-        $XMLSTARLET sel -t -v '//schedules/schedule/items/item/start_time')" = "00:17:00"
+        xmlstarlet sel -t -v '//schedules/schedule/items/item/start_time')" = "2020-01-14 00:17:00"
 
     for i in `seq 12`; do
         rbd trash purge schedule status --format xml |
-            $XMLSTARLET sel -t -v '//scheduled/item/pool' | grep 'rbd2' && break
+            xmlstarlet sel -t -v '//scheduled/item/pool' | grep 'rbd2' && break
         sleep 10
     done
     rbd trash purge schedule status
     rbd trash purge schedule status --format xml |
-        $XMLSTARLET sel -t -v '//scheduled/item/pool' | grep 'rbd2'
+        xmlstarlet sel -t -v '//scheduled/item/pool' | grep 'rbd2'
     echo $(rbd trash purge schedule status --format xml |
-        $XMLSTARLET sel -t -v '//scheduled/item/pool') | grep 'rbd rbd2 rbd2'
+        xmlstarlet sel -t -v '//scheduled/item/pool') | grep 'rbd rbd2 rbd2'
     test "$(rbd trash purge schedule status -p rbd --format xml |
-        $XMLSTARLET sel -t -v '//scheduled/item/pool')" = 'rbd'
+        xmlstarlet sel -t -v '//scheduled/item/pool')" = 'rbd'
     test "$(echo $(rbd trash purge schedule status -p rbd2 --format xml |
-        $XMLSTARLET sel -t -v '//scheduled/item/pool'))" = 'rbd2 rbd2'
+        xmlstarlet sel -t -v '//scheduled/item/pool'))" = 'rbd2 rbd2'
 
     test "$(echo $(rbd trash purge schedule ls -R --format xml |
-        $XMLSTARLET sel -t -v '//schedules/schedule/items'))" = "2d00:17:00 1d01:30:00"
+        xmlstarlet sel -t -v '//schedules/schedule/items/item'))" = "2d2020-01-14 00:17:00 1d2020-01-14 01:30:00"
 
     rbd trash purge schedule add 1d
-    rbd trash purge schedule ls | grep 'every 2d starting at 00:17'
+    rbd trash purge schedule ls | grep 'every 2d starting at 2020-01-14 00:17:00'
     rbd trash purge schedule ls | grep 'every 1d'
 
     rbd trash purge schedule ls -R --format xml |
-        $XMLSTARLET sel -t -v '//schedules/schedule/items' | grep '2d00:17'
+        xmlstarlet sel -t -v '//schedules/schedule/items' | grep '2d2020-01-14 00:17:00'
 
     rbd trash purge schedule rm 1d
-    rbd trash purge schedule ls | grep 'every 2d starting at 00:17'
-    rbd trash purge schedule rm 2d 00:17
+    rbd trash purge schedule ls | grep 'every 2d starting at 2020-01-14 00:17:00'
+    rbd trash purge schedule rm 2d 2020-01-14T00:17:00
     expect_fail rbd trash purge schedule ls
 
     for p in rbd2 rbd2/ns1; do
@@ -1233,16 +1303,205 @@ test_trash_purge_schedule() {
     # Negative tests
     rbd trash purge schedule add 2m
     expect_fail rbd trash purge schedule add -p rbd dummy
+    expect_fail rbd trash purge schedule add -p rbd 1d dummy
     expect_fail rbd trash purge schedule add dummy
+    expect_fail rbd trash purge schedule add 1d dummy
     expect_fail rbd trash purge schedule remove -p rbd dummy
+    expect_fail rbd trash purge schedule remove -p rbd 1d dummy
     expect_fail rbd trash purge schedule remove dummy
-    rbd trash purge schedule ls -p rbd | grep 'every 1d starting at 01:30'
+    expect_fail rbd trash purge schedule remove 1d dummy
+    expect_fail rbd trash purge schedule add -p rbd 30m 00:15
+    expect_fail rbd trash purge schedule add -p rbd 30m 00:15+05:30
+    expect_fail rbd trash purge schedule add -p rbd 30m 2020-13-14T00:15+05:30
+    expect_fail rbd trash purge schedule add -p rbd 30m 2020-01-32T00:15+05:30
+    expect_fail rbd trash purge schedule add -p rbd 30m 2020-01-14T25:15+05:30
+    expect_fail rbd trash purge schedule add -p rbd 30m 2020-01-14T00:60+05:30
+    expect_fail rbd trash purge schedule add -p rbd 30m 2020-01-14T00:15+24:00
+
+    rbd trash purge schedule ls -p rbd | grep 'every 1d starting at 2020-01-14 01:30:00'
     rbd trash purge schedule ls | grep 'every 2m'
-    rbd trash purge schedule remove -p rbd 1d 01:30
+    rbd trash purge schedule remove -p rbd 1d 2020-01-14T01:30
     rbd trash purge schedule remove 2m
     test "$(rbd trash purge schedule ls -R --format json)" = "[]"
 
     remove_images
+    ceph osd pool rm rbd2 rbd2 --yes-i-really-really-mean-it
+}
+
+test_trash_purge_schedule_recovery() {
+    echo "testing recovery of trash_purge_schedule handler after module's RADOS client is blocklisted..."
+    remove_images
+    ceph osd pool create rbd3 8
+    rbd pool init rbd3
+    rbd namespace create rbd3/ns1
+
+    rbd trash purge schedule add -p rbd3/ns1 2d
+    rbd trash purge schedule ls -p rbd3 -R | grep 'rbd3 *ns1 *every 2d'
+
+    # Fetch and blocklist the rbd_support module's RADOS client
+    CLIENT_ADDR=$(ceph mgr dump | jq .active_clients[] |
+	jq 'select(.name == "rbd_support")' |
+	jq -r '[.addrvec[0].addr, "/", .addrvec[0].nonce|tostring] | add')
+    ceph osd blocklist add $CLIENT_ADDR
+
+    # Check that you can add a trash purge schedule after a few retries
+    expect_fail rbd trash purge schedule add -p rbd3 10m
+    sleep 10
+    for i in `seq 24`; do
+        rbd trash purge schedule add -p rbd3 10m && break
+	sleep 10
+    done
+
+    rbd trash purge schedule ls -p rbd3 -R | grep 'every 10m'
+    # Verify that the schedule present before client blocklisting is preserved
+    rbd trash purge schedule ls -p rbd3 -R | grep 'rbd3 *ns1 *every 2d'
+
+    rbd trash purge schedule remove -p rbd3 10m
+    rbd trash purge schedule remove -p rbd3/ns1 2d
+    rbd trash purge schedule ls -p rbd3 -R | expect_fail grep 'every 10m'
+    rbd trash purge schedule ls -p rbd3 -R | expect_fail grep 'rbd3 *ns1 *every 2d'
+
+    ceph osd pool rm rbd3 rbd3 --yes-i-really-really-mean-it
+
+}
+
+test_trash_purge_schedule_staggering() {
+    echo "Testing trash purge schedule staggering..."
+    remove_images
+    ceph osd pool create rbd2 8
+    rbd pool init rbd2
+
+    # Initial empty check
+    test "$(ceph rbd trash purge schedule list)" = "{}"
+    ceph rbd trash purge schedule status | grep -F '"scheduled": []'
+
+    # Create 80 namespaces
+    for i in {1..80}; do
+        rbd namespace create "rbd2/test$i"
+    done
+
+    # Helper to get status JSON and verify all namespaces are scheduled
+    get_trash_purge_schedule_status() {
+        local num_scheduled=$1
+        local -n status_ref=$2
+
+        # Verify number of namespaces in list output
+        local list_json
+        list_json=$(rbd trash purge schedule ls -p rbd2 -R --format json)
+        [ "$(jq 'length' <<< "$list_json")" -eq "$num_scheduled" ] || return 1
+
+        # Poll status until it reflects the same number of scheduled namespaces
+        for ((j=0; j<12; j++)); do
+            status_ref=$(rbd trash purge schedule status -p rbd2 --format json)
+            [ "$(jq 'length' <<< "$status_ref")" -eq "$num_scheduled" ] && break
+            sleep 10
+        done
+        [ "$(jq 'length' <<< "$status_ref")" -eq "$num_scheduled" ] || return 1
+
+        # Verify namespaces in list and status outputs match
+        local list_namespaces
+        list_namespaces=$(jq -r 'sort_by(.namespace) | .[].namespace' <<< "$list_json")
+        local status_namespaces
+        status_namespaces=$(jq -r 'sort_by(.namespace) | .[].namespace' <<< "$status_ref")
+        [ "$list_namespaces" = "$status_namespaces" ] || return 1
+        return 0
+    }
+
+    # Verify that `schedule add/rm` maintains proper staggering
+    local interval_min=5
+    local status_json
+    # Schedule namespaces test1..test60
+    for ((i=1; i<=60; i++)); do
+        rbd trash purge schedule add -p "rbd2/test$i" "${interval_min}m"
+    done
+    get_trash_purge_schedule_status 60 status_json
+    are_schedules_staggered "$status_json" "$interval_min"
+
+    # Modify scheduling range to test1..test70 (add 10 namespaces)
+    for ((i=61; i<=70; i++)); do
+        rbd trash purge schedule add -p "rbd2/test$i" "${interval_min}m"
+    done
+    get_trash_purge_schedule_status 70 status_json
+    are_schedules_staggered "$status_json" "$interval_min"
+
+    # Modify scheduling range to test1..test80 (add 10 more namespaces)
+    for ((i=71; i<=80; i++)); do
+        rbd trash purge schedule add -p "rbd2/test$i" "${interval_min}m"
+    done
+    get_trash_purge_schedule_status 80 status_json
+    are_schedules_staggered "$status_json" "$interval_min"
+
+    # Split into:
+    #   first half = test1..test40
+    #   second half = test41..test80
+    local first_half_json
+    first_half_json=$(jq '
+        map(select(.namespace | test("^test([1-9]|[1-3][0-9]|40)$")))
+    ' <<< "$status_json")
+    [ "$(jq 'length' <<< "$first_half_json")" -eq 40 ] || return 1
+    local second_half_json
+    second_half_json=$(jq '
+        map(select(.namespace | test("^test(4[1-9]|[5-7][0-9]|80)$")))
+    ' <<< "$status_json")
+    [ "$(jq 'length' <<< "$second_half_json")" -eq 40 ] || return 1
+    # Both halves must be staggered
+    are_schedules_staggered "$first_half_json" "$interval_min"
+    are_schedules_staggered "$second_half_json" "$interval_min"
+
+    # Modify scheduling range to test41..test80 (drop first half)
+    for ((i=1; i<=40; i++)); do
+        rbd trash purge schedule rm -p "rbd2/test$i"
+    done
+    get_trash_purge_schedule_status 40 status_json
+    are_schedules_staggered "$status_json" "$interval_min"
+
+    # Re-add schedules for first half with explicit start time.
+    # These should all share the same next schedule_time.
+    for ((i=1; i<=40; i++)); do
+        rbd trash purge schedule add -p "rbd2/test$i" "${interval_min}m" 2020-01-01
+    done
+    # Get updated status
+    get_trash_purge_schedule_status 80 status_json
+
+    # Verify first half share the same next schedule_time
+    first_half_json=$(jq '
+        map(select(.namespace | test("^test([1-9]|[1-3][0-9]|40)$")))
+    ' <<< "$status_json")
+    [ "$(jq 'length' <<< "$first_half_json")" -eq 40 ] || return 1
+    local anchored_times=()
+    mapfile -t anchored_times < <(
+        jq -r '.[].schedule_time' <<< "$first_half_json" | sort -u
+    )
+    (( ${#anchored_times[@]} == 1 )) || return 1
+
+    # Verify second half remains staggered
+    second_half_json=$(jq '
+        map(select(.namespace | test("^test(4[1-9]|[5-7][0-9]|80)$")))
+    ' <<< "$status_json")
+    [ "$(jq 'length' <<< "$second_half_json")" -eq 40 ] || return 1
+    are_schedules_staggered "$second_half_json" "$interval_min"
+
+    # Cleanup: remove all schedules
+    for ((i=1; i<=80; i++)); do
+        rbd trash purge schedule rm -p "rbd2/test$i"
+    done
+
+    # Wait until schedule status becomes empty
+    for ((j=0; j<12; j++)); do
+        status_json=$(rbd trash purge schedule status -p rbd2 --format json)
+        [ "$(jq 'length' <<< "$status_json")" -eq 0 ] && break
+        sleep 10
+    done
+    [ "$(jq 'length' <<< "$status_json")" -eq 0 ] || {
+        echo "Error: trash purge schedule status not empty after removals"
+        return 1
+    }
+
+    # Remove namespaces
+    for ((i=1; i<=80; i++)); do
+        rbd namespace rm "rbd2/test$i"
+    done
+
     ceph osd pool rm rbd2 rbd2 --yes-i-really-really-mean-it
 }
 
@@ -1258,7 +1517,7 @@ test_mirror_snapshot_schedule() {
     rbd mirror pool peer add rbd2 cluster1
 
     test "$(ceph rbd mirror snapshot schedule list)" = "{}"
-    ceph rbd mirror snapshot schedule status | fgrep '"scheduled_images": []'
+    ceph rbd mirror snapshot schedule status | grep -F '"scheduled_images": []'
 
     expect_fail rbd mirror snapshot schedule ls
     test "$(rbd mirror snapshot schedule ls -R --format json)" = "[]"
@@ -1272,6 +1531,22 @@ test_mirror_snapshot_schedule() {
 
     test "$(rbd mirror image status rbd2/ns1/test1 |
         grep -c mirror.primary)" = '1'
+
+    # check that remove fails when image exists but no schedules are in place
+    expect_fail rbd mirror snapshot schedule remove dummy
+    expect_fail rbd mirror snapshot schedule remove 1h dummy
+    expect_fail rbd mirror snapshot schedule remove -p rbd2/ns1 --image test1 dummy
+    expect_fail rbd mirror snapshot schedule remove -p rbd2/ns1 --image test1 1h dummy
+
+    rbd mirror snapshot schedule add -p rbd2/ns1 1h 2100-01-01T19:00Z
+    test "$(rbd mirror snapshot schedule ls -p rbd2/ns1)" = 'every 1h starting at 2100-01-01 19:00:00'
+    for i in `seq 12`; do
+        rbd mirror snapshot schedule status -p rbd2/ns1 | grep '2100-01-01 19:00:00' && break
+        sleep 10
+    done
+    test "$(rbd mirror snapshot schedule status -p rbd2/ns1 --format xml |
+        xmlstarlet sel -t -v '//scheduled_images/image/schedule_time')" = '2100-01-01 19:00:00'
+    rbd mirror snapshot schedule rm -p rbd2/ns1
 
     rbd mirror snapshot schedule add -p rbd2/ns1 --image test1 1m
     expect_fail rbd mirror snapshot schedule ls
@@ -1302,13 +1577,13 @@ test_mirror_snapshot_schedule() {
 
     rbd mirror snapshot schedule status
     test "$(rbd mirror snapshot schedule status --format xml |
-        $XMLSTARLET sel -t -v '//scheduled_images/image/image')" = 'rbd2/ns1/test1'
+        xmlstarlet sel -t -v '//scheduled_images/image/image')" = 'rbd2/ns1/test1'
     test "$(rbd mirror snapshot schedule status -p rbd2 --format xml |
-        $XMLSTARLET sel -t -v '//scheduled_images/image/image')" = 'rbd2/ns1/test1'
+        xmlstarlet sel -t -v '//scheduled_images/image/image')" = 'rbd2/ns1/test1'
     test "$(rbd mirror snapshot schedule status -p rbd2/ns1 --format xml |
-        $XMLSTARLET sel -t -v '//scheduled_images/image/image')" = 'rbd2/ns1/test1'
+        xmlstarlet sel -t -v '//scheduled_images/image/image')" = 'rbd2/ns1/test1'
     test "$(rbd mirror snapshot schedule status -p rbd2/ns1 --image test1 --format xml |
-        $XMLSTARLET sel -t -v '//scheduled_images/image/image')" = 'rbd2/ns1/test1'
+        xmlstarlet sel -t -v '//scheduled_images/image/image')" = 'rbd2/ns1/test1'
 
     rbd mirror image demote rbd2/ns1/test1
     for i in `seq 12`; do
@@ -1324,24 +1599,35 @@ test_mirror_snapshot_schedule() {
     done
     rbd mirror snapshot schedule status | grep 'rbd2/ns1/test1'
 
-    rbd mirror snapshot schedule add 1h 00:15
-    test "$(rbd mirror snapshot schedule ls)" = 'every 1h starting at 00:15:00'
-    rbd mirror snapshot schedule ls -R | grep 'every 1h starting at 00:15:00'
+    rbd mirror snapshot schedule add 1h 2020-01-14T04:30+05:30
+    test "$(rbd mirror snapshot schedule ls)" = 'every 1h starting at 2020-01-13 23:00:00'
+    rbd mirror snapshot schedule ls -R | grep 'every 1h starting at 2020-01-13 23:00:00'
     rbd mirror snapshot schedule ls -R | grep 'rbd2 *ns1 *test1 *every 1m'
     expect_fail rbd mirror snapshot schedule ls -p rbd2
-    rbd mirror snapshot schedule ls -p rbd2 -R | grep 'every 1h starting at 00:15:00'
+    rbd mirror snapshot schedule ls -p rbd2 -R | grep 'every 1h starting at 2020-01-13 23:00:00'
     rbd mirror snapshot schedule ls -p rbd2 -R | grep 'rbd2 *ns1 *test1 *every 1m'
     expect_fail rbd mirror snapshot schedule ls -p rbd2/ns1
-    rbd mirror snapshot schedule ls -p rbd2/ns1 -R | grep 'every 1h starting at 00:15:00'
+    rbd mirror snapshot schedule ls -p rbd2/ns1 -R | grep 'every 1h starting at 2020-01-13 23:00:00'
     rbd mirror snapshot schedule ls -p rbd2/ns1 -R | grep 'rbd2 *ns1 *test1 *every 1m'
     test "$(rbd mirror snapshot schedule ls -p rbd2/ns1 --image test1)" = 'every 1m'
 
     # Negative tests
     expect_fail rbd mirror snapshot schedule add dummy
+    expect_fail rbd mirror snapshot schedule add 1h dummy
     expect_fail rbd mirror snapshot schedule add -p rbd2/ns1 --image test1 dummy
+    expect_fail rbd mirror snapshot schedule add -p rbd2/ns1 --image test1 1h dummy
     expect_fail rbd mirror snapshot schedule remove dummy
+    expect_fail rbd mirror snapshot schedule remove 1h dummy
     expect_fail rbd mirror snapshot schedule remove -p rbd2/ns1 --image test1 dummy
-    test "$(rbd mirror snapshot schedule ls)" = 'every 1h starting at 00:15:00'
+    expect_fail rbd mirror snapshot schedule remove -p rbd2/ns1 --image test1 1h dummy
+    expect_fail rbd mirror snapshot schedule add 30m 04:30
+    expect_fail rbd mirror snapshot schedule add 30m 04:30+05:30
+    expect_fail rbd mirror snapshot schedule add 30m 2020-13-14T04:30+05:30
+    expect_fail rbd mirror snapshot schedule add 30m 2020-01-32T04:30+05:30
+    expect_fail rbd mirror snapshot schedule add 30m 2020-01-14T25:30+05:30
+    expect_fail rbd mirror snapshot schedule add 30m 2020-01-14T04:60+05:30
+    expect_fail rbd mirror snapshot schedule add 30m 2020-01-14T04:30+24:00
+    test "$(rbd mirror snapshot schedule ls)" = 'every 1h starting at 2020-01-13 23:00:00'
     test "$(rbd mirror snapshot schedule ls -p rbd2/ns1 --image test1)" = 'every 1m'
 
     rbd rm rbd2/ns1/test1
@@ -1355,6 +1641,200 @@ test_mirror_snapshot_schedule() {
     test "$(rbd mirror snapshot schedule ls -R --format json)" = "[]"
 
     remove_images
+    ceph osd pool rm rbd2 rbd2 --yes-i-really-really-mean-it
+}
+
+test_mirror_snapshot_schedule_recovery() {
+    echo "testing recovery of mirror snapshot scheduler after module's RADOS client is blocklisted..."
+    remove_images
+    ceph osd pool create rbd3 8
+    rbd pool init rbd3
+    rbd namespace create rbd3/ns1
+
+    rbd mirror pool enable rbd3 image
+    rbd mirror pool enable rbd3/ns1 image
+    rbd mirror pool peer add rbd3 cluster1
+
+    rbd create $RBD_CREATE_ARGS -s 1 rbd3/ns1/test1
+    rbd mirror image enable rbd3/ns1/test1 snapshot
+    test "$(rbd mirror image status rbd3/ns1/test1 |
+        grep -c mirror.primary)" = '1'
+
+    rbd mirror snapshot schedule add -p rbd3/ns1 --image test1 1m
+    test "$(rbd mirror snapshot schedule ls -p rbd3/ns1 --image test1)" = 'every 1m'
+
+    # Fetch and blocklist rbd_support module's RADOS client
+    CLIENT_ADDR=$(ceph mgr dump | jq .active_clients[] |
+	jq 'select(.name == "rbd_support")' |
+	jq -r '[.addrvec[0].addr, "/", .addrvec[0].nonce|tostring] | add')
+    ceph osd blocklist add $CLIENT_ADDR
+
+    # Check that you can add a mirror snapshot schedule after a few retries
+    expect_fail rbd mirror snapshot schedule add -p rbd3/ns1 --image test1 2m
+    sleep 10
+    for i in `seq 24`; do
+        rbd mirror snapshot schedule add -p rbd3/ns1 --image test1 2m && break
+	sleep 10
+    done
+
+    rbd mirror snapshot schedule ls -p rbd3/ns1 --image test1 | grep 'every 2m'
+    # Verify that the schedule present before client blocklisting is preserved
+    rbd mirror snapshot schedule ls -p rbd3/ns1 --image test1 | grep 'every 1m'
+
+    rbd mirror snapshot schedule rm -p rbd3/ns1 --image test1 2m
+    rbd mirror snapshot schedule rm -p rbd3/ns1 --image test1 1m
+    rbd mirror snapshot schedule ls -p rbd3/ns1 --image test1 | expect_fail grep 'every 2m'
+    rbd mirror snapshot schedule ls -p rbd3/ns1 --image test1 | expect_fail grep 'every 1m'
+
+    rbd snap purge rbd3/ns1/test1
+    rbd rm rbd3/ns1/test1
+    ceph osd pool rm rbd3 rbd3 --yes-i-really-really-mean-it
+}
+
+test_mirror_snapshot_schedule_staggering() {
+    echo "Testing mirror snapshot schedule staggering..."
+
+    remove_images
+    ceph osd pool create rbd2 8
+    rbd pool init rbd2
+    rbd mirror pool enable rbd2 image
+    rbd mirror pool peer add rbd2 cluster1
+
+    # Initial empty check
+    test "$(ceph rbd mirror snapshot schedule list)" = "{}"
+    ceph rbd mirror snapshot schedule status | grep -F '"scheduled_images": []'
+
+    # Create 80 images
+    for i in {1..80}; do
+        rbd create $RBD_CREATE_ARGS -s 1 "rbd2/test$i"
+        rbd mirror image enable "rbd2/test$i" snapshot
+    done
+
+    # Helper to get status JSON and verify all images are scheduled
+    get_mirror_snapshot_schedule_status() {
+        local num_scheduled=$1
+        local -n status_ref=$2
+
+        # Verify number of images in list output
+        local list_json
+        list_json=$(rbd mirror snapshot schedule ls -p rbd2 -R --format json)
+        [ "$(jq 'length' <<< "$list_json")" -eq "$num_scheduled" ] || return 1
+
+        # Poll status until it reflects the same number of scheduled images
+        for ((j=0; j<12; j++)); do
+            status_ref=$(rbd mirror snapshot schedule status -p rbd2 --format json)
+            [ "$(jq 'length' <<< "$status_ref")" -eq "$num_scheduled" ] && break
+            sleep 10
+        done
+        [ "$(jq 'length' <<< "$status_ref")" -eq "$num_scheduled" ] || return 1
+
+        # Verify images in list and status outputs match
+        local list_images
+        list_images=$(jq -r 'sort_by(.image) | .[].image' <<< "$list_json")
+        # In status JSON, '.image' contains full image spec, not just the name
+        local status_images
+        status_images=$(
+            jq -r 'sort_by(.image) | .[].image | split("/")[-1]' <<< "$status_ref"
+        )
+        [ "$list_images" = "$status_images" ] || return 1
+        return 0
+    }
+
+    # Verify that `schedule add/rm` maintains proper staggering
+    local interval_min=5
+    local status_json
+    # Schedule images test1..test60
+    for ((i=1; i<=60; i++)); do
+        rbd mirror snapshot schedule add -p rbd2 --image "test$i" "${interval_min}m"
+    done
+    get_mirror_snapshot_schedule_status 60 status_json
+    are_schedules_staggered "$status_json" "$interval_min"
+
+    # Modify scheduling range to test61..test70 (add 10 images)
+    for ((i=61; i<=70; i++)); do
+        rbd mirror snapshot schedule add -p rbd2 --image "test$i" "${interval_min}m"
+    done
+    get_mirror_snapshot_schedule_status 70 status_json
+    are_schedules_staggered "$status_json" "$interval_min"
+
+    # Modify scheduling range to test71..test80 (add 10 more images)
+    for ((i=70; i<=80; i++)); do
+        rbd mirror snapshot schedule add -p rbd2 --image "test$i" "${interval_min}m"
+    done
+    get_mirror_snapshot_schedule_status 80 status_json
+    are_schedules_staggered "$status_json" "$interval_min"
+
+    # Split into:
+    #   first half = test1..test40
+    #   second half = test41..test80
+    local first_half_json
+    first_half_json=$(jq '
+        map(select(.image | test("^rbd2/test([1-9]|[1-3][0-9]|40)$")))
+    ' <<< "$status_json")
+    [ "$(jq 'length' <<< "$first_half_json")" -eq 40 ] || return 1
+    local second_half_json
+    second_half_json=$(jq '
+        map(select(.image | test("^rbd2/test(4[1-9]|[5-7][0-9]|80)$")))
+    ' <<< "$status_json")
+    [ "$(jq 'length' <<< "$second_half_json")" -eq 40 ] || return 1
+    # Both halves must be staggered
+    are_schedules_staggered "$first_half_json" "$interval_min"
+    are_schedules_staggered "$second_half_json" "$interval_min"
+
+    # Modify scheduling range to test41..test80 (drop first half)
+    for ((i=1; i<=40; i++)); do
+        rbd mirror snapshot schedule rm -p rbd2 --image "test$i"
+    done
+    get_mirror_snapshot_schedule_status 40 status_json
+    are_schedules_staggered "$status_json" "$interval_min"
+
+    # Re-add schedules for first half with explicit start time.
+    # These should all share the same next schedule_time.
+    for ((i=1; i<=40; i++)); do
+        rbd mirror snapshot schedule add -p rbd2 --image "test$i" "${interval_min}m" 2020-01-01
+    done
+    # Get updated status
+    get_mirror_snapshot_schedule_status 80 status_json
+
+    # Verify first half share the same next schedule_time
+    first_half_json=$(jq '
+        map(select(.image | test("^rbd2/test([1-9]|[1-3][0-9]|40)$")))
+    ' <<< "$status_json")
+    [ "$(jq 'length' <<< "$first_half_json")" -eq 40 ] || return 1
+    local anchored_times=()
+    mapfile -t anchored_times < <(
+        jq -r '.[].schedule_time' <<< "$first_half_json" | sort -u
+    )
+    (( ${#anchored_times[@]} == 1 )) || return 1
+
+    # Verify second half remains staggered
+    second_half_json=$(jq '
+        map(select(.image | test("^rbd2/test(4[1-9]|[5-7][0-9]|80)$")))
+    ' <<< "$status_json")
+    [ "$(jq 'length' <<< "$second_half_json")" -eq 40 ] || return 1
+    are_schedules_staggered "$second_half_json" "$interval_min"
+
+    # Cleanup: remove all schedules
+    for ((i=1; i<=80; i++)); do
+        rbd mirror snapshot schedule rm -p rbd2 --image "test$i"
+    done
+
+    # Wait until schedule status becomes empty
+    for ((j=0; j<12; j++)); do
+        status_json=$(rbd mirror snapshot schedule status -p rbd2 --format json)
+        [ "$(jq 'length' <<< "$status_json")" -eq 0 ] && break
+        sleep 10
+    done
+    [ "$(jq 'length' <<< "$status_json")" -eq 0 ] || {
+        echo "Error: mirror snapshot schedule status not empty after removals"
+        return 1
+    }
+
+    # Remove images
+    for ((i=1; i<=80; i++)); do
+        rbd rm "rbd2/test$i"
+    done
+
     ceph osd pool rm rbd2 rbd2 --yes-i-really-really-mean-it
 }
 
@@ -1413,6 +1893,54 @@ test_perf_image_iostat() {
     ceph osd pool rm rbd1 rbd1 --yes-i-really-really-mean-it
 }
 
+test_perf_image_iostat_recovery() {
+    echo "testing recovery of perf handler after module's RADOS client is blocklisted..."
+    remove_images
+
+    ceph osd pool create rbd3 8
+    rbd pool init rbd3
+    rbd namespace create rbd3/ns
+
+    IMAGE_SPECS=("rbd3/test1" "rbd3/ns/test2")
+    for spec in "${IMAGE_SPECS[@]}"; do
+        # ensure all images are created without a separate data pool
+        # as we filter iostat by specific pool specs below
+        rbd create $RBD_CREATE_ARGS --size 10G --rbd-default-data-pool '' $spec
+    done
+
+    BENCH_PIDS=()
+    for spec in "${IMAGE_SPECS[@]}"; do
+        rbd bench --io-type write --io-pattern rand --io-total 10G --io-threads 1 \
+            --rbd-cache false $spec >/dev/null 2>&1 &
+        BENCH_PIDS+=($!)
+    done
+
+    test "$(rbd perf image iostat --format json rbd3 |
+        jq -r 'map(.image) | sort | join(" ")')" = 'test1'
+
+    # Fetch and blocklist the rbd_support module's RADOS client
+    CLIENT_ADDR=$(ceph mgr dump | jq .active_clients[] |
+	jq 'select(.name == "rbd_support")' |
+	jq -r '[.addrvec[0].addr, "/", .addrvec[0].nonce|tostring] | add')
+    ceph osd blocklist add $CLIENT_ADDR
+
+    expect_fail rbd perf image iostat --format json rbd3/ns
+    sleep 10
+    for i in `seq 24`; do
+        test "$(rbd perf image iostat --format json rbd3/ns |
+            jq -r 'map(.image) | sort | join(" ")')" = 'test2' && break
+	sleep 10
+    done
+
+    for pid in "${BENCH_PIDS[@]}"; do
+        kill $pid
+    done
+    wait
+
+    remove_images
+    ceph osd pool rm rbd3 rbd3 --yes-i-really-really-mean-it
+}
+
 test_mirror_pool_peer_bootstrap_create() {
     echo "testing mirror pool peer bootstrap create..."
     remove_images
@@ -1441,9 +1969,9 @@ test_mirror_pool_peer_bootstrap_create() {
     test "$TOKEN_FSID" = "$(ceph fsid)"
     test "$TOKEN_KEY" = "$(ceph auth get-key client.$TOKEN_CLIENT_ID)"
     for addr in "${MON_ADDRS[@]}"; do
-        fgrep "$addr" <<< "$TOKEN_MON_HOST"
+        grep -F "$addr" <<< "$TOKEN_MON_HOST"
     done
-    expect_fail fgrep "$BAD_MON_ADDR" <<< "$TOKEN_MON_HOST"
+    expect_fail grep -F "$BAD_MON_ADDR" <<< "$TOKEN_MON_HOST"
 
     # check that the token does not change, including across pools
     test "$(rbd mirror pool peer bootstrap create \
@@ -1508,6 +2036,43 @@ test_tasks_removed_pool() {
     remove_images
 }
 
+test_tasks_recovery() {
+    echo "testing task handler recovery after module's RADOS client is blocklisted..."
+    remove_images
+
+    ceph osd pool create rbd2 8
+    rbd pool init rbd2
+
+    rbd create $RBD_CREATE_ARGS --size 1G rbd2/img1
+    rbd bench --io-type write --io-pattern seq --io-size 1M --io-total 1G rbd2/img1
+    rbd snap create rbd2/img1@snap
+    rbd snap protect rbd2/img1@snap
+    rbd clone rbd2/img1@snap rbd2/clone1
+
+    # Fetch and blocklist rbd_support module's RADOS client
+    CLIENT_ADDR=$(ceph mgr dump | jq .active_clients[] |
+	jq 'select(.name == "rbd_support")' |
+	jq -r '[.addrvec[0].addr, "/", .addrvec[0].nonce|tostring] | add')
+    ceph osd blocklist add $CLIENT_ADDR
+
+    expect_fail ceph rbd task add flatten rbd2/clone1
+    sleep 10
+    for i in `seq 24`; do
+       ceph rbd task add flatten rbd2/clone1 && break
+       sleep 10
+    done
+
+    for i in {1..12}; do
+        rbd info rbd2/clone1 | grep 'parent: ' || break
+        sleep 10
+    done
+    rbd info rbd2/clone1 | expect_fail grep 'parent: '
+    rbd snap unprotect rbd2/img1@snap
+
+    test "$(ceph rbd task list)" = "[]"
+    ceph osd pool rm rbd2 rbd2 --yes-i-really-really-mean-it
+}
+
 test_pool_image_args
 test_rename
 test_ls
@@ -1529,9 +2094,15 @@ test_clone_v2
 test_thick_provision
 test_namespace
 test_trash_purge_schedule
+test_trash_purge_schedule_recovery
+test_trash_purge_schedule_staggering
 test_mirror_snapshot_schedule
+test_mirror_snapshot_schedule_recovery
+test_mirror_snapshot_schedule_staggering
 test_perf_image_iostat
+test_perf_image_iostat_recovery
 test_mirror_pool_peer_bootstrap_create
 test_tasks_removed_pool
+test_tasks_recovery
 
 echo OK

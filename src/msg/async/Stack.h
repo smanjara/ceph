@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -17,10 +18,23 @@
 #ifndef CEPH_MSG_ASYNC_STACK_H
 #define CEPH_MSG_ASYNC_STACK_H
 
-#include "include/spinlock.h"
 #include "common/perf_counters.h"
-#include "msg/msg_types.h"
+#include "common/perf_counters_key.h"
+#include "include/spinlock.h"
 #include "msg/async/Event.h"
+#include "msg/msg_types.h"
+
+#ifdef WITH_CRIMSON
+#include "crimson/common/perf_counters_collection.h"
+#else
+#include "common/perf_counters_collection.h"
+#endif
+
+#include <atomic>
+#include <condition_variable>
+#include <memory>
+#include <mutex>
+#include <string>
 
 class Worker;
 class ConnectedSocketImpl {
@@ -214,6 +228,15 @@ enum {
   l_msgr_last,
 };
 
+enum {
+  l_msgr_labeled_first = l_msgr_last + 1,
+
+  l_msgr_connection_ready_timeouts,
+  l_msgr_connection_idle_timeouts,
+
+  l_msgr_labeled_last,
+};
+
 class Worker {
   std::mutex init_lock;
   std::condition_variable init_cond;
@@ -224,6 +247,7 @@ class Worker {
 
   CephContext *cct;
   PerfCounters *perf_logger;
+  PerfCounters *perf_labeled_logger;
   unsigned id;
 
   std::atomic_uint references;
@@ -233,9 +257,11 @@ class Worker {
   Worker& operator=(const Worker&) = delete;
 
   Worker(CephContext *c, unsigned worker_id)
-    : cct(c), perf_logger(NULL), id(worker_id), references(0), center(c) {
+    : cct(c), id(worker_id), references(0), center(c) {
     char name[128];
-    sprintf(name, "AsyncMessenger::Worker-%u", id);
+    char name_prefix[] = "AsyncMessenger::Worker";
+    sprintf(name, "%s-%u", name_prefix, id);
+
     // initialize perf_logger
     PerfCountersBuilder plb(cct, name, l_msgr_first, l_msgr_last);
 
@@ -243,7 +269,7 @@ class Worker {
     plb.add_u64_counter(l_msgr_send_messages, "msgr_send_messages", "Network sent messages");
     plb.add_u64_counter(l_msgr_recv_bytes, "msgr_recv_bytes", "Network received bytes", NULL, 0, unit_t(UNIT_BYTES));
     plb.add_u64_counter(l_msgr_send_bytes, "msgr_send_bytes", "Network sent bytes", NULL, 0, unit_t(UNIT_BYTES));
-    plb.add_u64_counter(l_msgr_active_connections, "msgr_active_connections", "Active connection number");
+    plb.add_u64(l_msgr_active_connections, "msgr_active_connections", "Active connection number");
     plb.add_u64_counter(l_msgr_created_connections, "msgr_created_connections", "Created connection number");
 
     plb.add_time(l_msgr_running_total_time, "msgr_running_total_time", "The total time of thread running");
@@ -259,11 +285,34 @@ class Worker {
 
     perf_logger = plb.create_perf_counters();
     cct->get_perfcounters_collection()->add(perf_logger);
+
+    // Add labeled perfcounters
+    std::string labels = ceph::perf_counters::key_create(
+        name_prefix, {{"id", std::to_string(id)}});
+    PerfCountersBuilder plb_labeled(
+        cct, labels, l_msgr_labeled_first,
+        l_msgr_labeled_last);
+
+    plb_labeled.add_u64_counter(
+        l_msgr_connection_ready_timeouts, "msgr_connection_ready_timeouts",
+        "Number of not yet ready connections declared as dead", NULL,
+        PerfCountersBuilder::PRIO_USEFUL);
+    plb_labeled.add_u64_counter(
+        l_msgr_connection_idle_timeouts, "msgr_connection_idle_timeouts",
+        "Number of connections closed due to idleness", NULL,
+        PerfCountersBuilder::PRIO_USEFUL);
+
+    perf_labeled_logger = plb_labeled.create_perf_counters();
+    cct->get_perfcounters_collection()->add(perf_labeled_logger);
   }
   virtual ~Worker() {
     if (perf_logger) {
       cct->get_perfcounters_collection()->remove(perf_logger);
       delete perf_logger;
+    }
+    if (perf_labeled_logger) {
+      cct->get_perfcounters_collection()->remove(perf_labeled_logger);
+      delete perf_labeled_logger;
     }
   }
 
@@ -275,6 +324,7 @@ class Worker {
 
   virtual void initialize() {}
   PerfCounters *get_perf_counter() { return perf_logger; }
+  PerfCounters *get_labeled_perf_counter() { return perf_labeled_logger; }
   void release_worker() {
     int oldref = references.fetch_sub(1);
     ceph_assert(oldref > 0);
@@ -314,7 +364,7 @@ class NetworkStack {
     static constexpr int TASK_COMM_LEN = 16;
     char tp_name[TASK_COMM_LEN];
     sprintf(tp_name, "msgr-worker-%u", id);
-    ceph_pthread_setname(pthread_self(), tp_name);
+    ceph_pthread_setname(tp_name);
   }
 
  protected:

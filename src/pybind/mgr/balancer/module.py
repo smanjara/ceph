@@ -9,11 +9,13 @@ import json
 import math
 import random
 import time
-from mgr_module import CLIReadCommand, CLICommand, CommandResult, MgrModule, Option, OSDMap
+from mgr_module import CommandResult, MgrModule, Option, OSDMap, CephReleases
 from threading import Event
 from typing import cast, Any, Dict, List, Optional, Sequence, Tuple, Union
 from mgr_module import CRUSHMap
 import datetime
+
+from .cli import BalancerCLICommand
 
 TIME_FORMAT = '%Y-%m-%d_%H:%M:%S'
 
@@ -55,6 +57,8 @@ class Mode(enum.Enum):
     none = 'none'
     crush_compat = 'crush-compat'
     upmap = 'upmap'
+    read = 'read'
+    upmap_read = 'upmap-read'
 
 
 class Plan(object):
@@ -116,6 +120,10 @@ class MsPlan(Plan):
                 osdlist += [m['from'], m['to']]
             ls.append('ceph osd pg-upmap-items %s %s' %
                       (item['pgid'], ' '.join([str(a) for a in osdlist])))
+        for item in incdump.get('new_pg_upmap_primaries', []):
+            ls.append('ceph osd pg-upmap-primary %s %s' % (item['pgid'], item['primary_osd']))
+        for item in incdump.get('old_pg_upmap_primaries', []):
+            ls.append('ceph osd rm-pg-upmap-primary %s' % item['pgid'])
         return '\n'.join(ls)
 
 
@@ -142,6 +150,9 @@ class Eval:
 
         self.score = 0.0
 
+        self.read_balance_score_by_pool: Dict[str, Dict[str, float]] = {}
+        self.read_balance_score_acting_by_pool: Dict[str, float] = {}
+
     def show(self, verbose: bool = False) -> str:
         if verbose:
             r = self.ms.desc + '\n'
@@ -155,9 +166,12 @@ class Eval:
             r += 'stats_by_root %s\n' % self.stats_by_root
             r += 'score_by_pool %s\n' % self.score_by_pool
             r += 'score_by_root %s\n' % self.score_by_root
+            r += 'score %f (lower is better)\n' % self.score
+            r += 'read_balance_score_by_pool %s\n' % self.read_balance_score_by_pool
         else:
             r = self.ms.desc + ' '
-        r += 'score %f (lower is better)\n' % self.score
+            r += 'score %f (lower is better)\n' % self.score
+            r += 'read_balance_scores (lower is better) %s\n' % self.read_balance_score_acting_by_pool
         return r
 
     def calc_stats(self, count, target, total):
@@ -227,6 +241,7 @@ class Eval:
 
 
 class Module(MgrModule):
+    CLICommand = BalancerCLICommand
     MODULE_OPTIONS = [
         Option(name='active',
                type='bool',
@@ -290,7 +305,7 @@ class Module(MgrModule):
         Option(name='mode',
                desc='Balancer mode',
                default='upmap',
-               enum_allowed=['none', 'crush-compat', 'upmap'],
+               enum_allowed=['none', 'crush-compat', 'upmap', 'read', 'upmap-read'],
                runtime=True),
         Option(name='sleep_interval',
                type='secs',
@@ -313,6 +328,11 @@ class Module(MgrModule):
                type='str',
                default='',
                desc='pools which the automatic balancing will be limited to',
+               runtime=True),
+        Option(name='update_pg_upmap_activity',
+               type='bool',
+               default=False,
+               desc='Updates pg_upmap activity stats to be used in `balancer status detail`',
                runtime=True)
     ]
 
@@ -327,12 +347,16 @@ class Module(MgrModule):
     no_optimization_needed = False
     success_string = 'Optimization plan created successfully'
     in_progress_string = 'in progress'
+    pg_upmap_items_added: List[Dict[str, Any]] = []
+    pg_upmap_items_removed: List[Dict[str, Any]] = []
+    pg_upmap_primaries_added: List[Dict[str, Any]] = []
+    pg_upmap_primaries_removed: List[Dict[str, Any]] = []
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super(Module, self).__init__(*args, **kwargs)
         self.event = Event()
 
-    @CLIReadCommand('balancer status')
+    @BalancerCLICommand.Read('balancer status')
     def show_status(self) -> Tuple[int, str, str]:
         """
         Show balancer status
@@ -348,18 +372,49 @@ class Module(MgrModule):
         }
         return (0, json.dumps(s, indent=4, sort_keys=True), '')
 
-    @CLICommand('balancer mode')
+    @BalancerCLICommand.Read('balancer status detail')
+    def show_status_detail(self) -> Tuple[int, str, str]:
+        """
+        Show balancer status (detailed)
+        """
+        pg_upmap_activity = cast(bool, self.get_module_option('update_pg_upmap_activity'))
+        if not pg_upmap_activity:
+            msg = 'This command is disabled.\n' \
+                  'To enable, run `ceph config set mgr mgr/balancer/update_pg_upmap_activity True`.\n'
+            return 0, msg, ''
+        s = {
+            'plans': list(self.plans.keys()),
+            'active': self.active,
+            'last_optimize_started': self.last_optimize_started,
+            'last_optimize_duration': self.last_optimize_duration,
+            'optimize_result': self.optimize_result,
+            'no_optimization_needed': self.no_optimization_needed,
+            'mode': self.get_module_option('mode'),
+            'pg_upmap_items_added': self.pg_upmap_items_added,
+            'pg_upmap_items_removed': self.pg_upmap_items_removed,
+            'pg_upmap_primaries_added': self.pg_upmap_primaries_added,
+            'pg_upmap_primaries_removed': self.pg_upmap_primaries_removed
+        }
+        return (0, json.dumps(s, indent=4, sort_keys=True), '')
+
+    @BalancerCLICommand('balancer mode')
     def set_mode(self, mode: Mode) -> Tuple[int, str, str]:
         """
         Set balancer mode
         """
+        min_compat_client = self.get_osdmap().dump().get('require_min_compat_client', '')
         if mode == Mode.upmap:
-            min_compat_client = self.get_osdmap().dump().get('require_min_compat_client', '')
-            if min_compat_client < 'luminous':  # works well because version is alphabetized..
-                warn = ('min_compat_client "%s" '
-                        '< "luminous", which is required for pg-upmap. '
-                        'Try "ceph osd set-require-min-compat-client luminous" '
-                        'before enabling this mode' % min_compat_client)
+            try:
+                release = CephReleases[min_compat_client]
+                if release.value < CephReleases.luminous.value:
+                    warn = ('min_compat_client "%s" '
+                            '< "luminous", which is required for pg-upmap. '
+                            'Try "ceph osd set-require-min-compat-client luminous" '
+                            'before enabling this mode' % min_compat_client)
+                    return (-errno.EPERM, '', warn)
+            except KeyError:
+                self.log.error('Unable to apply mode {} due to unknown min_compat_client {}'.format(mode, min_compat_client))
+                warn = ('Unable to apply mode {} due to unknown min_compat_client {}.'.format(mode, min_compat_client))
                 return (-errno.EPERM, '', warn)
         elif mode == Mode.crush_compat:
             ms = MappingState(self.get_osdmap(),
@@ -367,10 +422,23 @@ class Module(MgrModule):
                               self.get("pool_stats"),
                               'initialize compat weight-set')
             self.get_compat_weight_set_weights(ms)  # ignore error
+        elif (mode == Mode.read) or (mode == Mode.upmap_read):
+            try:
+                release = CephReleases[min_compat_client]
+                if release.value < CephReleases.reef.value:
+                    warn = ('min_compat_client "%s" '
+                            '< "reef", which is required for pg-upmap-primary. '
+                            'Try "ceph osd set-require-min-compat-client reef" '
+                            'before enabling this mode' % min_compat_client)
+                    return (-errno.EPERM, '', warn)
+            except KeyError:
+                self.log.error('Unable to apply mode {} due to unknown min_compat_client {}'.format(mode, min_compat_client))
+                warn = ('Unable to apply mode {} due to unknown min_compat_client {}.'.format(mode, min_compat_client))
+                return (-errno.EPERM, '', warn)
         self.set_module_option('mode', mode.value)
         return (0, '', '')
 
-    @CLICommand('balancer on')
+    @BalancerCLICommand('balancer on')
     def on(self) -> Tuple[int, str, str]:
         """
         Enable automatic balancing
@@ -381,7 +449,7 @@ class Module(MgrModule):
         self.event.set()
         return (0, '', '')
 
-    @CLICommand('balancer off')
+    @BalancerCLICommand('balancer off')
     def off(self) -> Tuple[int, str, str]:
         """
         Disable automatic balancing
@@ -392,7 +460,7 @@ class Module(MgrModule):
         self.event.set()
         return (0, '', '')
 
-    @CLIReadCommand('balancer pool ls')
+    @BalancerCLICommand.Read('balancer pool ls')
     def pool_ls(self) -> Tuple[int, str, str]:
         """
         List automatic balancing pools
@@ -419,7 +487,7 @@ class Module(MgrModule):
             self.set_module_option('pool_ids', ','.join(str(p) for p in final_ids))
         return (0, json.dumps(sorted(final_names), indent=4, sort_keys=True), '')
 
-    @CLICommand('balancer pool add')
+    @BalancerCLICommand('balancer pool add')
     def pool_add(self, pools: Sequence[str]) -> Tuple[int, str, str]:
         """
         Enable automatic balancing for specific pools
@@ -437,7 +505,7 @@ class Module(MgrModule):
         self.set_module_option('pool_ids', ','.join(final))
         return (0, '', '')
 
-    @CLICommand('balancer pool rm')
+    @BalancerCLICommand('balancer pool rm')
     def pool_rm(self, pools: Sequence[str]) -> Tuple[int, str, str]:
         """
         Disable automatic balancing for specific pools
@@ -493,7 +561,7 @@ class Module(MgrModule):
                               f'pool "{option}"')
         return ms, pools
 
-    @CLIReadCommand('balancer eval-verbose')
+    @BalancerCLICommand.Read('balancer eval-verbose')
     def plan_eval_verbose(self, option: Optional[str] = None):
         """
         Evaluate data distribution for the current cluster or specific pool or specific
@@ -505,7 +573,7 @@ class Module(MgrModule):
         except ValueError as e:
             return (-errno.EINVAL, '', str(e))
 
-    @CLIReadCommand('balancer eval')
+    @BalancerCLICommand.Read('balancer eval')
     def plan_eval_brief(self, option: Optional[str] = None):
         """
         Evaluate data distribution for the current cluster or specific pool or specific plan
@@ -516,7 +584,7 @@ class Module(MgrModule):
         except ValueError as e:
             return (-errno.EINVAL, '', str(e))
 
-    @CLIReadCommand('balancer optimize')
+    @BalancerCLICommand.Read('balancer optimize')
     def plan_optimize(self, plan: str, pools: List[str] = []) -> Tuple[int, str, str]:
         """
         Run optimizer to create a new plan
@@ -549,7 +617,7 @@ class Module(MgrModule):
             self.optimize_result = detail
         return (r, '', detail)
 
-    @CLIReadCommand('balancer show')
+    @BalancerCLICommand.Read('balancer show')
     def plan_show(self, plan: str) -> Tuple[int, str, str]:
         """
         Show details of an optimization plan
@@ -559,7 +627,7 @@ class Module(MgrModule):
             return (-errno.ENOENT, '', f'plan {plan} not found')
         return (0, plan_.show(), '')
 
-    @CLICommand('balancer rm')
+    @BalancerCLICommand('balancer rm')
     def plan_rm(self, plan: str) -> Tuple[int, str, str]:
         """
         Discard an optimization plan
@@ -568,7 +636,7 @@ class Module(MgrModule):
             del self.plans[plan]
         return (0, '', '')
 
-    @CLICommand('balancer reset')
+    @BalancerCLICommand('balancer reset')
     def plan_reset(self) -> Tuple[int, str, str]:
         """
         Discard all optimization plans
@@ -576,7 +644,7 @@ class Module(MgrModule):
         self.plans = {}
         return (0, '', '')
 
-    @CLIReadCommand('balancer dump')
+    @BalancerCLICommand.Read('balancer dump')
     def plan_dump(self, plan: str) -> Tuple[int, str, str]:
         """
         Show an optimization plan
@@ -587,14 +655,14 @@ class Module(MgrModule):
         else:
             return (0, plan_.dump(), '')
 
-    @CLIReadCommand('balancer ls')
+    @BalancerCLICommand.Read('balancer ls')
     def plan_ls(self) -> Tuple[int, str, str]:
         """
         List all plans
         """
         return (0, json.dumps([p for p in self.plans], indent=4, sort_keys=True), '')
 
-    @CLIReadCommand('balancer execute')
+    @BalancerCLICommand.Read('balancer execute')
     def plan_execute(self, plan: str) -> Tuple[int, str, str]:
         """
         Execute an optimization plan
@@ -608,6 +676,9 @@ class Module(MgrModule):
         if not plan_:
             return (-errno.ENOENT, '', f'plan {plan} not found')
         r, detail = self.execute(plan_)
+        pg_upmap_activity = cast(bool, self.get_module_option('update_pg_upmap_activity'))
+        if pg_upmap_activity:
+            self.update_pg_upmap_activity(plan_)  # update pg activity in `balancer status detail`
         self.plan_rm(plan)
         return (r, '', detail)
 
@@ -699,6 +770,9 @@ class Module(MgrModule):
                     self.execute(plan)
                 else:
                     self.optimize_result = detail
+                pg_upmap_activity = cast(bool, self.get_module_option('update_pg_upmap_activity'))
+                if pg_upmap_activity:
+                    self.update_pg_upmap_activity(plan)  # update pg activity in `balancer status detail`
                 self.optimizing = False
             self.log.debug('Sleeping for %d', sleep_interval)
             self.event.wait(sleep_interval)
@@ -864,6 +938,22 @@ class Module(MgrModule):
                 'objects': objects,
                 'bytes': bytes,
             }
+            try:
+                read_balance_scores = pi['read_balance']
+                pe.read_balance_score_acting_by_pool[pool] = read_balance_scores['score_acting']
+                score_keys = ['score_type', 'score_acting', 'score_stable',
+                              'optimal_score', 'raw_score_acting', 'raw_score_stable',
+                              'primary_affinity_weighted', 'average_primary_affinity',
+                              'average_primary_affinity_weighted', 'average_osd_load',
+                              'most_loaded_osd', 'most_loaded_acting_osd']
+                pe.read_balance_score_by_pool[pool] = {}
+                for key in score_keys:
+                    if key in read_balance_scores:
+                        pe.read_balance_score_by_pool[pool][key] = read_balance_scores[key]
+            except KeyError:
+                self.log.debug("Skipping pool '{}' since it does not have a read_balance_score, "
+                               "likely because it is not replicated.".format(pool))
+
         for root in pe.total_by_root:
             pe.count_by_root[root] = {
                 'pgs': {
@@ -933,10 +1023,9 @@ class Module(MgrModule):
         return pe.show(verbose=verbose)
 
     def optimize(self, plan: Plan) -> Tuple[int, str]:
-        self.log.info('Optimize plan %s' % plan.name)
         max_misplaced = cast(float, self.get_ceph_option('target_max_misplaced_ratio'))
-        self.log.info('Mode %s, max misplaced %f' %
-                      (plan.mode, max_misplaced))
+        self.log.info('Optimize plan %s, mode %s, max misplaced %f' %
+                      (plan.name, plan.mode, max_misplaced))
 
         info = self.get('pg_status')
         unknown = info.get('unknown_pgs_ratio', 0.0)
@@ -968,6 +1057,14 @@ class Module(MgrModule):
                 return self.do_upmap(plan)
             elif plan.mode == 'crush-compat':
                 return self.do_crush_compat(cast(MsPlan, plan))
+            elif plan.mode == 'read':
+                return self.do_read_balancing(plan)
+            elif plan.mode == 'upmap-read':
+                r_upmap, detail_upmap = self.do_upmap(plan)
+                r_read, detail_read = self.do_read_balancing(plan)
+                if (r_upmap < 0) and (r_read < 0):
+                    return r_upmap, detail_upmap
+                return 0, ''
             elif plan.mode == 'none':
                 detail = 'Please do "ceph balancer mode" to choose a valid mode first'
                 self.log.info('Idle')
@@ -977,8 +1074,86 @@ class Module(MgrModule):
                 self.log.info(detail)
                 return -errno.EINVAL, detail
 
+    def do_read_balancing(self, plan: Plan) -> Tuple[int, str]:
+        self.log.debug('do_read_balancing')
+        osdmap_dump = plan.osdmap_dump
+        msg = 'Unable to find further optimization, ' \
+              'or distribution is already perfect'
+
+        if len(plan.pools):
+            pools = plan.pools
+        else:  # all
+            pools = [str(i['pool_name']) for i in osdmap_dump.get('pools', [])]
+        if len(pools) == 0:
+            detail = 'No pools available'
+            self.log.info(detail)
+            return -errno.ENOENT, detail
+        self.log.debug('pools %s' % pools)
+
+        adjusted_pools = []
+        inc = plan.inc
+        total_num_changes = 0
+        pools_with_pg_merge = []
+        crush_rule_by_pool_name = {}
+        no_read_balance_info = []
+        optimally_balanced_rep_pools = []
+        rb_error_message = {}
+        for p in osdmap_dump.get('pools', []):
+            for pool_pg_status in plan.pg_status.get('pgs_by_pool_state', []):
+                if pool_pg_status['pool_id'] != p['pool']:
+                    continue
+                for state in pool_pg_status['pg_state_counts']:
+                    if state['state_name'] != 'active+clean':
+                        msg = "Not all PGs are active+clean; try again later."
+                        return -errno.EALREADY, msg
+            if p['pg_num'] > p['pg_num_target']:
+                pools_with_pg_merge.append(p['pool_name'])
+            crush_rule_by_pool_name[p['pool_name']] = p['crush_rule']
+            if 'read_balance' not in p:
+                no_read_balance_info.append(p['pool_name'])
+            if 'read_balance' in p:
+                if 'error_message' in p['read_balance']:
+                    rb_error_message[p['pool_name']] = p['read_balance']['error_message']
+                elif 'optimal_score' in p['read_balance']:
+                    # the score is normalized against the best achievable one,
+                    # so an optimally balanced pool scores 1
+                    if p['read_balance']['score_acting'] <= 1.0:
+                        optimally_balanced_rep_pools.append(p['pool_name'])
+        for pool in pools:
+            if pool not in crush_rule_by_pool_name:
+                self.log.debug('pool %s does not exist' % pool)
+                continue
+            if pool in pools_with_pg_merge:
+                self.log.debug('pool %s has pending PG(s) for merging, skipping for now' % pool)
+                continue
+            if pool in no_read_balance_info:
+                self.log.debug('pool %s has no read_balance information, skipping' % pool)
+                continue
+            if pool in optimally_balanced_rep_pools:
+                self.log.debug('pool %s is already balanced, skipping' % pool)
+                continue
+            if pool in rb_error_message:
+                self.log.error(rb_error_message[pool])
+                continue
+            adjusted_pools.append(pool)
+        pool_dump = osdmap_dump.get('pools', [])
+        for pool in adjusted_pools:
+            for p in pool_dump:
+                if p['pool_name'] == pool:
+                    pool_id = p['pool']
+                    break
+            num_changes = plan.osdmap.balance_primaries(pool_id, inc)
+            total_num_changes += num_changes
+        if total_num_changes > 0:
+            self.log.info('prepared {} read changes'.format(total_num_changes))
+        else:
+            self.log.debug('prepared {} read changes'.format(total_num_changes))
+            self.no_optimization_needed = True
+            return -errno.EALREADY, msg
+        return 0, ''
+
     def do_upmap(self, plan: Plan) -> Tuple[int, str]:
-        self.log.info('do_upmap')
+        self.log.debug('do_upmap')
         max_optimizations = cast(float, self.get_module_option('upmap_max_optimizations'))
         max_deviation = cast(int, self.get_module_option('upmap_max_deviation'))
         osdmap_dump = plan.osdmap_dump
@@ -993,7 +1168,7 @@ class Module(MgrModule):
             return -errno.ENOENT, detail
         # shuffle pool list so they all get equal (in)attention
         random.shuffle(pools)
-        self.log.info('pools %s' % pools)
+        self.log.debug('pools %s' % pools)
 
         adjusted_pools = []
         inc = plan.inc
@@ -1037,8 +1212,10 @@ class Module(MgrModule):
             left -= did
             if left <= 0:
                 break
-        self.log.info('prepared %d/%d changes' % (total_did, max_optimizations))
-        if total_did == 0:
+        if total_did > 0:
+            self.log.info('prepared %d/%d upmap changes' % (total_did, max_optimizations))
+        else:
+            self.log.debug('prepared %d/%d upmap changes' % (total_did, max_optimizations))
             self.no_optimization_needed = True
             return -errno.EALREADY, 'Unable to find further optimization, ' \
                                     'or pool(s) pg_num is decreasing, ' \
@@ -1046,7 +1223,7 @@ class Module(MgrModule):
         return 0, ''
 
     def do_crush_compat(self, plan: MsPlan) -> Tuple[int, str]:
-        self.log.info('do_crush_compat')
+        self.log.debug('do_crush_compat')
         max_iterations = cast(int, self.get_module_option('crush_compat_max_iterations'))
         if max_iterations < 1:
             return -errno.EINVAL, '"crush_compat_max_iterations" must be >= 1'
@@ -1123,14 +1300,18 @@ class Module(MgrModule):
                 osds = len(best_pe.target_by_root[root])
                 min_pgs = osds * min_pg_per_osd
                 if best_pe.total_by_root[root][key] < min_pgs:
-                    self.log.info('Skipping root %s (pools %s), total pgs %d '
-                                  '< minimum %d (%d per osd)',
-                                  root, pools,
-                                  best_pe.total_by_root[root][key],
-                                  min_pgs, min_pg_per_osd)
+                    self.log.debug('Skipping root %s (pools %s), total pgs %d '
+                                   '< minimum %d (%d per osd)',
+                                   root, pools,
+                                   best_pe.total_by_root[root][key],
+                                   min_pgs, min_pg_per_osd)
                     continue
-                self.log.info('Balancing root %s (pools %s) by %s' %
-                              (root, pools, key))
+                if left == max_iterations:
+                    self.log.info('Balancing root %s (pools %s) by %s' %
+                                  (root, pools, key))
+                else:
+                    self.log.debug('Balancing root %s (pools %s) by %s' %
+                                   (root, pools, key))
                 target = best_pe.target_by_root[root]
                 actual = best_pe.actual_by_root[root][key]
                 queue = sorted(actual.keys(),
@@ -1392,6 +1573,19 @@ class Module(MgrModule):
             }), 'foo')
             commands.append(result)
 
+        # read
+        for item in incdump.get('new_pg_upmap_primaries', []):
+            self.log.info('ceph osd pg-upmap-primary %s primary_osd %s', item['pgid'],
+                          item['primary_osd'])
+            result = CommandResult('foo')
+            self.send_command(result, 'mon', '', json.dumps({
+                'prefix': 'osd pg-upmap-primary',
+                'format': 'json',
+                'pgid': item['pgid'],
+                'id': item['primary_osd'],
+            }), 'foo')
+            commands.append(result)
+
         # wait for commands
         self.log.debug('commands %s' % commands)
         for result in commands:
@@ -1407,3 +1601,56 @@ class Module(MgrModule):
             'active': self.active,
             'mode': self.mode,
         }
+
+    def update_pg_upmap_activity(self, plan: Plan) -> None:
+        incdump = plan.inc.dump()
+
+        # update pg_upmap_items
+        self.pg_upmap_items_added = incdump.get('new_pg_upmap_items', [])
+        self.pg_upmap_items_removed = incdump.get('old_pg_upmap_items', [])
+
+        # update pg_upmap_primaries
+        self.pg_upmap_primaries_added = incdump.get('new_pg_upmap_primaries', [])
+        self.pg_upmap_primaries_removed = incdump.get('old_pg_upmap_primaries', [])
+
+    def self_test(self) -> None:
+        # turn balancer on
+        self.on()
+
+        # Get min-compat-client
+        min_compat_client = self.get_osdmap().dump().get('require_min_compat_client', '')
+        release = CephReleases[min_compat_client]
+
+        # Check upmap mode warning
+        r, _, warn = self.set_mode(Mode.upmap)
+        if release.value < CephReleases.luminous.value:
+            if r >= 0:
+                raise RuntimeError('upmap mode did not properly warn about min_compat_client')
+            if warn == '':
+                raise RuntimeError('upmap mode warning is empty when it should not be.')
+
+        # Check read mode warning
+        r, _, warn = self.set_mode(Mode.read)
+        if release.value < CephReleases.reef.value:
+            if r >= 0:
+                raise RuntimeError('read mode did not properly warn about min_compat_client')
+            if warn == '':
+                raise RuntimeError('read mode warning is empty when it should not be.')
+        r, _, warn = self.set_mode(Mode.upmap_read)
+
+        # Check upmap-read mode warning
+        if release.value < CephReleases.reef.value:
+            if r >= 0:
+                raise RuntimeError('upmap-read mode did not properly warn about min_compat_client')
+            if warn == '':
+                raise RuntimeError('upmap-read mode warning is empty when it should not be.')
+
+        # Check status
+        r, status, _ = self.show_status()
+        if r < 0:
+            raise RuntimeError('Balancer status was unsuccessful')
+        if status == '':
+            raise RuntimeError('Balancer status was empty')
+
+        # Turn off
+        self.off()

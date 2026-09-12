@@ -1,7 +1,10 @@
 import ipaddress
 import socket
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Any, List
 from urllib.parse import urlparse
+from ceph.deployment.hostspec import SpecValidationError
+from ceph.utils import with_units_to_int
+from numbers import Number
 
 
 def unwrap_ipv6(address):
@@ -70,6 +73,9 @@ def valid_addr(addr: str) -> Tuple[bool, str]:
     colons = addr.count(':')
     addr_as_url = f'http://{addr}'
 
+    if addr.startswith('[') and dots:
+        return False, "IPv4 address wrapped in brackets is invalid"
+
     try:
         res = urlparse(addr_as_url)
     except ValueError as e:
@@ -89,9 +95,6 @@ def valid_addr(addr: str) -> Tuple[bool, str]:
         elif ']:' in addr:
             return False, 'Port must be numeric'
 
-    if addr.startswith('[') and dots:
-        return False, "IPv4 address wrapped in brackets is invalid"
-
     # catch partial address like 10.8 which would be valid IPaddress schemes
     # but are classed as invalid here since they're not usable
     if dots and addr[0].isdigit() and dots != 3:
@@ -100,3 +103,97 @@ def valid_addr(addr: str) -> Tuple[bool, str]:
     if addr[0].isalpha() and '.' in addr:
         return _dns_lookup(addr, port)
     return _ip_lookup(addr, port)
+
+
+def verify_numeric(field: Any, field_name: str) -> None:
+    if field is not None:
+        if not isinstance(field, Number) or isinstance(field, bool):
+            raise SpecValidationError(f"{field_name} must be a number")
+
+
+def verify_int(field: Any, field_name: str) -> None:
+    verify_numeric(field, field_name)
+    if field is not None:
+        if not isinstance(field, int) or isinstance(field, bool):
+            raise SpecValidationError(f"{field_name} must be an integer")
+
+
+def verify_non_negative_int(field: Any, field_name: str) -> None:
+    verify_numeric(field, field_name)
+    if field is not None:
+        verify_int(field, field_name)
+        if field < 0:
+            raise SpecValidationError(f"{field_name} can't be negative")
+
+
+def verify_size_with_units(field: Any, field_name: str) -> Optional[int]:
+    """Validate a size value that may be an int (bytes) or a size string.
+
+    Accepts None, an int (bytes), or a size string such as ``512KiB``,
+    ``100MB``, or ``1GiB``. Returns the size in bytes, or None when
+    ``field`` is None.
+    """
+    if field is None:
+        return None
+    try:
+        size = with_units_to_int(str(field))
+    except (ValueError, TypeError, IndexError, UnboundLocalError):
+        raise SpecValidationError(f'{field_name}: invalid size {field!r}')
+    if size < 0:
+        raise SpecValidationError(f"{field_name} can't be negative")
+    return size
+
+
+def verify_positive_int(field: Any, field_name: str) -> None:
+    verify_non_negative_int(field, field_name)
+    if field is not None:
+        verify_int(field, field_name)
+        if field <= 0:
+            raise SpecValidationError(f"{field_name} must be greater than zero")
+
+
+def verify_non_negative_number(field: Any, field_name: str) -> None:
+    verify_numeric(field, field_name)
+    if field is not None:
+        if field < 0.0:
+            raise SpecValidationError(f"{field_name} can't be negative")
+
+
+def verify_boolean(field: Any, field_name: str) -> None:
+    if field is not None:
+        if not isinstance(field, bool):
+            raise SpecValidationError(f"{field_name} must be a boolean")
+
+
+def verify_enum(field: Any, field_name: str, allowed: list) -> None:
+    if field:
+        allowed_lower = []
+        if not isinstance(field, str):
+            raise SpecValidationError(f"{field_name} must be a string")
+        for val in allowed:
+            assert isinstance(val, str)
+            allowed_lower.append(val.lower())
+        if field.lower() not in allowed_lower:
+            raise SpecValidationError(
+                           f'Invalid {field_name}. Valid values are: {", ".join(allowed)}')
+
+
+def validate_port(port: Optional[int], field_name: str = 'port') -> None:
+    if port is not None and not (1 <= port <= 65535):
+        raise SpecValidationError(
+            f'Invalid {field_name}: {port}. Must be between 1 and 65535.'
+        )
+
+
+def validate_unique_ports(ports: List[int]) -> None:
+    """Raise SpecValidationError if any port is used more than once"""
+    if len(ports) != len(set(ports)):
+        raise SpecValidationError(
+            'Invalid port: Duplicate ports are not allowed'
+        )
+
+
+def verify_non_empty_string(field: Any, field_name: str) -> None:
+    # isinstance first so we never call .strip() on None or non-str
+    if not isinstance(field, str) or not field.strip():
+        raise SpecValidationError(f"Invalid {field_name}: Must be a non-empty string.")

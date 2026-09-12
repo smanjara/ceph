@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,25 +16,34 @@
 #ifndef CEPH_COMMON_ADMIN_SOCKET_H
 #define CEPH_COMMON_ADMIN_SOCKET_H
 
-#if defined(WITH_SEASTAR) && !defined(WITH_ALIEN)
+#ifdef WITH_CRIMSON
 #include "crimson/admin/admin_socket.h"
 #else
 
 #include <condition_variable>
+#include <list>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
 
 #include "include/buffer.h"
 #include "include/common_fwd.h"
+#include "common/admin_finisher.h"
 #include "common/ref.h"
 #include "common/cmdparse.h"
+
+#ifdef WIN32
+#include "include/win32/fs_compat.h" // for uid_t, gid_t
+#endif
 
 class MCommand;
 class MMonCommand;
 
 inline constexpr auto CEPH_ADMIN_SOCK_VERSION = std::string_view("2");
+
+typedef std::function<void(int,std::string_view,ceph::buffer::list&)> asok_finisher;
 
 class AdminSocketHook {
 public:
@@ -93,7 +103,7 @@ public:
     const cmdmap_t& cmdmap,
     ceph::Formatter *f,
     const ceph::buffer::list& inbl,
-    std::function<void(int,const std::string&,ceph::buffer::list&)> on_finish) {
+    asok_finisher on_finish) {
     // by default, call the synchronous handler and then finish
     ceph::buffer::list out;
     std::ostringstream errss;
@@ -151,7 +161,7 @@ public:
   void execute_command(
     const std::vector<std::string>& cmd,
     const ceph::buffer::list& inbl,
-    std::function<void(int,const std::string&,ceph::buffer::list&)> on_fin);
+    asok_finisher on_fin);
 
   /// execute (blocking)
   int execute_command(
@@ -190,6 +200,7 @@ private:
   std::unique_ptr<AdminSocketHook> version_hook;
   std::unique_ptr<AdminSocketHook> help_hook;
   std::unique_ptr<AdminSocketHook> getdescs_hook;
+  std::unique_ptr<AdminSocketHook> raise_hook;
 
   std::mutex tell_lock;
   std::list<ceph::cref_t<MCommand>> tell_queue;

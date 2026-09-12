@@ -19,6 +19,7 @@ class Scope(object):
     RBD_MIRRORING = "rbd-mirroring"
     RGW = "rgw"
     CEPHFS = "cephfs"
+    CEPHFS_MIRROR = "cephfs-mirror"
     MANAGER = "manager"
     LOG = "log"
     GRAFANA = "grafana"
@@ -26,6 +27,8 @@ class Scope(object):
     USER = "user"
     DASHBOARD_SETTINGS = "dashboard-settings"
     NFS_GANESHA = "nfs-ganesha"
+    NVME_OF = "nvme-of"
+    SMB = "smb"
 
     @classmethod
     def all_scopes(cls):

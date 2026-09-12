@@ -1,36 +1,29 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 #ifndef CEPH_MDSTYPES_H
 #define CEPH_MDSTYPES_H
 
 #include "include/int_types.h"
 
-#include <ostream>
+#include <iosfwd>
 #include <set>
 #include <map>
+#include <string>
 #include <string_view>
+#include <shared_mutex>
 
-#include "common/config.h"
-#include "common/Clock.h"
 #include "common/DecayCounter.h"
-#include "common/StackStringStream.h"
 #include "common/entity_name.h"
 
-#include "include/compat.h"
-#include "include/Context.h"
 #include "include/frag.h"
-#include "include/xlist.h"
 #include "include/interval_set.h"
-#include "include/compact_set.h"
 #include "include/fs_types.h"
-#include "include/ceph_fs.h"
+#include "include/types.h" // for ceph_tid_t, version_t
+#include "include/utime.h"
 
-#include "inode_backtrace.h"
-
-#include <boost/spirit/include/qi.hpp>
-#include <boost/pool/pool.hpp>
 #include "include/ceph_assert.h"
-#include "common/ceph_json.h"
+#include "include/cephfs/dump.h"
 #include "include/cephfs/types.h"
 
 #define MDS_PORT_CACHE   0x200
@@ -64,6 +57,8 @@
 
 #define MDS_IS_PRIVATE_INO(i) ((i) < MDS_INO_SYSTEM_BASE && (i) >= MDS_INO_MDSDIR_OFFSET)
 
+class JSONObj;
+
 class mds_role_t {
 public:
   mds_role_t(fs_cluster_id_t fscid_, mds_rank_t rank_)
@@ -85,12 +80,11 @@ public:
     return (rank == MDS_RANK_NONE);
   }
 
+  void print(std::ostream& out) const;
+
   fs_cluster_id_t fscid = FS_CLUSTER_ID_NONE;
   mds_rank_t rank = MDS_RANK_NONE;
 };
-inline std::ostream& operator<<(std::ostream& out, const mds_role_t& role) {
-  return out << role.fscid << ":" << role.rank;
-}
 
 // CAPS
 inline std::string gcap_string(int cap)
@@ -138,14 +132,7 @@ namespace std {
   };
 }
 
-inline std::ostream& operator<<(std::ostream &out, const vinodeno_t &vino) {
-  out << vino.ino;
-  if (vino.snapid == CEPH_NOSNAP)
-    out << ".head";
-  else if (vino.snapid)
-    out << '.' << vino.snapid;
-  return out;
-}
+std::ostream& operator<<(std::ostream &out, const vinodeno_t &vino);
 
 typedef uint32_t damage_flags_t;
 
@@ -173,78 +160,6 @@ inline void decode_noshare(xattr_map<Allocator>& xattrs, ceph::buffer::list::con
   }
 }
 
-template<template<typename> class Allocator = std::allocator>
-struct old_inode_t {
-  snapid_t first;
-  inode_t<Allocator> inode;
-  xattr_map<Allocator> xattrs;
-
-  void encode(ceph::buffer::list &bl, uint64_t features) const;
-  void decode(ceph::buffer::list::const_iterator& bl);
-  void dump(ceph::Formatter *f) const;
-  static void generate_test_instances(std::list<old_inode_t*>& ls);
-};
-
-// These methods may be moved back to mdstypes.cc when we have pmr
-template<template<typename> class Allocator>
-void old_inode_t<Allocator>::encode(ceph::buffer::list& bl, uint64_t features) const
-{
-  ENCODE_START(2, 2, bl);
-  encode(first, bl);
-  encode(inode, bl, features);
-  encode(xattrs, bl);
-  ENCODE_FINISH(bl);
-}
-
-template<template<typename> class Allocator>
-void old_inode_t<Allocator>::decode(ceph::buffer::list::const_iterator& bl)
-{
-  DECODE_START_LEGACY_COMPAT_LEN(2, 2, 2, bl);
-  decode(first, bl);
-  decode(inode, bl);
-  decode_noshare<Allocator>(xattrs, bl);
-  DECODE_FINISH(bl);
-}
-
-template<template<typename> class Allocator>
-void old_inode_t<Allocator>::dump(ceph::Formatter *f) const
-{
-  f->dump_unsigned("first", first);
-  inode.dump(f);
-  f->open_object_section("xattrs");
-  for (const auto &p : xattrs) {
-    std::string v(p.second.c_str(), p.second.length());
-    f->dump_string(p.first.c_str(), v);
-  }
-  f->close_section();
-}
-
-template<template<typename> class Allocator>
-void old_inode_t<Allocator>::generate_test_instances(std::list<old_inode_t<Allocator>*>& ls)
-{
-  ls.push_back(new old_inode_t<Allocator>);
-  ls.push_back(new old_inode_t<Allocator>);
-  ls.back()->first = 2;
-  std::list<inode_t<Allocator>*> ils;
-  inode_t<Allocator>::generate_test_instances(ils);
-  ls.back()->inode = *ils.back();
-  ls.back()->xattrs["user.foo"] = ceph::buffer::copy("asdf", 4);
-  ls.back()->xattrs["user.unprintable"] = ceph::buffer::copy("\000\001\002", 3);
-}
-
-template<template<typename> class Allocator>
-inline void encode(const old_inode_t<Allocator> &c, ::ceph::buffer::list &bl, uint64_t features)
-{
-  ENCODE_DUMP_PRE();
-  c.encode(bl, features);
-  ENCODE_DUMP_POST(cl);
-}
-template<template<typename> class Allocator>
-inline void decode(old_inode_t<Allocator> &c, ::ceph::buffer::list::const_iterator &p)
-{
-  c.decode(p);
-}
-
 /*
  * like an inode, but for a dir frag 
  */
@@ -253,7 +168,7 @@ struct fnode_t {
   void decode(ceph::buffer::list::const_iterator& bl);
   void dump(ceph::Formatter *f) const;
   void decode_json(JSONObj *obj);
-  static void generate_test_instances(std::list<fnode_t*>& ls);
+  static std::list<fnode_t> generate_test_instances();
 
   version_t version = 0;
   snapid_t snap_purged_thru;   // the max_last_destroy snapid we've been purged thru
@@ -275,16 +190,14 @@ struct old_rstat_t {
   void encode(ceph::buffer::list& bl) const;
   void decode(ceph::buffer::list::const_iterator& p);
   void dump(ceph::Formatter *f) const;
-  static void generate_test_instances(std::list<old_rstat_t*>& ls);
+  static std::list<old_rstat_t> generate_test_instances();
+
+  void print(std::ostream& out) const;
 
   snapid_t first;
   nest_info_t rstat, accounted_rstat;
 };
 WRITE_CLASS_ENCODER(old_rstat_t)
-
-inline std::ostream& operator<<(std::ostream& out, const old_rstat_t& o) {
-  return out << "old_rstat(first " << o.first << " " << o.rstat << " " << o.accounted_rstat << ")";
-}
 
 class feature_bitset_t {
 public:
@@ -294,6 +207,7 @@ public:
   feature_bitset_t(const feature_bitset_t& other) : _vec(other._vec) {}
   feature_bitset_t(feature_bitset_t&& other) : _vec(std::move(other._vec)) {}
   feature_bitset_t(unsigned long value = 0);
+  feature_bitset_t(std::string_view);
   feature_bitset_t(const std::vector<size_t>& array);
   feature_bitset_t& operator=(const feature_bitset_t& other) {
     _vec = other._vec;
@@ -346,15 +260,13 @@ public:
   void decode(ceph::buffer::list::const_iterator &p);
   void dump(ceph::Formatter *f) const;
   void print(std::ostream& out) const;
+  static std::list<feature_bitset_t> generate_test_instances();
 private:
+  void init_array(const std::vector<size_t>& v);
+
   std::vector<block_type> _vec;
 };
 WRITE_CLASS_ENCODER(feature_bitset_t)
-
-inline std::ostream& operator<<(std::ostream& out, const feature_bitset_t& s) {
-  s.print(out);
-  return out;
-}
 
 struct metric_spec_t {
   metric_spec_t() {}
@@ -387,17 +299,13 @@ struct metric_spec_t {
   void encode(ceph::buffer::list& bl) const;
   void decode(ceph::buffer::list::const_iterator& p);
   void dump(ceph::Formatter *f) const;
+  static std::list<metric_spec_t> generate_test_instances();
   void print(std::ostream& out) const;
 
   // set of metrics that a client is capable of forwarding
   feature_bitset_t metric_flags;
 };
 WRITE_CLASS_ENCODER(metric_spec_t)
-
-inline std::ostream& operator<<(std::ostream& out, const metric_spec_t& mst) {
-  mst.print(out);
-  return out;
-}
 
 /*
  * client_metadata_t
@@ -438,6 +346,7 @@ struct client_metadata_t {
   void encode(ceph::buffer::list& bl) const;
   void decode(ceph::buffer::list::const_iterator& p);
   void dump(ceph::Formatter *f) const;
+  static std::list<client_metadata_t> generate_test_instances();
 
   kv_map_t kv_map;
   feature_bitset_t features;
@@ -463,7 +372,7 @@ struct session_info_t {
   void encode(ceph::buffer::list& bl, uint64_t features) const;
   void decode(ceph::buffer::list::const_iterator& p);
   void dump(ceph::Formatter *f) const;
-  static void generate_test_instances(std::list<session_info_t*>& ls);
+  static std::list<session_info_t> generate_test_instances();
 
   entity_inst_t inst;
   std::map<ceph_tid_t,inodeno_t> completed_requests;
@@ -480,60 +389,22 @@ struct dentry_key_t {
   dentry_key_t(snapid_t s, std::string_view n, __u32 h=0) :
     snapid(s), name(n), hash(h) {}
 
+  void print(std::ostream& out) const;
+
   bool is_valid() { return name.length() || snapid; }
 
   // encode into something that can be decoded as a string.
   // name_ (head) or name_%x (!head)
-  void encode(ceph::buffer::list& bl) const {
-    std::string key;
-    encode(key);
-    using ceph::encode;
-    encode(key, bl);
-  }
-  void encode(std::string& key) const {
-    char b[20];
-    if (snapid != CEPH_NOSNAP) {
-      uint64_t val(snapid);
-      snprintf(b, sizeof(b), "%" PRIx64, val);
-    } else {
-      snprintf(b, sizeof(b), "%s", "head");
-    }
-    CachedStackStringStream css;
-    *css << name << "_" << b;
-    key = css->strv();
-  }
+  void encode(ceph::buffer::list& bl) const;
+  void encode(std::string& key) const;
   static void decode_helper(ceph::buffer::list::const_iterator& bl, std::string& nm,
-			    snapid_t& sn) {
-    std::string key;
-    using ceph::decode;
-    decode(key, bl);
-    decode_helper(key, nm, sn);
-  }
-  static void decode_helper(std::string_view key, std::string& nm, snapid_t& sn) {
-    size_t i = key.find_last_of('_');
-    ceph_assert(i != std::string::npos);
-    if (key.compare(i+1, std::string_view::npos, "head") == 0) {
-      // name_head
-      sn = CEPH_NOSNAP;
-    } else {
-      // name_%x
-      long long unsigned x = 0;
-      std::string x_str(key.substr(i+1));
-      sscanf(x_str.c_str(), "%llx", &x);
-      sn = x;
-    }
-    nm = key.substr(0, i);
-  }
+			    snapid_t& sn);
+  static void decode_helper(std::string_view key, std::string& nm, snapid_t& sn);
 
   snapid_t snapid = 0;
   std::string_view name;
   __u32 hash = 0;
 };
-
-inline std::ostream& operator<<(std::ostream& out, const dentry_key_t &k)
-{
-  return out << "(" << k.name << "," << k.snapid << ")";
-}
 
 inline bool operator<(const dentry_key_t& k1, const dentry_key_t& k2)
 {
@@ -556,6 +427,8 @@ struct string_snap_t {
   string_snap_t() {}
   string_snap_t(std::string_view n, snapid_t s) : name(n), snapid(s) {}
 
+  void print(std::ostream& out) const;
+
   int compare(const string_snap_t& r) const {
     int ret = name.compare(r.name);
     if (ret)
@@ -568,7 +441,7 @@ struct string_snap_t {
   void encode(ceph::buffer::list& bl) const;
   void decode(ceph::buffer::list::const_iterator& p);
   void dump(ceph::Formatter *f) const;
-  static void generate_test_instances(std::list<string_snap_t*>& ls);
+  static std::list<string_snap_t> generate_test_instances();
 
   std::string name;
   snapid_t snapid;
@@ -584,11 +457,6 @@ inline bool operator<(const string_snap_t& l, const string_snap_t& r) {
   return c < 0 || (c == 0 && l.snapid < r.snapid);
 }
 
-inline std::ostream& operator<<(std::ostream& out, const string_snap_t &k)
-{
-  return out << "(" << k.name << "," << k.snapid << ")";
-}
-
 /*
  * mds_table_pending_t
  *
@@ -599,63 +467,13 @@ struct mds_table_pending_t {
   void encode(ceph::buffer::list& bl) const;
   void decode(ceph::buffer::list::const_iterator& bl);
   void dump(ceph::Formatter *f) const;
-  static void generate_test_instances(std::list<mds_table_pending_t*>& ls);
+  static std::list<mds_table_pending_t> generate_test_instances();
 
   uint64_t reqid = 0;
   __s32 mds = 0;
   version_t tid = 0;
 };
 WRITE_CLASS_ENCODER(mds_table_pending_t)
-
-// requests
-struct metareqid_t {
-  metareqid_t() {}
-  metareqid_t(entity_name_t n, ceph_tid_t t) : name(n), tid(t) {}
-  void encode(ceph::buffer::list& bl) const {
-    using ceph::encode;
-    encode(name, bl);
-    encode(tid, bl);
-  }
-  void decode(ceph::buffer::list::const_iterator &p) {
-    using ceph::decode;
-    decode(name, p);
-    decode(tid, p);
-  }
-
-  entity_name_t name;
-  uint64_t tid = 0;
-};
-WRITE_CLASS_ENCODER(metareqid_t)
-
-inline std::ostream& operator<<(std::ostream& out, const metareqid_t& r) {
-  return out << r.name << ":" << r.tid;
-}
-
-inline bool operator==(const metareqid_t& l, const metareqid_t& r) {
-  return (l.name == r.name) && (l.tid == r.tid);
-}
-inline bool operator!=(const metareqid_t& l, const metareqid_t& r) {
-  return (l.name != r.name) || (l.tid != r.tid);
-}
-inline bool operator<(const metareqid_t& l, const metareqid_t& r) {
-  return (l.name < r.name) || 
-    (l.name == r.name && l.tid < r.tid);
-}
-inline bool operator<=(const metareqid_t& l, const metareqid_t& r) {
-  return (l.name < r.name) ||
-    (l.name == r.name && l.tid <= r.tid);
-}
-inline bool operator>(const metareqid_t& l, const metareqid_t& r) { return !(l <= r); }
-inline bool operator>=(const metareqid_t& l, const metareqid_t& r) { return !(l < r); }
-
-namespace std {
-  template<> struct hash<metareqid_t> {
-    size_t operator()(const metareqid_t &r) const { 
-      hash<uint64_t> H;
-      return H(r.name.num()) ^ H(r.name.type()) ^ H(r.tid);
-    }
-  };
-} // namespace std
 
 // cap info for client reconnect
 struct cap_reconnect_t {
@@ -678,7 +496,7 @@ struct cap_reconnect_t {
   void decode_old(ceph::buffer::list::const_iterator& bl);
 
   void dump(ceph::Formatter *f) const;
-  static void generate_test_instances(std::list<cap_reconnect_t*>& ls);
+  static std::list<cap_reconnect_t> generate_test_instances();
 
   std::string path;
   mutable ceph_mds_cap_reconnect capinfo = {};
@@ -700,7 +518,7 @@ struct snaprealm_reconnect_t {
   void decode_old(ceph::buffer::list::const_iterator& bl);
 
   void dump(ceph::Formatter *f) const;
-  static void generate_test_instances(std::list<snaprealm_reconnect_t*>& ls);
+  static std::list<snaprealm_reconnect_t> generate_test_instances();
 
   mutable ceph_mds_snaprealm_reconnect realm = {};
 };
@@ -739,16 +557,8 @@ struct old_cap_reconnect_t {
     return n;
   }
 
-  void encode(ceph::buffer::list& bl) const {
-    using ceph::encode;
-    encode(path, bl);
-    encode(capinfo, bl);
-  }
-  void decode(ceph::buffer::list::const_iterator& bl) {
-    using ceph::decode;
-    decode(path, bl);
-    decode(capinfo, bl);
-  }
+  void encode(ceph::buffer::list& bl) const;
+  void decode(ceph::buffer::list::const_iterator& bl);
 
   std::string path;
   old_ceph_mds_cap_reconnect capinfo;
@@ -760,27 +570,18 @@ struct dirfrag_t {
   dirfrag_t() {}
   dirfrag_t(inodeno_t i, frag_t f) : ino(i), frag(f) { }
 
-  void encode(ceph::buffer::list& bl) const {
-    using ceph::encode;
-    encode(ino, bl);
-    encode(frag, bl);
-  }
-  void decode(ceph::buffer::list::const_iterator& bl) {
-    using ceph::decode;
-    decode(ino, bl);
-    decode(frag, bl);
-  }
+  void print(std::ostream& out) const;
+
+  void encode(ceph::buffer::list& bl) const;
+  void decode(ceph::buffer::list::const_iterator& bl);
+  void dump(ceph::Formatter *f) const;
+  static std::list<dirfrag_t> generate_test_instances();
 
   inodeno_t ino = 0;
   frag_t frag;
 };
 WRITE_CLASS_ENCODER(dirfrag_t)
 
-inline std::ostream& operator<<(std::ostream& out, const dirfrag_t &df) {
-  out << df.ino;
-  if (!df.frag.is_root()) out << "." << df.frag;
-  return out;
-}
 inline bool operator<(dirfrag_t l, dirfrag_t r) {
   if (l.ino < r.ino) return true;
   if (l.ino == r.ino && l.frag < r.frag) return true;
@@ -828,7 +629,7 @@ public:
   void encode(ceph::buffer::list &bl) const;
   void decode(ceph::buffer::list::const_iterator& p);
   void dump(ceph::Formatter *f) const;
-  static void generate_test_instances(std::list<inode_load_vec_t*>& ls);
+  static std::list<inode_load_vec_t> generate_test_instances();
 
 private:
   std::array<DecayCounter, NUM> vec;
@@ -858,23 +659,12 @@ public:
       vec{DecayCounter(rate), DecayCounter(rate), DecayCounter(rate), DecayCounter(rate), DecayCounter(rate)}
   {}
 
-  void encode(ceph::buffer::list &bl) const {
-    ENCODE_START(2, 2, bl);
-    for (const auto &i : vec) {
-      encode(i, bl);
-    }
-    ENCODE_FINISH(bl);
-  }
-  void decode(ceph::buffer::list::const_iterator &p) {
-    DECODE_START_LEGACY_COMPAT_LEN(2, 2, 2, p);
-    for (auto &i : vec) {
-      decode(i, p);
-    }
-    DECODE_FINISH(p);
-  }
+  void encode(ceph::buffer::list &bl) const;
+  void decode(ceph::buffer::list::const_iterator &p);
   void dump(ceph::Formatter *f) const;
   void dump(ceph::Formatter *f, const DecayRate& rate) const;
-  static void generate_test_instances(std::list<dirfrag_load_vec_t*>& ls);
+  void print(std::ostream& out) const;
+  static std::list<dirfrag_load_vec_t> generate_test_instances();
 
   const DecayCounter &get(int t) const {
     return vec[t];
@@ -915,7 +705,6 @@ public:
   }
 
 private:
-  friend inline std::ostream& operator<<(std::ostream& out, const dirfrag_load_vec_t& dl);
   std::array<DecayCounter, NUM> vec;
 };
 
@@ -924,20 +713,6 @@ inline void encode(const dirfrag_load_vec_t &c, ceph::buffer::list &bl) {
 }
 inline void decode(dirfrag_load_vec_t& c, ceph::buffer::list::const_iterator &p) {
   c.decode(p);
-}
-
-inline std::ostream& operator<<(std::ostream& out, const dirfrag_load_vec_t& dl)
-{
-  CachedStackStringStream css;
-  *css << std::setprecision(1) << std::fixed
-     << "[pop"
-        " IRD:" << dl.vec[0]
-     << " IWR:" << dl.vec[1]
-     << " RDR:" << dl.vec[2]
-     << " FET:" << dl.vec[3]
-     << " STR:" << dl.vec[4]
-     << " *LOAD:" << dl.meta_load() << "]";
-  return out << css->strv();
 }
 
 struct mds_load_t {
@@ -950,33 +725,25 @@ struct mds_load_t {
   mds_load_t() : auth(DecayRate()), all(DecayRate()) {}
   mds_load_t(const DecayRate &rate) : auth(rate), all(rate) {}
 
+  void print(std::ostream& out) const;
+
   double req_rate = 0.0;
   double cache_hit_rate = 0.0;
   double queue_len = 0.0;
 
   double cpu_load_avg = 0.0;
 
-  double mds_load() const;  // defiend in MDBalancer.cc
+  double mds_load(int64_t bal_mode) const;  // defiend in MDBalancer.cc
   void encode(ceph::buffer::list& bl) const;
   void decode(ceph::buffer::list::const_iterator& bl);
   void dump(ceph::Formatter *f) const;
-  static void generate_test_instances(std::list<mds_load_t*>& ls);
+  static std::list<mds_load_t> generate_test_instances();
 };
 inline void encode(const mds_load_t &c, ceph::buffer::list &bl) {
   c.encode(bl);
 }
 inline void decode(mds_load_t &c, ceph::buffer::list::const_iterator &p) {
   c.decode(p);
-}
-
-inline std::ostream& operator<<(std::ostream& out, const mds_load_t& load)
-{
-  return out << "mdsload<" << load.auth << "/" << load.all
-             << ", req " << load.req_rate 
-             << ", hr " << load.cache_hit_rate
-             << ", qlen " << load.queue_len
-	     << ", cpu " << load.cpu_load_avg
-             << ">";
 }
 
 // ================================================================
@@ -996,20 +763,14 @@ public:
   void encode(ceph::buffer::list& bl) const;
   void decode(ceph::buffer::list::const_iterator& bl);
   void dump(ceph::Formatter *f) const;
-  static void generate_test_instances(std::list<MDSCacheObjectInfo*>& ls);
+  void print(std::ostream& out) const;
+  static std::list<MDSCacheObjectInfo> generate_test_instances();
 
   inodeno_t ino = 0;
   dirfrag_t dirfrag;
   std::string dname;
   snapid_t snapid;
 };
-
-inline std::ostream& operator<<(std::ostream& out, const MDSCacheObjectInfo &info) {
-  if (info.ino) return out << info.ino << "." << info.snapid;
-  if (info.dname.length()) return out << info.dirfrag << "/" << info.dname
-    << " snap " << info.snapid;
-  return out << info.dirfrag;
-}
 
 inline bool operator==(const MDSCacheObjectInfo& l, const MDSCacheObjectInfo& r) {
   if (l.ino || r.ino)
@@ -1019,4 +780,68 @@ inline bool operator==(const MDSCacheObjectInfo& l, const MDSCacheObjectInfo& r)
 }
 WRITE_CLASS_ENCODER(MDSCacheObjectInfo)
 
+struct EstimatedReplayTime {
+  double percent_complete;
+  std::chrono::seconds estimated_time;
+  std::chrono::seconds elapsed_time;
+
+  void print(std::ostream& out);
+};
+
+struct BlockDiff {
+  int rval;
+  uint64_t scan_idx;
+  interval_set<uint64_t> blocks;
+
+  void encode(ceph::buffer::list& bl) const;
+  void decode(ceph::buffer::list::const_iterator& p);
+  void dump(ceph::Formatter *f) const;
+  static std::list<BlockDiff> generate_test_instances();
+  void print(std::ostream& out) const;
+};
+WRITE_CLASS_ENCODER(BlockDiff);
+
+/**
+ *
+ * @brief Represents aggregated metric per subvolume
+ * This aggregation is a result of aggregating multiple
+ * AggregatedIOMetric instances from various clients
+ * (AggregatedIOMetric is created on the client by aggregating multiple SimpleIOMetric instances)
+ */
+struct SubvolumeMetric {
+    std::string subvolume_path;
+    uint64_t read_ops = 0;
+    uint64_t write_ops = 0;
+    uint64_t read_size = 0;
+    uint64_t write_size = 0;
+    uint64_t avg_read_latency = 0;
+    uint64_t avg_write_latency = 0;
+    uint64_t time_stamp = 0;
+    uint64_t quota_bytes = 0;
+    uint64_t used_bytes = 0;
+
+    DENC(SubvolumeMetric, v, p) {
+      DENC_START(2, 1, p);
+      denc(v.subvolume_path, p);
+      denc(v.read_ops, p);
+      denc(v.write_ops, p);
+      denc(v.read_size, p);
+      denc(v.write_size, p);
+      denc(v.avg_read_latency, p);
+      denc(v.avg_write_latency, p);
+      denc(v.time_stamp, p);
+      if (struct_v >= 2) {
+        denc(v.quota_bytes, p);
+        denc(v.used_bytes, p);
+      } else {
+        auto &mutable_v = const_cast<SubvolumeMetric&>(v);
+        mutable_v.quota_bytes = 0;
+        mutable_v.used_bytes = 0;
+      }
+      DENC_FINISH(p);
+    }
+
+    void dump(Formatter *f) const;
+    friend std::ostream& operator<<(std::ostream& os, const SubvolumeMetric &m);
+};
 #endif

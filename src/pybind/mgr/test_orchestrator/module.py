@@ -7,6 +7,8 @@ import functools
 import itertools
 from subprocess import check_output, CalledProcessError
 
+from .cli import TestOrchestratorCLICommand
+
 from ceph.deployment.service_spec import ServiceSpec, NFSServiceSpec, IscsiServiceSpec
 
 try:
@@ -16,7 +18,7 @@ except ImportError:
 
 from ceph.deployment import inventory
 from ceph.deployment.drive_group import DriveGroupSpec
-from mgr_module import CLICommand, HandleCommandResult
+from mgr_module import HandleCommandResult
 from mgr_module import MgrModule
 
 import orchestrator
@@ -24,6 +26,7 @@ from orchestrator import handle_orch_error, raise_if_exception
 
 
 class TestOrchestrator(MgrModule, orchestrator.Orchestrator):
+    CLICommand = TestOrchestratorCLICommand
     """
     This is an orchestrator implementation used for internal testing. It's meant for
     development environments and integration testing.
@@ -33,7 +36,7 @@ class TestOrchestrator(MgrModule, orchestrator.Orchestrator):
     The implementation is similar to the Rook orchestrator, but simpler.
     """
 
-    @CLICommand('test_orchestrator load_data', perm='w')
+    @TestOrchestratorCLICommand('test_orchestrator load_data', perm='w')
     def _load_data(self, inbuf):
         """
         load dummy data into test orchestrator
@@ -222,12 +225,12 @@ class TestOrchestrator(MgrModule, orchestrator.Orchestrator):
         return [self._create_osds(dg) for dg in specs]
 
     @handle_orch_error
-    def remove_daemons(self, names):
+    def remove_daemons(self, names, force_delete_data=False):
         assert isinstance(names, list)
         return 'done'
 
     @handle_orch_error
-    def remove_service(self, service_name, force = False):
+    def remove_service(self, service_name, force=False, force_delete_data=False):
         assert isinstance(service_name, str)
         return 'done'
 
@@ -242,7 +245,7 @@ class TestOrchestrator(MgrModule, orchestrator.Orchestrator):
         return 'done'
 
     @handle_orch_error
-    def daemon_action(self, action, daemon_name, image=None):
+    def daemon_action(self, action, daemon_name, image=None, force=False):
         return 'done'
 
     @handle_orch_error
@@ -284,7 +287,7 @@ class TestOrchestrator(MgrModule, orchestrator.Orchestrator):
         return ''
 
     @handle_orch_error
-    def remove_host(self, host, force: bool, offline: bool):
+    def remove_host(self, host, force: bool, offline: bool, rm_crush_entry: bool):
         assert isinstance(host, str)
         return 'done'
 
@@ -303,4 +306,12 @@ class TestOrchestrator(MgrModule, orchestrator.Orchestrator):
         assert not spec.placement.hosts or len(spec.placement.hosts) == spec.placement.count
         assert all([isinstance(h[0], str) for h in spec.placement.hosts])
         assert all([isinstance(h[1], str) or h[1] is None for h in spec.placement.hosts])
+        return spec.one_line_str()
+
+    @handle_orch_error
+    def apply_mds(self, spec):
+        #type: (ServiceSpec) -> str
+
+        assert not spec.placement.hosts or len(spec.placement.hosts) == spec.placement.count
+        assert all([isinstance(h, str) for h in spec.placement.hosts])
         return spec.one_line_str()

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -16,9 +17,10 @@
 #ifndef MDS_BATCHOP_H
 #define MDS_BATCHOP_H
 
-#include "common/ref.h"
+#include <iosfwd>
 
-#include "mdstypes.h"
+#include "common/ref.h"
+#include "include/cephfs/types.h" // for mds_rank_t
 
 class BatchOp {
 public:
@@ -27,7 +29,7 @@ public:
   virtual void add_request(const ceph::ref_t<class MDRequestImpl>& mdr) = 0;
   virtual ceph::ref_t<class MDRequestImpl> find_new_head() = 0;
 
-  virtual void print(std::ostream&) = 0;
+  virtual void print(std::ostream&) const = 0;
 
   void forward(mds_rank_t target);
   void respond(int r);

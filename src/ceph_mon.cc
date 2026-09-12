@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -14,13 +15,17 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #include <fcntl.h>
 
 #include <iostream>
+#include <optional>
+#include <sstream>
 #include <string>
 
 #include "common/config.h"
 #include "include/ceph_features.h"
+#include "include/util.h" // for ceph_data_stats_t
 
 #include "mon/MonMap.h"
 #include "mon/Monitor.h"
@@ -32,10 +37,13 @@
 #include "include/CompatSet.h"
 
 #include "common/ceph_argparse.h"
+#include "common/debug.h"
 #include "common/pick_address.h"
+#include "common/JSONFormatter.h"
 #include "common/Throttle.h"
 #include "common/Timer.h"
 #include "common/errno.h"
+#include "common/strtol.h"
 #include "common/Preforker.h"
 
 #include "global/global_init.h"
@@ -207,7 +215,7 @@ static void usage()
        << "  --force-sync\n"
        << "        force a sync from another mon by wiping local data (BE CAREFUL)\n"
        << "  --yes-i-really-mean-it\n"
-       << "        mandatory safeguard for --force-sync\n"
+       << "        mandatory safeguard for --force-sync and --restore-backup\n"
        << "  --compact\n"
        << "        compact the monitor store\n"
        << "  --osdmap <filename>\n"
@@ -216,10 +224,18 @@ static void usage()
        << "        write the <filename> monmap to the local monitor store and exit\n"
        << "  --extract-monmap <filename>\n"
        << "        extract the monmap from the local monitor store and exit\n"
+       << "  --use-mon-keyring\n"
+       << "        use the mon keyring as authoritative for the mon. secret\n"
        << "  --mon-data <directory>\n"
        << "        where the mon store and keyring are located\n"
-       << "  --set-crush-location <bucket>=<foo>"
-       << "        sets monitor's crush bucket location (only for stretch mode)"
+       << "  --set-crush-location <bucket>=<foo>\n"
+       << "        sets monitor's crush bucket location (only for stretch mode)\n"
+       << "  --restore-backup <directory>\n"
+       << "        restore the backup from location and exit (requires --yes-i-really-mean-it)\n"
+       << "  --backup-version <version>\n"
+       << "        BackupEngine version ID (uint32); defaults to the latest backup when omitted\n"
+       << "  --list-backups <directory>\n"
+       << "        list available backups\n"
        << std::endl;
   generic_server_usage();
 }
@@ -243,6 +259,7 @@ entity_addrvec_t make_mon_addrs(entity_addr_t a)
   } else {
     addrs.v.push_back(a);
   }
+  dout(5) << __func__ << ": " << addrs << dendl;
   return addrs;
 }
 
@@ -250,7 +267,7 @@ int main(int argc, const char **argv)
 {
   // reset our process name, in case we did a respawn, so that it's not
   // left as "exe".
-  ceph_pthread_setname(pthread_self(), "ceph-mon");
+  ceph_pthread_setname("ceph-mon");
 
   int err;
 
@@ -258,7 +275,10 @@ int main(int argc, const char **argv)
   bool compact = false;
   bool force_sync = false;
   bool yes_really = false;
+  bool use_mon_keyring = false;
   std::string osdmapfn, inject_monmap, extract_monmap, crush_loc;
+  std::string restore_backup_location, list_backup_location;
+  std::optional<uint32_t> restore_backup_version;
 
   auto args = argv_to_vec(argc, argv);
   if (args.empty()) {
@@ -272,25 +292,14 @@ int main(int argc, const char **argv)
 
   // We need to specify some default values that may be overridden by the
   // user, that are specific to the monitor.  The options we are overriding
-  // are also used on the OSD (or in any other component that uses leveldb),
-  // so changing the global defaults is not an option.
+  // are also used on the OSD, so changing the global defaults is not an option.
   // This is not the prettiest way of doing this, especially since it has us
   // having a different place defining default values, but it's not horribly
   // wrong enough to prevent us from doing it :)
   //
   // NOTE: user-defined options will take precedence over ours.
-  //
-  //  leveldb_write_buffer_size = 32*1024*1024  = 33554432  // 32MB
-  //  leveldb_cache_size        = 512*1024*1204 = 536870912 // 512MB
-  //  leveldb_block_size        = 64*1024       = 65536     // 64KB
-  //  leveldb_compression       = false
-  //  leveldb_log               = ""
+
   map<string,string> defaults = {
-    { "leveldb_write_buffer_size", "33554432" },
-    { "leveldb_cache_size", "536870912" },
-    { "leveldb_block_size", "65536" },
-    { "leveldb_compression", "false"},
-    { "leveldb_log", "" },
     { "keyring", "$mon_data/keyring" },
   };
 
@@ -334,6 +343,8 @@ int main(int argc, const char **argv)
       force_sync = true;
     } else if (ceph_argparse_flag(args, i, "--yes-i-really-mean-it", (char*)NULL)) {
       yes_really = true;
+    } else if (ceph_argparse_flag(args, i, "--use-mon-keyring", (char*)NULL)) {
+      use_mon_keyring = true;
     } else if (ceph_argparse_witharg(args, i, &val, "--osdmap", (char*)NULL)) {
       osdmapfn = val;
     } else if (ceph_argparse_witharg(args, i, &val, "--inject_monmap", (char*)NULL)) {
@@ -342,6 +353,18 @@ int main(int argc, const char **argv)
       extract_monmap = val;
     } else if (ceph_argparse_witharg(args, i, &val, "--set-crush-location", (char*)NULL)) {
       crush_loc = val;
+    } else if (ceph_argparse_witharg(args, i, &val, "--list-backups", (char*)NULL)) {
+      list_backup_location = val;
+    } else if (ceph_argparse_witharg(args, i, &val, "--restore-backup", (char*)NULL)) {
+      restore_backup_location = val;
+    } else if (ceph_argparse_witharg(args, i, &val, "--backup-version", (char*)NULL)) {
+      std::string parse_err;
+      long long v = strict_strtoll(val.c_str(), 10, &parse_err);
+      if (!parse_err.empty() || v < 0 || v > UINT32_MAX) {
+        cerr << "invalid --backup-version '" << val << "'" << std::endl;
+        exit(1);
+      }
+      restore_backup_version = static_cast<uint32_t>(v);
     } else {
       ++i;
     }
@@ -366,6 +389,53 @@ int main(int argc, const char **argv)
     cerr << "must specify id (--id <id> or --name mon.<id>)" << std::endl;
     exit(1);
   }
+
+  // -- list backups --
+  if (!list_backup_location.empty()) {
+    cout << "list backup from location '" << list_backup_location << "'" << std::endl << std::endl;
+    auto backup_infos = MonitorDBStore::list_backups(
+      cct.get(), g_conf()->mon_data, list_backup_location);
+    if (!backup_infos) {
+      cerr << "failed to enumerate backups at '" << list_backup_location
+           << "' (see log for details)" << std::endl;
+      exit(1);
+    }
+    if (backup_infos->empty()) {
+      cout << "no backups found at '" << list_backup_location << "'" << std::endl;
+      exit(0);
+    }
+    cout << "ID:\tTime:\t\t\t\tSize:" << std::endl;
+    for (const KeyValueDB::BackupStats& bi : *backup_infos) {
+      cout << bi.id << "\t";
+      bi.timestamp.asctime(cout);
+      cout << "\t" << byte_u_t(bi.size) << std::endl;
+    }
+    exit(0);
+  }
+
+  // -- restore backup --
+  if (!restore_backup_location.empty()) {
+    if (!yes_really) {
+      cerr << "restoring will overwrite the monitor store at '" << g_conf()->mon_data
+           << "'. Pass --yes-i-really-mean-it to proceed." << std::endl;
+      exit(1);
+    }
+    cerr << "restoring backup from location '" << restore_backup_location << "' to '"
+         << g_conf()->mon_data << "'" << std::endl;
+    if (MonitorDBStore::restore_backup(cct.get(), g_conf()->mon_data, restore_backup_location, restore_backup_version)) {
+        cout << "successfully restored backup. Start ceph-mon normally" << std::endl;
+        exit(0);
+    }
+    cerr << "restore failed. Check the backup path and version (use --list-backups to enumerate)." << std::endl;
+    exit(1);
+  }
+
+  if (restore_backup_version.has_value()) {
+    cerr << "--backup-version requires --restore-backup" << std::endl;
+    exit(1);
+  }
+
+  MonitorDBStore store(g_conf()->mon_data);
 
   // -- mkfs --
   if (mkfs) {
@@ -522,7 +592,6 @@ int main(int argc, const char **argv)
     }
 
     // go
-    MonitorDBStore store(g_conf()->mon_data);
     ostringstream oss;
     int r = store.create_and_open(oss);
     if (oss.tellp())
@@ -541,7 +610,7 @@ int main(int argc, const char **argv)
       exit(1);
     }
     store.close();
-    dout(0) << argv[0] << ": created monfs at " << g_conf()->mon_data 
+    dout(0) << argv[0] << ": created monfs at " << g_conf()->mon_data
 	    << " for " << g_conf()->name << dendl;
     return 0;
   }
@@ -589,8 +658,6 @@ int main(int argc, const char **argv)
     }
   }
 
-  // we fork early to prevent leveldb's environment static state from
-  // screwing us over
   Preforker prefork;
   if (!(flags & CINIT_FLAG_NO_DAEMON_ACTIONS)) {
     if (global_init_prefork(g_ceph_context) >= 0) {
@@ -618,12 +685,10 @@ int main(int argc, const char **argv)
   // set up signal handlers, now that we've daemonized/forked.
   init_async_signal_handler();
 
-  MonitorDBStore *store = new MonitorDBStore(g_conf()->mon_data);
-
   // make sure we aren't upgrading too fast
   {
     string val;
-    int r = store->read_meta("min_mon_release", &val);
+    int r = store.read_meta("min_mon_release", &val);
     if (r >= 0 && val.size()) {
       ceph_release_t from_release = ceph_release_from_name(val);
       ostringstream err;
@@ -636,7 +701,7 @@ int main(int argc, const char **argv)
 
   {
     ostringstream oss;
-    err = store->open(oss);
+    err = store.open(oss);
     if (oss.tellp())
       derr << oss.str() << dendl;
     if (err < 0) {
@@ -647,7 +712,7 @@ int main(int argc, const char **argv)
   }
 
   bufferlist magicbl;
-  err = store->get(Monitor::MONITOR_NAME, "magic", magicbl);
+  err = store.get(Monitor::MONITOR_NAME, "magic", magicbl);
   if (err || !magicbl.length()) {
     derr << "unable to read magic from mon data" << dendl;
     prefork.exit(1);
@@ -658,7 +723,7 @@ int main(int argc, const char **argv)
     prefork.exit(1);
   }
 
-  err = Monitor::check_features(store);
+  err = Monitor::check_features(&store);
   if (err < 0) {
     derr << "error checking features: " << cpp_strerror(err) << dendl;
     prefork.exit(1);
@@ -676,7 +741,7 @@ int main(int argc, const char **argv)
     }
 
     // get next version
-    version_t v = store->get("monmap", "last_committed");
+    version_t v = store.get("monmap", "last_committed");
     dout(0) << "last committed monmap epoch is " << v << ", injected map will be " << (v+1)
             << dendl;
     v++;
@@ -700,7 +765,7 @@ int main(int argc, const char **argv)
     t->put("monmap", v, mapbl);
     t->put("monmap", "latest", final);
     t->put("monmap", "last_committed", v);
-    store->apply_transaction(t);
+    store.apply_transaction(t);
 
     dout(0) << "done." << dendl;
     prefork.exit(0);
@@ -712,7 +777,7 @@ int main(int argc, const char **argv)
     // note that even if we don't find a viable monmap, we should go ahead
     // and try to build it up in the next if-else block.
     bufferlist mapbl;
-    int err = obtain_monmap(*store, mapbl);
+    int err = obtain_monmap(store, mapbl);
     if (err >= 0) {
       try {
         monmap.decode(mapbl);
@@ -819,20 +884,20 @@ int main(int argc, const char **argv)
                    Messenger::Policy::stateless_server(0));
 
   // throttle client traffic
-  Throttle *client_throttler = new Throttle(g_ceph_context, "mon_client_bytes",
-					    g_conf()->mon_client_bytes);
+  Throttle client_throttler(g_ceph_context, "mon_client_bytes",
+                            g_conf()->mon_client_bytes);
   msgr->set_policy_throttlers(entity_name_t::TYPE_CLIENT,
-				     client_throttler, NULL);
+                              &client_throttler, NULL);
 
   // throttle daemon traffic
   // NOTE: actual usage on the leader may multiply by the number of
   // monitors if they forward large update messages from daemons.
-  Throttle *daemon_throttler = new Throttle(g_ceph_context, "mon_daemon_bytes",
-					    g_conf()->mon_daemon_bytes);
-  msgr->set_policy_throttlers(entity_name_t::TYPE_OSD, daemon_throttler,
-				     NULL);
-  msgr->set_policy_throttlers(entity_name_t::TYPE_MDS, daemon_throttler,
-				     NULL);
+  Throttle daemon_throttler(g_ceph_context, "mon_daemon_bytes",
+                            g_conf()->mon_daemon_bytes);
+  msgr->set_policy_throttlers(entity_name_t::TYPE_OSD, &daemon_throttler,
+                              NULL);
+  msgr->set_policy_throttlers(entity_name_t::TYPE_MDS, &daemon_throttler,
+                              NULL);
 
   entity_addrvec_t bind_addrs = ipaddrs;
   entity_addrvec_t public_addrs = ipaddrs;
@@ -851,13 +916,13 @@ int main(int argc, const char **argv)
 
   Messenger *mgr_msgr = Messenger::create(g_ceph_context, public_msgr_type,
 					  entity_name_t::MON(rank), "mon-mgrc",
-					  Messenger::get_pid_nonce());
+					  Messenger::get_random_nonce());
   if (!mgr_msgr) {
     derr << "unable to create mgr_msgr" << dendl;
     prefork.exit(1);
   }
 
-  mon = new Monitor(g_ceph_context, g_conf()->name.get_id(), store,
+  mon = new Monitor(g_ceph_context, g_conf()->name.get_id(), &store,
 		    msgr, mgr_msgr, &monmap);
 
   mon->orig_argc = argc;
@@ -873,6 +938,10 @@ int main(int argc, const char **argv)
     *_dout << dendl;
   }
 
+  if (use_mon_keyring) {
+    mon->use_keyring_as_authoritative();
+  }
+
   err = mon->preinit();
   if (err < 0) {
     derr << "failed to initialize" << dendl;
@@ -886,16 +955,10 @@ int main(int argc, const char **argv)
   }
 
   // bind
-  err = msgr->bindv(bind_addrs);
+  err = msgr->bindv(bind_addrs, public_addrs);
   if (err < 0) {
     derr << "unable to bind monitor to " << bind_addrs << dendl;
     prefork.exit(1);
-  }
-
-  // if the public and bind addr are different set the msgr addr
-  // to the public one, now that the bind is complete.
-  if (public_addrs != bind_addrs) {
-    msgr->set_addrs(public_addrs);
   }
 
   if (g_conf()->daemonize) {
@@ -919,19 +982,17 @@ int main(int argc, const char **argv)
   msgr->wait();
   mgr_msgr->wait();
 
-  store->close();
-
   unregister_async_signal_handler(SIGHUP, handle_mon_signal);
   unregister_async_signal_handler(SIGINT, handle_mon_signal);
   unregister_async_signal_handler(SIGTERM, handle_mon_signal);
   shutdown_async_signal_handler();
 
+  // Destroy the Monitor (and its iterators) before closing the store.
   delete mon;
-  delete store;
+  store.close();
+
   delete msgr;
   delete mgr_msgr;
-  delete client_throttler;
-  delete daemon_throttler;
 
   // cd on exit, so that gmon.out (if any) goes into a separate directory for each node.
   char s[20];

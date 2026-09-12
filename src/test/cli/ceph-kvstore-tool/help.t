@@ -1,6 +1,8 @@
   $ ceph-kvstore-tool --help
-  Usage: ceph-kvstore-tool <leveldb|rocksdb|bluestore-kv> <store path> command [args...]
+  Usage: ceph-kvstore-tool <rocksdb|bluestore-kv> <store path> command [args...]
   
+  Options:
+    --pretty-binary-key    Use/dump binary keys in a print pretty format
   Commands:
     list [prefix]
     list-crc [prefix]
@@ -12,7 +14,7 @@
     set <prefix> <key> [ver <N>|in <file>]
     rm <prefix> <key>
     rm-prefix <prefix>
-    store-copy <path> [num-keys-per-tx] [leveldb|rocksdb|...] 
+    store-copy <path> [num-keys-per-tx] [rocksdb|...] 
     store-crc <path>
     compact
     compact-prefix <prefix>

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include <vector>
 #include <string>
@@ -45,8 +45,10 @@ class DatalogTrimImplCR : public RGWSimpleCoroutine {
   int send_request(const DoutPrefixProvider *dpp) override {
     set_status() << "sending request";
     cn = stack->create_completion_notifier();
-    return store->svc()->datalog_rados->trim_entries(dpp, shard, marker,
-						     cn->completion());
+    // Call cannot fail, all errors will be reported through the completion
+    store->svc()->datalog_rados->trim_entries(dpp, shard, marker,
+					      cn->completion());
+    return 0;
   }
   int request_complete() override {
     int r = cn->completion()->get_return_value();
@@ -223,9 +225,12 @@ int DataLogTrimPollCR::operate(const DoutPrefixProvider *dpp)
       // request a 'data_trim' lock that covers the entire wait interval to
       // prevent other gateways from attempting to trim for the duration
       set_status("acquiring trim lock");
-      yield call(new RGWSimpleRadosLockCR(store->svc()->rados->get_async_processor(), store,
+
+      yield call(new RGWSimpleRadosLockCR(store->svc()->async_processor, store,
                                           rgw_raw_obj(store->svc()->zone->get_zone_params().log_pool, lock_oid),
                                           "data_trim", lock_cookie,
+                                          // interval is a small number and unlikely to overflow
+                                          // coverity[store_truncates_time_t:SUPPRESS]
                                           interval.sec()));
       if (retcode < 0) {
         // if the lock is already held, go back to sleep and try again later

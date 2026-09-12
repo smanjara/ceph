@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -18,6 +18,9 @@
 #include <vector>
 #include <map>
 #include <string>
+
+#include "common/async/context_pool.h"
+
 #include "rgw_common.h"
 #include "rgw_rest.h"
 #include "rgw_frontend.h"
@@ -25,6 +28,9 @@
 #include "rgw_realm_reloader.h"
 #include "rgw_ldap.h"
 #include "rgw_lua.h"
+#ifdef WITH_RADOSGW_RADOS
+#include "rgw_dedup.h"
+#endif
 #include "rgw_dmclock_scheduler_ctx.h"
 #include "rgw_ratelimit.h"
 
@@ -34,7 +40,7 @@ class RGWPauser : public RGWRealmReloader::Pauser {
 
 public:
   ~RGWPauser() override = default;
-  
+
   void add_pauser(Pauser* pauser) {
     pausers.push_back(pauser);
   }
@@ -51,6 +57,10 @@ public:
 namespace rgw {
 
 namespace lua { class Background; }
+#ifdef WITH_RADOSGW_RADOS
+namespace dedup{ class Background; }
+#endif
+namespace sal { class ConfigStore; }
 
 class RGWLib;
 class AppMain {
@@ -63,30 +73,56 @@ class AppMain {
   std::vector<RGWFrontendConfig*> fe_configs;
   std::multimap<string, RGWFrontendConfig*> fe_map;
   std::unique_ptr<rgw::LDAPHelper> ldh;
-  OpsLogSink* olog;
   RGWREST rest;
   std::unique_ptr<rgw::lua::Background> lua_background;
+#ifdef WITH_RADOSGW_RADOS
+  std::unique_ptr<rgw::dedup::Background> dedup_background;
+#endif
   std::unique_ptr<rgw::auth::ImplicitTenants> implicit_tenant_context;
   std::unique_ptr<rgw::dmclock::SchedulerCtx> sched_ctx;
   std::unique_ptr<ActiveRateLimiter> ratelimiter;
   std::map<std::string, std::string> service_map_meta;
   // wow, realm reloader has a lot of parts
   std::unique_ptr<RGWRealmReloader> reloader;
+#ifdef WITH_RADOSGW_RADOS
   std::unique_ptr<RGWPeriodPusher> pusher;
+#endif
   std::unique_ptr<RGWFrontendPauser> fe_pauser;
   std::unique_ptr<RGWRealmWatcher> realm_watcher;
   std::unique_ptr<RGWPauser> rgw_pauser;
-  DoutPrefixProvider* dpp;
+  std::unique_ptr<sal::ConfigStore> cfgstore;
+  SiteConfig site;
+  const DoutPrefixProvider* dpp;
   RGWProcessEnv env;
+  class AdminSocketHook* heap_profiler_hook{nullptr};
+  void unregister_heap_profiler_hook(); // idempotent; used by shutdown() and ~AppMain()
 
+  class IOContextPoolHolder {
+  private:
+    std::optional<ceph::async::io_context_pool> pool_;
+    const DoutPrefixProvider* dpp_;
+
+  public:
+    explicit IOContextPoolHolder(const DoutPrefixProvider* dpp) : dpp_(dpp) {};
+    IOContextPoolHolder(const IOContextPoolHolder&) = delete;
+    IOContextPoolHolder& operator=(const IOContextPoolHolder&) = delete;
+
+    ceph::async::io_context_pool& get();
+    ceph::async::io_context_pool& operator*() { return get(); }
+    ceph::async::io_context_pool* operator->() { return std::addressof(get()); }
+  };
+
+  IOContextPoolHolder context_pool;
 public:
-  AppMain(DoutPrefixProvider* dpp)
-    : dpp(dpp)
-    {}
+  AppMain(const DoutPrefixProvider* dpp);
+  ~AppMain();
 
   void shutdown(std::function<void(void)> finalize_async_signals
 	       = []() { /* nada */});
 
+  sal::ConfigStore* get_config_store() const {
+    return cfgstore.get();
+  }
   rgw::sal::Driver* get_driver() {
     return env.driver;
   }
@@ -97,7 +133,7 @@ public:
 
   void init_frontends1(bool nfs = false);
   void init_numa();
-  void init_storage();
+  int init_storage();
   void init_perfcounters();
   void init_http_clients();
   void cond_init_apis();
@@ -105,8 +141,11 @@ public:
   void init_opslog();
   int init_frontends2(RGWLib* rgwlib = nullptr);
   void init_tracepoints();
-  void init_notification_endpoints();
   void init_lua();
+  void init_kms_cache();
+#ifdef WITH_RADOSGW_RADOS
+  void init_dedup();
+#endif
 
   bool have_http() {
     return have_http_frontend;
@@ -122,6 +161,7 @@ static inline RGWRESTMgr *set_logging(RGWRESTMgr* mgr)
   return mgr;
 }
 
+#ifdef WITH_RADOSGW_RADOS
 static inline RGWRESTMgr *rest_filter(rgw::sal::Driver* driver, int dialect, RGWRESTMgr* orig)
 {
   RGWSyncModuleInstanceRef sync_module = driver->get_sync_module();
@@ -131,4 +171,13 @@ static inline RGWRESTMgr *rest_filter(rgw::sal::Driver* driver, int dialect, RGW
     return orig;
   }
 }
+#else
+// sync modules (and their REST filters) are a RADOS-only feature; the
+// complete RGWSyncModuleInstance type lives in the rados driver, so avoid
+// referring to it in no-RADOS builds
+static inline RGWRESTMgr *rest_filter(rgw::sal::Driver*, int, RGWRESTMgr* orig)
+{
+  return orig;
+}
+#endif
 

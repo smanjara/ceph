@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -30,6 +31,29 @@
 #define CEPHX_REQUEST_TYPE_MASK            0x0F00
 #define CEPHX_CRYPT_ERR			1
 
+
+/* Principal <-> AuthMonitor */
+/* The session's connection secret: encrypted with AUTH ticket session key */
+#define CEPHX_KEY_USAGE_AUTH_CONNECTION_SECRET  0x03
+/* The ticket's CephXServiceTicket containing the session key: uses principal's key for the AUTH ticket otherwise the AUTH ticket session key for the service tickets */
+#define CEPHX_KEY_USAGE_TICKET_SESSION_KEY         0x04
+/* The ticket's CephXTicketBlob: uses old AUTH session key (if presented) */
+#define CEPHX_KEY_USAGE_TICKET_BLOB                0x05
+
+/* Principal <-> Service */
+/* Client Authorization Request: using the ticket session key */
+#define CEPHX_KEY_USAGE_AUTHORIZE             0x10
+/* Service's Challenge: using the ticket session key */
+#define CEPHX_KEY_USAGE_AUTHORIZE_CHALLENGE   0x11
+/* Service's final reply: using the ticket session key */
+#define CEPHX_KEY_USAGE_AUTHORIZE_REPLY       0x12
+
+/* Service Daemon <-> AuthMonitor */
+/* Rotating Secret Fetch by Services: service daemon's principal key */
+#define CEPHX_KEY_USAGE_ROTATING_SECRET       0x20
+/* CephXServiceTicketInfo: rotating service key */
+#define CEPHX_KEY_USAGE_TICKET_INFO           0x30
+
 #include "auth/Auth.h"
 #include <errno.h>
 #include <sstream>
@@ -55,6 +79,15 @@ struct CephXServerChallenge {
     decode(struct_v, bl);
     decode(server_challenge, bl);
   }
+  void dump(ceph::Formatter *f) const {
+    f->dump_unsigned("server_challenge", server_challenge);
+  }
+  static std::list<CephXServerChallenge> generate_test_instances() {
+    std::list<CephXServerChallenge> ls;
+    ls.emplace_back();
+    ls.back().server_challenge = 1;
+    return ls;
+  }
 };
 WRITE_CLASS_ENCODER(CephXServerChallenge)
 
@@ -72,6 +105,15 @@ struct CephXRequestHeader {
     using ceph::decode;
     decode(request_type, bl);
   }
+  void dump(ceph::Formatter *f) const {
+    f->dump_unsigned("request_type", request_type);
+  }
+  static std::list<CephXRequestHeader> generate_test_instances() {
+    std::list<CephXRequestHeader> ls;
+    ls.emplace_back();
+    ls.back().request_type = 1;
+    return ls;
+  }
 };
 WRITE_CLASS_ENCODER(CephXRequestHeader)
 
@@ -88,6 +130,17 @@ struct CephXResponseHeader {
     using ceph::decode;
     decode(request_type, bl);
     decode(status, bl);
+  }
+  void dump(ceph::Formatter *f) const {
+    f->dump_unsigned("request_type", request_type);
+    f->dump_int("status", status);
+  }
+  static std::list<CephXResponseHeader> generate_test_instances() {
+    std::list<CephXResponseHeader> ls;
+    ls.emplace_back();
+    ls.back().request_type = 1;
+    ls.back().status = 0;
+    return ls;
   }
 };
 WRITE_CLASS_ENCODER(CephXResponseHeader)
@@ -112,6 +165,19 @@ struct CephXTicketBlob {
      decode(struct_v, bl);
      decode(secret_id, bl);
      decode(blob, bl);
+  }
+
+  void dump(ceph::Formatter *f) const {
+    f->dump_unsigned("secret_id", secret_id);
+    f->dump_unsigned("blob_len", blob.length());
+  }
+
+  static std::list<CephXTicketBlob> generate_test_instances() {
+    std::list<CephXTicketBlob> ls;
+    ls.emplace_back();
+    ls.back().secret_id = 123;
+    ls.back().blob.append(std::string_view("this is a blob"));
+    return ls;
   }
 };
 WRITE_CLASS_ENCODER(CephXTicketBlob)
@@ -152,6 +218,27 @@ struct CephXAuthenticate {
     //   old_ticket both on reconnects and renewals
     old_ticket_may_be_omitted = struct_v < 3;
   }
+  void dump(ceph::Formatter *f) const {
+    f->dump_unsigned("client_challenge", client_challenge);
+    f->dump_unsigned("key", key);
+    f->open_object_section("old_ticket");
+    old_ticket.dump(f);
+    f->close_section();
+    f->dump_unsigned("other_keys", other_keys);
+  }
+  static std::list<CephXAuthenticate> generate_test_instances() {
+    std::list<CephXAuthenticate> ls;
+    ls.emplace_back();
+    ls.back().client_challenge = 0;
+    ls.back().key = 0;
+    ls.emplace_back();
+    ls.back().client_challenge = 1;
+    ls.back().key = 2;
+    ls.back().old_ticket.secret_id = 3;
+    ls.back().old_ticket.blob.append(std::string_view("this is a blob"));
+    ls.back().other_keys = 4;
+    return ls;
+  }
 };
 WRITE_CLASS_ENCODER(CephXAuthenticate)
 
@@ -168,6 +255,17 @@ struct CephXChallengeBlob {
     decode(server_challenge, bl);
     decode(client_challenge, bl);
   }
+  void dump(ceph::Formatter *f) const {
+    f->dump_unsigned("server_challenge", server_challenge);
+    f->dump_unsigned("client_challenge", client_challenge);
+  }
+  static std::list<CephXChallengeBlob> generate_test_instances() {
+    std::list<CephXChallengeBlob> ls;
+    ls.emplace_back();
+    ls.back().server_challenge = 123;
+    ls.back().client_challenge = 456;
+    return ls;
+  }
 };
 WRITE_CLASS_ENCODER(CephXChallengeBlob)
 
@@ -182,15 +280,16 @@ void cephx_calc_client_server_challenge(CephContext *cct,
 struct CephXSessionAuthInfo {
   uint32_t service_id;
   uint64_t secret_id;
-  AuthTicket ticket;
-  CryptoKey session_key;
+  AuthTicket ticket; /* TODO encapsulate in CephXServiceTicketInfo member */
+  CryptoKey session_key; /* ditto */
   CryptoKey service_secret;
   utime_t validity;
+
+  void print(std::ostream& os) const;
 };
 
 
-extern bool cephx_build_service_ticket_blob(CephContext *cct,
-					    CephXSessionAuthInfo& ticket_info, CephXTicketBlob& blob);
+extern bool cephx_build_service_ticket_blob(CephContext *cct, const CephXSessionAuthInfo& ticket_info, CephXTicketBlob& blob);
 
 extern void cephx_build_service_ticket_request(CephContext *cct, 
 					       uint32_t keys,
@@ -217,6 +316,17 @@ struct CephXServiceTicketRequest {
     __u8 struct_v;
     decode(struct_v, bl);
     decode(keys, bl);
+  }
+
+  void dump(ceph::Formatter *f) const {
+    f->dump_unsigned("keys", keys);
+  }
+
+  static std::list<CephXServiceTicketRequest> generate_test_instances() {
+    std::list<CephXServiceTicketRequest> ls;
+    ls.emplace_back();
+    ls.back().keys = 123;
+    return ls;
   }
 };
 WRITE_CLASS_ENCODER(CephXServiceTicketRequest)
@@ -250,6 +360,19 @@ struct CephXAuthorizeReply {
     if (struct_v >= 2) {
       decode(connection_secret, bl);
     }
+  }
+  void dump(ceph::Formatter *f) const {
+    f->dump_unsigned("nonce_plus_one", nonce_plus_one);
+    f->dump_string("connection_secret", connection_secret);
+  }
+  static std::list<CephXAuthorizeReply> generate_test_instances() {
+    std::list<CephXAuthorizeReply> ls;
+    ls.emplace_back();
+    ls.back().nonce_plus_one = 0;
+    ls.emplace_back();
+    ls.back().nonce_plus_one = 123;
+    ls.back().connection_secret = "secret";
+    return ls;
   }
 };
 WRITE_CLASS_ENCODER(CephXAuthorizeReply)
@@ -328,6 +451,7 @@ struct CephXTicketManager {
   void set_have_need_key(uint32_t service_id, uint32_t& have, uint32_t& need);
   void validate_tickets(uint32_t mask, uint32_t& have, uint32_t& need);
   void invalidate_ticket(uint32_t service_id);
+  void invalidate_all_tickets();
 
 private:
   CephContext *cct;
@@ -353,6 +477,19 @@ struct CephXServiceTicket {
     decode(session_key, bl);
     decode(validity, bl);
   }
+  void dump(ceph::Formatter *f) const {
+    session_key.dump(f);
+    validity.dump(f);
+  }
+  static std::list<CephXServiceTicket> generate_test_instances() {
+    std::list<CephXServiceTicket> ls;
+    ls.emplace_back();
+    ls.emplace_back();
+    ls.back().session_key.set_secret(
+      CEPH_CRYPTO_AES, bufferptr("1234567890123456", 16), utime_t(123, 456));
+    ls.back().validity = utime_t(123, 456);
+    return ls;
+  }
 };
 WRITE_CLASS_ENCODER(CephXServiceTicket)
 
@@ -375,11 +512,25 @@ struct CephXServiceTicketInfo {
     decode(ticket, bl);
     decode(session_key, bl);
   }
+  void dump(ceph::Formatter *f) const {
+    ticket.dump(f);
+    session_key.dump(f);
+  }
+  static std::list<CephXServiceTicketInfo> generate_test_instances() {
+    std::list<CephXServiceTicketInfo> ls;
+    ls.emplace_back();
+    ls.emplace_back();
+    ls.back().ticket.global_id = 1234;
+    ls.back().ticket.init_timestamps(utime_t(123, 456), utime_t(123, 456));
+    ls.back().session_key.set_secret(
+      CEPH_CRYPTO_AES, bufferptr("1234567890123456", 16), utime_t(123, 456));
+    return ls;
+  }
 };
 WRITE_CLASS_ENCODER(CephXServiceTicketInfo)
 
 struct CephXAuthorizeChallenge : public AuthAuthorizerChallenge {
-  uint64_t server_challenge;
+  uint64_t server_challenge = 0;
   void encode(ceph::buffer::list& bl) const {
     using ceph::encode;
     __u8 struct_v = 1;
@@ -392,11 +543,20 @@ struct CephXAuthorizeChallenge : public AuthAuthorizerChallenge {
     decode(struct_v, bl);
     decode(server_challenge, bl);
   }
+  void dump(ceph::Formatter *f) const {
+    f->dump_unsigned("server_challenge", server_challenge);
+  }
+  static std::list<CephXAuthorizeChallenge> generate_test_instances() {
+    std::list<CephXAuthorizeChallenge> ls;
+    ls.emplace_back();
+    ls.back().server_challenge = 1234;
+    return ls;
+  }
 };
 WRITE_CLASS_ENCODER(CephXAuthorizeChallenge)
 
 struct CephXAuthorize {
-  uint64_t nonce;
+  uint64_t nonce = 0;
   bool have_challenge = false;
   uint64_t server_challenge_plus_one = 0;
   void encode(ceph::buffer::list& bl) const {
@@ -416,6 +576,20 @@ struct CephXAuthorize {
       decode(have_challenge, bl);
       decode(server_challenge_plus_one, bl);
     }
+  }
+  void dump(ceph::Formatter *f) const {
+    f->dump_unsigned("nonce", nonce);
+    f->dump_unsigned("have_challenge", have_challenge);
+    f->dump_unsigned("server_challenge_plus_one", server_challenge_plus_one);
+  }
+  static std::list<CephXAuthorize> generate_test_instances() {
+    std::list<CephXAuthorize> ls;
+    ls.emplace_back();
+    ls.emplace_back();
+    ls.back().nonce = 1234;
+    ls.back().have_challenge = true;
+    ls.back().server_challenge_plus_one = 1234;
+    return ls;
   }
 };
 WRITE_CLASS_ENCODER(CephXAuthorize)
@@ -452,15 +626,45 @@ extern bool cephx_verify_authorizer(
 static constexpr uint64_t AUTH_ENC_MAGIC = 0xff009cad8826aa55ull;
 
 template <typename T>
-void decode_decrypt_enc_bl(CephContext *cct, T& t, CryptoKey key,
+void decode_decrypt_enc_bl(CephContext *cct, T& t, const CryptoKey& key,
 			   const ceph::buffer::list& bl_enc,
 			   std::string &error)
 {
   uint64_t magic;
   ceph::buffer::list bl;
 
-  if (key.decrypt(cct, bl_enc, bl, &error) < 0)
+  if (key.decrypt(cct, bl_enc, bl, &error) < 0) {
+    error = "decryption failed";
     return;
+  }
+
+  auto iter2 = bl.cbegin();
+  __u8 struct_v;
+  using ceph::decode;
+  decode(struct_v, iter2);
+  decode(magic, iter2);
+  if (magic != AUTH_ENC_MAGIC) {
+    std::ostringstream oss;
+    oss << "bad magic in decode_decrypt, " << magic << " != " << AUTH_ENC_MAGIC;
+    error = oss.str();
+    return;
+  }
+
+  decode(t, iter2);
+}
+
+template <typename T>
+void decode_decrypt_enc_bl(CephContext *cct, T& t, const CryptoKey& key,
+			   uint32_t usage, const ceph::buffer::list& bl_enc,
+			   std::string &error)
+{
+  uint64_t magic;
+  ceph::buffer::list bl;
+
+  if (key.decrypt_ext(cct, usage, bl_enc, bl, &error) < 0) {
+    error = "decryption failed";
+    return;
+  }
 
   auto iter2 = bl.cbegin();
   __u8 struct_v;
@@ -493,6 +697,22 @@ void encode_encrypt_enc_bl(CephContext *cct, const T& t, const CryptoKey& key,
 }
 
 template <typename T>
+void encode_encrypt_enc_bl(CephContext *cct, const T& t, const CryptoKey& key,
+			   uint32_t usage, ceph::buffer::list& out,
+                           std::string &error)
+{
+  ceph::buffer::list bl;
+  __u8 struct_v = 1;
+  using ceph::encode;
+  encode(struct_v, bl);
+  uint64_t magic = AUTH_ENC_MAGIC;
+  encode(magic, bl);
+  encode(t, bl);
+
+  key.encrypt_ext(cct, usage, bl, out, &error);
+}
+
+template <typename T>
 int decode_decrypt(CephContext *cct, T& t, const CryptoKey& key,
 		    ceph::buffer::list::const_iterator& iter, std::string &error)
 {
@@ -501,6 +721,25 @@ int decode_decrypt(CephContext *cct, T& t, const CryptoKey& key,
   try {
     decode(bl_enc, iter);
     decode_decrypt_enc_bl(cct, t, key, bl_enc, error);
+  }
+  catch (ceph::buffer::error &e) {
+    error = "error decoding block for decryption";
+  }
+  if (!error.empty())
+    return CEPHX_CRYPT_ERR;
+  return 0;
+}
+
+template <typename T>
+int decode_decrypt(CephContext *cct, T& t, const CryptoKey& key,
+		    uint32_t usage, ceph::buffer::list::const_iterator& iter,
+                    std::string &error)
+{
+  ceph::buffer::list bl_enc;
+  using ceph::decode;
+  try {
+    decode(bl_enc, iter);
+    decode_decrypt_enc_bl(cct, t, key, usage, bl_enc, error);
   }
   catch (ceph::buffer::error &e) {
     error = "error decoding block for decryption";
@@ -521,6 +760,33 @@ int encode_encrypt(CephContext *cct, const T& t, const CryptoKey& key,
     return CEPHX_CRYPT_ERR;
   }
   encode(bl_enc, out);
+  return 0;
+}
+
+template <typename T>
+int encode_encrypt(CephContext *cct, const T& t, const CryptoKey& key,
+		    uint32_t usage, ceph::buffer::list& out, std::string &error)
+{
+  using ceph::encode;
+  ceph::buffer::list bl_enc;
+  encode_encrypt_enc_bl(cct, t, key, usage, bl_enc, error);
+  if (!error.empty()){
+    return CEPHX_CRYPT_ERR;
+  }
+  encode(bl_enc, out);
+  return 0;
+}
+
+template <typename T>
+int encode_hash(CephContext *cct, const T& t, const CryptoKey& key,
+                ceph::buffer::list& out, std::string &error)
+{
+  using ceph::encode;
+  ceph::buffer::list bl_enc;
+  /* simple encoding, we don't need to add any magic because this will not be decoded */
+  ::encode(t, bl_enc);
+  sha256_digest_t hash = key.hmac_sha256(cct, bl_enc);
+  out.append((const char *)&hash, sizeof(hash));
   return 0;
 }
 

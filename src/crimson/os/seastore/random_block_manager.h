@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -22,26 +22,9 @@
 
 namespace crimson::os::seastore {
 
-struct rbm_metadata_header_t {
-  size_t size = 0;
-  size_t block_size = 0;
-  uint64_t feature = 0;
-  uint64_t journal_size = 0;
-  checksum_t crc = 0;
-  device_config_t config;
-
-  DENC(rbm_metadata_header_t, v, p) {
-    DENC_START(1, 1, p);
-    denc(v.size, p);
-    denc(v.block_size, p);
-    denc(v.feature, p);
-
-    denc(v.journal_size, p);
-    denc(v.crc, p);
-    denc(v.config, p);
-    DENC_FINISH(p);
-  }
-
+struct alloc_paddr_result {
+  paddr_t start;
+  extent_len_t len;
 };
 
 enum class rbm_extent_state_t {
@@ -70,7 +53,7 @@ public:
     crimson::ct_error::enospc,
     crimson::ct_error::erange
     >;
-  virtual write_ertr::future<> write(paddr_t addr, bufferptr &buf) = 0;
+  virtual write_ertr::future<> write(paddr_t addr, bufferptr buf) = 0;
 
   using open_ertr = crimson::errorator<
     crimson::ct_error::input_output_error,
@@ -92,6 +75,10 @@ public:
   // allocator, return start addr of allocated blocks
   virtual paddr_t alloc_extent(size_t size) = 0;
 
+  using allocate_ret_bare = std::list<alloc_paddr_result>;
+  using allo_extents_ret = allocate_ertr::future<allocate_ret_bare>;
+  virtual allocate_ret_bare alloc_extents(size_t size, paddr_t hint) = 0;
+
   virtual void mark_space_used(paddr_t paddr, size_t len) = 0;
   virtual void mark_space_free(paddr_t paddr, size_t len) = 0;
 
@@ -105,7 +92,11 @@ public:
   virtual Device* get_device() = 0;
   virtual paddr_t get_start() = 0;
   virtual rbm_extent_state_t get_extent_state(paddr_t addr, size_t size) = 0;
+  virtual size_t get_journal_size() const = 0;
   virtual ~RandomBlockManager() {}
+#ifdef UNIT_TESTS_BUILT
+  virtual void prefill_fragmented_device() = 0;
+#endif
 };
 using RandomBlockManagerRef = std::unique_ptr<RandomBlockManager>;
 
@@ -117,13 +108,14 @@ inline rbm_abs_addr convert_paddr_to_abs_addr(const paddr_t& paddr) {
 inline paddr_t convert_abs_addr_to_paddr(rbm_abs_addr addr, device_id_t d_id) {
   return paddr_t::make_blk_paddr(d_id, addr);
 }
-std::ostream &operator<<(std::ostream &out, const rbm_metadata_header_t &header);
+
+namespace random_block_device {
+  class RBMDevice;
 }
 
-WRITE_CLASS_DENC_BOUNDED(
-  crimson::os::seastore::rbm_metadata_header_t
-)
+seastar::future<std::unique_ptr<random_block_device::RBMDevice>> 
+  get_rb_device(const std::string &device, device_type_t dtype);
 
-#if FMT_VERSION >= 90000
-template<> struct fmt::formatter<crimson::os::seastore::rbm_metadata_header_t> : fmt::ostream_formatter {};
-#endif
+std::ostream &operator<<(std::ostream &out, const rbm_extent_state_t &state);
+}
+

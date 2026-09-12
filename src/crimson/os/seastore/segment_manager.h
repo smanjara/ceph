@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -20,61 +20,7 @@
 
 namespace crimson::os::seastore {
 
-struct block_sm_superblock_t {
-  size_t size = 0;
-  size_t segment_size = 0;
-  size_t block_size = 0;
-
-  size_t segments = 0;
-  uint64_t tracker_offset = 0;
-  uint64_t first_segment_offset = 0;
-
-  device_config_t config;
-
-  DENC(block_sm_superblock_t, v, p) {
-    DENC_START(1, 1, p);
-    denc(v.size, p);
-    denc(v.segment_size, p);
-    denc(v.block_size, p);
-    denc(v.segments, p);
-    denc(v.tracker_offset, p);
-    denc(v.first_segment_offset, p);
-    denc(v.config, p);
-    DENC_FINISH(p);
-  }
-
-  void validate() const {
-    ceph_assert(block_size > 0);
-    ceph_assert(segment_size > 0 &&
-                segment_size % block_size == 0);
-    ceph_assert_always(segment_size <= SEGMENT_OFF_MAX);
-    ceph_assert(size > segment_size &&
-                size % block_size == 0);
-    ceph_assert_always(size <= DEVICE_OFF_MAX);
-    ceph_assert(segments > 0);
-    ceph_assert_always(segments <= DEVICE_SEGMENT_ID_MAX);
-    ceph_assert(tracker_offset > 0 &&
-                tracker_offset % block_size == 0);
-    ceph_assert(first_segment_offset > tracker_offset &&
-                first_segment_offset % block_size == 0);
-    ceph_assert(config.spec.magic != 0);
-    ceph_assert(config.spec.dtype == device_type_t::SSD);
-    ceph_assert(config.spec.id <= DEVICE_ID_MAX_VALID);
-    if (!config.major_dev) {
-      ceph_assert(config.secondary_devices.size() == 0);
-    }
-    for (const auto& [k, v] : config.secondary_devices) {
-      ceph_assert(k != config.spec.id);
-      ceph_assert(k <= DEVICE_ID_MAX_VALID);
-      ceph_assert(k == v.id);
-      ceph_assert(v.magic != 0);
-      ceph_assert(v.dtype > device_type_t::NONE);
-      ceph_assert(v.dtype < device_type_t::NUM_TYPES);
-    }
-  }
-};
-
-std::ostream& operator<<(std::ostream&, const block_sm_superblock_t&);
+using std::vector;
 
 class Segment : public boost::intrusive_ref_counter<
   Segment,
@@ -135,7 +81,7 @@ public:
    * advance_wp
    *
    * advance the segment write pointer,
-   * needed when writing at wp is strictly implemented. ex: ZNS backed segments
+   * needed when writing at wp is strictly implemented. ex: ZBD backed segments
    * @param offset: advance write pointer till the given offset
    */
   virtual write_ertr::future<> advance_wp(
@@ -154,10 +100,6 @@ using SegmentManagerRef = std::unique_ptr<SegmentManager>;
 
 class SegmentManager : public Device {
 public:
-  device_type_t get_device_type() const final {
-    return device_type_t::SSD;
-  }
-
   backend_type_t get_backend_type() const final {
     return backend_type_t::SEGMENTED;
   }
@@ -183,15 +125,8 @@ public:
 
   virtual ~SegmentManager() {}
 
-  static seastar::future<SegmentManagerRef> get_segment_manager(const std::string &device);
+  static seastar::future<SegmentManagerRef>
+  get_segment_manager(const std::string &device, device_type_t dtype);
 };
 
 }
-
-WRITE_CLASS_DENC(
-  crimson::os::seastore::block_sm_superblock_t
-)
-
-#if FMT_VERSION >= 90000
-template <> struct fmt::formatter<crimson::os::seastore::block_sm_superblock_t> : fmt::ostream_formatter {};
-#endif

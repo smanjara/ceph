@@ -8,7 +8,9 @@ import time
 import gevent
 import json
 import math
+from gevent.event import Event
 from teuthology import misc as teuthology
+from teuthology.contextutil import safe_while
 from tasks import ceph_manager
 from tasks.cephfs.filesystem import MDSCluster
 from tasks.thrasher import Thrasher
@@ -42,6 +44,10 @@ class MonitorThrasher(Thrasher):
                         the monitor (default: 10)
     thrash_delay        Number of seconds to wait in-between
                         test iterations (default: 0)
+    switch_thrashers:   Toggle this to switch between thrashers so it waits until all
+                        thrashers are done thrashing before proceeding. And then
+                        wait until all thrashers are done reviving before proceeding.
+                        (default: false) 
     store_thrash        Thrash monitor store before killing the monitor being thrashed (default: False)
     store_thrash_probability  Probability of thrashing a monitor's store
                               (default: 50)
@@ -58,7 +64,7 @@ class MonitorThrasher(Thrasher):
                         task to run with as many as just one single monitor.
                         (default: True)
     freeze_mon_probability: how often to freeze the mon instead of killing it,
-                        in % (default: 0)
+                        in % (default: 10)
     freeze_mon_duration: how many seconds to freeze the mon (default: 15)
     scrub               Scrub after each iteration (default: True)
     check_mds_failover  Check if mds failover happened (default: False)
@@ -92,13 +98,16 @@ class MonitorThrasher(Thrasher):
         self.manager = manager
         self.manager.wait_for_clean()
 
-        self.stopping = False
+        self.stopping = Event()
         self.logger = logger
         self.config = config
         self.name = name
 
         if self.config is None:
             self.config = dict()
+
+        if self.config.get("switch_thrashers"): 
+            self.switch_thrasher = Event()
 
         """ Test reproducibility """
         self.random_seed = self.config.get('seed', None)
@@ -119,6 +128,15 @@ class MonitorThrasher(Thrasher):
         self.scrub = self.config.get('scrub', True)
 
         self.freeze_mon_probability = float(self.config.get('freeze_mon_probability', 10))
+        # In some cases where many monitors froze at once and revived
+        # after a long time might cause the connection to take more time to establish.
+        # Therefore, we increase the netsplit grace period to 30 seconds.
+        # This is to avoid false positives in the netsplit test, while still keeping
+        # the integrity of the test.
+        if self.freeze_mon_probability > 0:
+            self.manager.raw_cluster_cmd(
+                'config', 'set', 'mon', 'mon_netsplit_grace_period', '30')
+
         self.freeze_mon_duration = float(self.config.get('freeze_mon_duration', 15.0))
 
         assert self.max_killable() > 0, \
@@ -148,12 +166,25 @@ class MonitorThrasher(Thrasher):
         """
         self.logger.info(x)
 
-    def do_join(self):
+    def stop(self):
+        """
+        Stop the thrashing process.
+        """
+        self.stopping.set()
+
+    def join(self):
         """
         Break out of this processes thrashing loop.
         """
-        self.stopping = True
+        self.stopping.set()
         self.thread.get()
+
+    def stop_and_join(self):
+        """
+        Stop the thrashing process and join the thread.
+        """
+        self.stop()
+        return self.join()
 
     def should_thrash_store(self):
         """
@@ -210,7 +241,6 @@ class MonitorThrasher(Thrasher):
         """
         Revive the monitor specified
         """
-        self.log('killing mon.{id}'.format(id=mon))
         self.log('reviving mon.{id}'.format(id=mon))
         self.manager.revive_mon(mon)
 
@@ -224,6 +254,25 @@ class MonitorThrasher(Thrasher):
         else:
             return m
 
+    def _wait_until_quorum(self, mon, size, timeout=300):
+        """
+        Wait until the monitor specified is in the quorum.
+        """
+        self.log('waiting for quorum size %d for mon %s' % (size, mon))
+        s = {}
+
+        with safe_while(sleep=3,
+                        tries=timeout // 3,
+                        action=f'wait for quorum size {size} on mon {mon}') as proceed:
+            while proceed():
+                s = self.manager.get_mon_status(mon)
+                if len(s['quorum']) == size:
+                   break
+                self.log("quorum is size %d" % len(s['quorum']))
+
+        self.log("final quorum is size %d" % len(s['quorum']))
+        return s
+
     def do_thrash(self):
         """
         _do_thrash() wrapper.
@@ -236,6 +285,28 @@ class MonitorThrasher(Thrasher):
             self.logger.exception("exception:")
             # Allow successful completion so gevent doesn't see an exception.
             # The DaemonWatchdog will observe the error and tear down the test.
+
+    def switch_task(self):
+        """
+        Pause mon thrasher till other thrashers are done with their iteration.
+        This would help to sync between multiple thrashers, like:
+        1. thrasher-1 and thrasher-2: thrash daemons in parallel
+        2. thrasher-1 and thrasher-2: revive daemons in parallel 
+        This allows us to run some checks after each thrashing and reviving iteration.
+        """
+        if not hasattr(self, 'switch_thrasher'):
+            return
+        self.switch_thrasher.set()
+        thrashers = self.ctx.ceph[self.config.get('cluster')].thrashers
+        for t in thrashers:
+            if not isinstance(t, MonitorThrasher) and hasattr(t, 'switch_thrasher') and ( 
+                isinstance(t.stopping, Event) and not t.stopping.is_set()
+            ):
+                other_thrasher = t
+                self.log('switch_task: waiting for others thrashers')
+                other_thrasher.switch_thrasher.wait(300)
+                self.log('switch_task: done waiting for the other thrasher')
+                other_thrasher.switch_thrasher.clear()
 
     def _do_thrash(self):
         """
@@ -256,12 +327,16 @@ class MonitorThrasher(Thrasher):
                 fp=self.freeze_mon_probability,fd=self.freeze_mon_duration,
                 ))
 
-        while not self.stopping:
+        while not self.stopping.is_set():
             mons = _get_mons(self.ctx)
             self.manager.wait_for_mon_quorum_size(len(mons))
             self.log('making sure all monitors are in the quorum')
             for m in mons:
-                s = self.manager.get_mon_status(m)
+                try:
+                    s = self._wait_until_quorum(m, len(mons), timeout=30)
+                except Exception as e:
+                    self.log('mon.{m} is not in quorum size, exception: {e}'.format(m=m,e=e))
+                    self.log('mon_status: {s}'.format(s=s))
                 assert s['state'] == 'leader' or s['state'] == 'peon'
                 assert len(s['quorum']) == len(mons)
 
@@ -288,11 +363,13 @@ class MonitorThrasher(Thrasher):
 
             if mons_to_freeze:
                 for mon in mons_to_freeze:
+                    self.log('freezing mon.{m}'.format(m=mon))
                     self.freeze_mon(mon)
                 self.log('waiting for {delay} secs to unfreeze mons'.format(
                     delay=self.freeze_mon_duration))
                 time.sleep(self.freeze_mon_duration)
                 for mon in mons_to_freeze:
+                    self.log('unfreezing mon.{m}'.format(m=mon))
                     self.unfreeze_mon(mon)
 
             if self.maintain_quorum:
@@ -300,7 +377,12 @@ class MonitorThrasher(Thrasher):
                 for m in mons:
                     if m in mons_to_kill:
                         continue
-                    s = self.manager.get_mon_status(m)
+                    try:
+                        s = self._wait_until_quorum(m, len(mons)-len(mons_to_kill), timeout=30)
+                    except Exception as e:
+                        self.log('mon.{m} is not in quorum size, exception: {e}'.format(m=m,e=e))
+                        self.log('mon_status: {s}'.format(s=s))
+
                     assert s['state'] == 'leader' or s['state'] == 'peon'
                     assert len(s['quorum']) == len(mons)-len(mons_to_kill)
 
@@ -308,21 +390,31 @@ class MonitorThrasher(Thrasher):
                 delay=self.revive_delay))
             time.sleep(self.revive_delay)
 
+            self.switch_task()
+
             for mon in mons_to_kill:
+                self.log('reviving mon.{m}'.format(m=mon))
                 self.revive_mon(mon)
             # do more freezes
             if mons_to_freeze:
                 for mon in mons_to_freeze:
+                    self.log('freezing mon.{m}'.format(m=mon))
                     self.freeze_mon(mon)
                 self.log('waiting for {delay} secs to unfreeze mons'.format(
                     delay=self.freeze_mon_duration))
                 time.sleep(self.freeze_mon_duration)
                 for mon in mons_to_freeze:
+                    self.log('unfreezing mon.{m}'.format(m=mon))
                     self.unfreeze_mon(mon)
 
             self.manager.wait_for_mon_quorum_size(len(mons))
             for m in mons:
-                s = self.manager.get_mon_status(m)
+                try:
+                    s = self._wait_until_quorum(m, len(mons), timeout=30)
+                except Exception as e:
+                    self.log('mon.{m} is not in quorum size, exception: {e}'.format(m=m,e=e))
+                    self.log('mon_status: {s}'.format(s=s))
+
                 assert s['state'] == 'leader' or s['state'] == 'peon'
                 assert len(s['quorum']) == len(mons)
 
@@ -337,6 +429,8 @@ class MonitorThrasher(Thrasher):
                 self.log('waiting for {delay} secs before continuing thrashing'.format(
                     delay=self.thrash_delay))
                 time.sleep(self.thrash_delay)
+
+            self.switch_task()
 
         #status after thrashing
         if self.mds_failover:
@@ -364,6 +458,8 @@ def task(ctx, config):
     if 'cluster' not in config:
         config['cluster'] = 'ceph'
 
+    logger = config.get('logger', 'mon_thrasher')
+
     log.info('Beginning mon_thrash...')
     first_mon = teuthology.get_first_mon(ctx, config)
     (mon,) = ctx.cluster.only(first_mon).remotes.keys()
@@ -374,13 +470,13 @@ def task(ctx, config):
         )
     thrash_proc = MonitorThrasher(ctx,
         manager, config, "MonitorThrasher",
-        logger=log.getChild('mon_thrasher'))
+        logger=log.getChild(logger))
     ctx.ceph[config['cluster']].thrashers.append(thrash_proc)
     try:
         log.debug('Yielding')
         yield
     finally:
         log.info('joining mon_thrasher')
-        thrash_proc.do_join()
+        thrash_proc.stop_and_join()
         mons = _get_mons(ctx)
         manager.wait_for_mon_quorum_size(len(mons))

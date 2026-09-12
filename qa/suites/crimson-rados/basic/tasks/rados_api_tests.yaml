@@ -1,4 +1,6 @@
 overrides:
+  cephadm: 
+    watchdog_setup: true
   ceph:
     log-ignorelist:
     - reached quota
@@ -22,7 +24,8 @@ overrides:
         osd blocked scrub grace period: 3600
 tasks:
 - workunit:
+    watchdog: true
     clients:
       client.0:
-        - rados/test.sh
+        - rados/test.sh --crimson
         - rados/test_pool_quota.sh

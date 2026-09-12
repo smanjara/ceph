@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -15,6 +15,7 @@ namespace crimson::common {
 class Throttle final : public ThrottleInterface {
   size_t max = 0;
   size_t count = 0;
+  size_t pending = 0;
   // we cannot change the "count" of seastar::semaphore after it is created,
   // so use condition_variable instead.
   seastar::condition_variable on_free_slots;
@@ -30,6 +31,9 @@ public:
   }
   size_t get_max() const {
     return max;
+  }
+  size_t get_pending() const {
+    return pending;
   }
   void reset_max(size_t m);
 private:

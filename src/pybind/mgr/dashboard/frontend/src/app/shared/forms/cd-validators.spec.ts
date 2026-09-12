@@ -1,12 +1,12 @@
 import { fakeAsync, tick } from '@angular/core/testing';
-import { FormControl, Validators } from '@angular/forms';
+import { FormControl, UntypedFormControl, Validators } from '@angular/forms';
 
 import _ from 'lodash';
 import { of as observableOf } from 'rxjs';
 
 import { RgwBucketService } from '~/app/shared/api/rgw-bucket.service';
 import { CdFormGroup } from '~/app/shared/forms/cd-form-group';
-import { CdValidators } from '~/app/shared/forms/cd-validators';
+import { CdValidators, DUE_TIMER } from '~/app/shared/forms/cd-validators';
 import { FormHelper } from '~/testing/unit-test-helper';
 
 let mockBucketExists = observableOf(true);
@@ -426,6 +426,57 @@ describe('CdValidators', () => {
     });
   });
 
+  describe('mirroringMdsCaps', () => {
+    let users: { entity?: string; caps?: { mds?: string } }[];
+
+    beforeEach(() => {
+      users = [];
+      form = new CdFormGroup({
+        filesystem: new FormControl(''),
+        username: new FormControl(
+          '',
+          CdValidators.mirroringMdsCaps(() => users)
+        )
+      });
+      formHelper = new FormHelper(form);
+    });
+
+    it('should skip empty username', () => {
+      formHelper.setValue('filesystem', 'myfs');
+      formHelper.expectValid('username');
+    });
+
+    it('should allow unknown users', () => {
+      users = [{ entity: 'client.other', caps: { mds: 'allow r fsname=myfs' } }];
+      formHelper.setValue('filesystem', 'myfs');
+      formHelper.setValue('username', 'new-peer');
+      formHelper.expectValid('username');
+    });
+
+    it('should allow existing users with mirroring caps', () => {
+      users = [{ entity: 'client.mirror', caps: { mds: 'allow rwps fsname=myfs' } }];
+      formHelper.setValue('filesystem', 'myfs');
+      formHelper.setValue('username', 'mirror');
+      formHelper.expectValid('username');
+    });
+
+    it('should error when an existing user has invalid MDS caps', () => {
+      users = [{ entity: 'client.readonly', caps: { mds: 'allow r fsname=myfs' } }];
+      formHelper.setValue('filesystem', 'myfs');
+      formHelper.setValue('username', 'readonly');
+      formHelper.expectError('username', 'invalidMdsCaps');
+    });
+
+    it('should revalidate when the filesystem changes', () => {
+      users = [{ entity: 'client.mirror', caps: { mds: 'allow rwps fsname=myfs' } }];
+      formHelper.setValue('filesystem', 'myfs');
+      formHelper.setValue('username', 'mirror');
+      formHelper.expectValid('username');
+      formHelper.setValue('filesystem', 'otherfs');
+      formHelper.expectError('username', 'invalidMdsCaps');
+    });
+  });
+
   describe('validate if condition', () => {
     beforeEach(() => {
       form = new CdFormGroup({
@@ -524,6 +575,12 @@ describe('CdValidators', () => {
       formHelper.expectValid('x');
       formHelper.expectError('y', 'notUnique');
     });
+
+    it('should not error when confirm value is empty', () => {
+      formHelper.setValue('y', '');
+      CdValidators.match('x', 'y')(form);
+      formHelper.expectValid('y');
+    });
   });
 
   describe('unique', () => {
@@ -608,7 +665,7 @@ describe('CdValidators', () => {
     });
   });
 
-  describe('dimmlessBinary validators', () => {
+  describe('dimlessBinary validators', () => {
     const i18nMock = (a: string, b: { value: string }) => a.replace('{{value}}', b.value);
 
     beforeEach(() => {
@@ -771,7 +828,7 @@ describe('CdValidators', () => {
   describe('bucket', () => {
     const testValidator = (name: string, valid: boolean, expectedError?: string) => {
       formHelper.setValue('x', name, true);
-      tick();
+      tick(DUE_TIMER);
       if (valid) {
         formHelper.expectValid('x');
       } else {
@@ -901,6 +958,81 @@ describe('CdValidators', () => {
         mockBucketExists = observableOf(true);
         testValidator('testName', true);
       }));
+    });
+
+    describe('url', () => {
+      it('should return null for a valid URL with port', () => {
+        const control = new UntypedFormControl('https://example.com:8080');
+        expect(CdValidators.url(control)).toBeNull();
+      });
+
+      it('should return null for multiple valid URLs with ports', () => {
+        const control = new UntypedFormControl('https://example.com:8080,http://localhost:3000');
+        expect(CdValidators.url(control)).toBeNull();
+      });
+
+      it('should return null for a URL without a port', () => {
+        const control = new UntypedFormControl('https://example.com');
+        expect(CdValidators.url(control)).toBeNull();
+      });
+
+      it('should return an error object for multiple invalid URLs', () => {
+        const control = new UntypedFormControl('https://example.com,http://192.1666.33.00:099999');
+        expect(CdValidators.url(control)).toEqual({ invalidURL: true });
+      });
+
+      it('should return an error object for a non-URL string', () => {
+        const control = new UntypedFormControl('randomstring');
+        expect(CdValidators.url(control)).toEqual({ invalidURL: true });
+      });
+
+      it('should return null for a valid IP address with port', () => {
+        const control = new UntypedFormControl('https://192.168.1.1:9090');
+        expect(CdValidators.url(control)).toBeNull();
+      });
+
+      it('should return null for an IP address without a port', () => {
+        const control = new UntypedFormControl('https://192.168.1.1');
+        expect(CdValidators.url(control)).toBeNull();
+      });
+
+      it('should return null for an empty value', () => {
+        const control = new UntypedFormControl(null);
+        expect(CdValidators.url(control)).toBeNull();
+      });
+
+      it('should return null for an empty string', () => {
+        const control = new UntypedFormControl('');
+        expect(CdValidators.url(control)).toBeNull();
+      });
+    });
+
+    describe('base64Json', () => {
+      it('should return null for an empty value', () => {
+        const control = new UntypedFormControl('');
+        expect(CdValidators.base64Json()(control)).toBeNull();
+      });
+
+      it('should return null for valid base64-encoded JSON', () => {
+        const control = new UntypedFormControl(btoa(JSON.stringify({ key: 'value' })));
+        expect(CdValidators.base64Json()(control)).toBeNull();
+      });
+
+      it('should ignore surrounding whitespace', () => {
+        const token = btoa(JSON.stringify({ key: 'value' }));
+        const control = new UntypedFormControl(`  ${token}  `);
+        expect(CdValidators.base64Json()(control)).toBeNull();
+      });
+
+      it('should return invalidBase64Json for invalid base64', () => {
+        const control = new UntypedFormControl('not-a-valid-token');
+        expect(CdValidators.base64Json()(control)).toEqual({ invalidBase64Json: true });
+      });
+
+      it('should return invalidBase64Json when decoded value is not JSON', () => {
+        const control = new UntypedFormControl(btoa('not-json'));
+        expect(CdValidators.base64Json()(control)).toEqual({ invalidBase64Json: true });
+      });
     });
   });
 });

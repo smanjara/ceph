@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "librbd/api/Pool.h"
 #include "include/rados/librados.hpp"
@@ -243,6 +243,14 @@ int Pool<I>::init(librados::IoCtx& io_ctx, bool force) {
 
   int r = io_ctx.application_enable(pg_pool_t::APPLICATION_NAME_RBD, force);
   if (r < 0) {
+    lderr(cct) << "failed to enable RBD application: " << cpp_strerror(r)
+               << dendl;
+    return r;
+  }
+
+  r = io_ctx.create(RBD_TRASH, false);
+  if (r < 0) {
+    lderr(cct) << "failed to create trash: " << cpp_strerror(r) << dendl;
     return r;
   }
 

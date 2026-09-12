@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #pragma once
 
@@ -87,6 +87,18 @@ struct rgw_placement_rule {
     std::string s;
     ceph::decode(s, bl);
     from_str(s);
+  }
+
+  void dump(Formatter *f) const {
+    f->dump_string("name", name);
+    f->dump_string("storage_class", get_storage_class());
+  }
+
+  static std::list<rgw_placement_rule> generate_test_instances() {
+    std::list<rgw_placement_rule> o;
+    o.emplace_back();
+    o.push_back(rgw_placement_rule("name", "storage_class"));
+    return o;
   }
 
   std::string to_str() const {

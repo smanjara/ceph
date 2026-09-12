@@ -1,10 +1,11 @@
 import errno
 import json
 import rados
+import random
 import rbd
 import traceback
 
-from datetime import datetime
+from datetime import datetime, timezone
 from threading import Condition, Lock, Thread
 from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple, Union
 
@@ -33,10 +34,9 @@ class ImageSpec(NamedTuple):
 
 class CreateSnapshotRequests:
 
-    lock = Lock()
-    condition = Condition(lock)
-
     def __init__(self, handler: Any) -> None:
+        self.lock = Lock()
+        self.condition = Condition(self.lock)
         self.handler = handler
         self.rados = handler.module.rados
         self.log = handler.log
@@ -44,13 +44,14 @@ class CreateSnapshotRequests:
         self.queue: List[ImageSpec] = []
         self.ioctxs: Dict[Tuple[str, str], Tuple[rados.Ioctx, Set[ImageSpec]]] = {}
 
-    def __del__(self) -> None:
-        self.wait_for_pending()
-
     def wait_for_pending(self) -> None:
         with self.lock:
             while self.pending:
+                self.log.debug(
+                    "CreateSnapshotRequests.wait_for_pending: "
+                    "{} images".format(len(self.pending)))
                 self.condition.wait()
+        self.log.debug("CreateSnapshotRequests.wait_for_pending: done")
 
     def add(self, pool_id: str, namespace: str, image_id: str) -> None:
         image_spec = ImageSpec(pool_id, namespace, image_id)
@@ -113,52 +114,6 @@ class CreateSnapshotRequests:
             self.finish(image_spec)
             return
 
-        self.get_mirror_mode(image_spec, image)
-
-    def get_mirror_mode(self, image_spec: ImageSpec, image: rbd.Image) -> None:
-        pool_id, namespace, image_id = image_spec
-
-        self.log.debug("CreateSnapshotRequests.get_mirror_mode: {}/{}/{}".format(
-            pool_id, namespace, image_id))
-
-        def cb(comp: rados.Completion, mode: int) -> None:
-            self.handle_get_mirror_mode(image_spec, image, comp, mode)
-
-        try:
-            image.aio_mirror_image_get_mode(cb)
-        except Exception as e:
-            self.log.error(
-                "exception when getting mirror mode for {}/{}/{}: {}".format(
-                    pool_id, namespace, image_id, e))
-            self.close_image(image_spec, image)
-
-    def handle_get_mirror_mode(self,
-                               image_spec: ImageSpec,
-                               image: rbd.Image,
-                               comp: rados.Completion,
-                               mode: int) -> None:
-        pool_id, namespace, image_id = image_spec
-
-        self.log.debug(
-            "CreateSnapshotRequests.handle_get_mirror_mode {}/{}/{}: r={} mode={}".format(
-                pool_id, namespace, image_id, comp.get_return_value(), mode))
-
-        if comp.get_return_value() < 0:
-            if comp.get_return_value() != -errno.ENOENT:
-                self.log.error(
-                    "error when getting mirror mode for {}/{}/{}: {}".format(
-                        pool_id, namespace, image_id, comp.get_return_value()))
-            self.close_image(image_spec, image)
-            return
-
-        if mode != rbd.RBD_MIRROR_IMAGE_MODE_SNAPSHOT:
-            self.log.debug(
-                "CreateSnapshotRequests.handle_get_mirror_mode: {}/{}/{}: {}".format(
-                    pool_id, namespace, image_id,
-                    "snapshot mirroring is not enabled"))
-            self.close_image(image_spec, image)
-            return
-
         self.get_mirror_info(image_spec, image)
 
     def get_mirror_info(self, image_spec: ImageSpec, image: rbd.Image) -> None:
@@ -167,7 +122,7 @@ class CreateSnapshotRequests:
         self.log.debug("CreateSnapshotRequests.get_mirror_info: {}/{}/{}".format(
             pool_id, namespace, image_id))
 
-        def cb(comp: rados.Completion, info: Dict[str, Union[str, int]]) -> None:
+        def cb(comp: rados.Completion, info: Optional[Dict[str, Union[str, int]]]) -> None:
             self.handle_get_mirror_info(image_spec, image, comp, info)
 
         try:
@@ -182,18 +137,25 @@ class CreateSnapshotRequests:
                                image_spec: ImageSpec,
                                image: rbd.Image,
                                comp: rados.Completion,
-                               info: Dict[str, Union[str, int]]) -> None:
+                               info: Optional[Dict[str, Union[str, int]]]) -> None:
         pool_id, namespace, image_id = image_spec
 
         self.log.debug(
             "CreateSnapshotRequests.handle_get_mirror_info {}/{}/{}: r={} info={}".format(
                 pool_id, namespace, image_id, comp.get_return_value(), info))
 
-        if comp.get_return_value() < 0:
-            if comp.get_return_value() != -errno.ENOENT:
-                self.log.error(
-                    "error when getting mirror info for {}/{}/{}: {}".format(
-                        pool_id, namespace, image_id, comp.get_return_value()))
+        if info is None:
+            self.log.error(
+                "error when getting mirror info for {}/{}/{}: {}".format(
+                    pool_id, namespace, image_id, comp.get_return_value()))
+            self.close_image(image_spec, image)
+            return
+
+        if info['state'] != rbd.RBD_MIRROR_IMAGE_ENABLED:
+            self.log.debug(
+                "CreateSnapshotRequests.handle_get_mirror_info: {}/{}/{}: {}".format(
+                    pool_id, namespace, image_id,
+                    "mirroring is not enabled"))
             self.close_image(image_spec, image)
             return
 
@@ -202,6 +164,51 @@ class CreateSnapshotRequests:
                 "CreateSnapshotRequests.handle_get_mirror_info: {}/{}/{}: {}".format(
                     pool_id, namespace, image_id,
                     "is not primary"))
+            self.close_image(image_spec, image)
+            return
+
+        self.get_mirror_mode(image_spec, image)
+
+    def get_mirror_mode(self, image_spec: ImageSpec, image: rbd.Image) -> None:
+        pool_id, namespace, image_id = image_spec
+
+        self.log.debug("CreateSnapshotRequests.get_mirror_mode: {}/{}/{}".format(
+            pool_id, namespace, image_id))
+
+        def cb(comp: rados.Completion, mode: Optional[int]) -> None:
+            self.handle_get_mirror_mode(image_spec, image, comp, mode)
+
+        try:
+            image.aio_mirror_image_get_mode(cb)
+        except Exception as e:
+            self.log.error(
+                "exception when getting mirror mode for {}/{}/{}: {}".format(
+                    pool_id, namespace, image_id, e))
+            self.close_image(image_spec, image)
+
+    def handle_get_mirror_mode(self,
+                               image_spec: ImageSpec,
+                               image: rbd.Image,
+                               comp: rados.Completion,
+                               mode: Optional[int]) -> None:
+        pool_id, namespace, image_id = image_spec
+
+        self.log.debug(
+            "CreateSnapshotRequests.handle_get_mirror_mode {}/{}/{}: r={} mode={}".format(
+                pool_id, namespace, image_id, comp.get_return_value(), mode))
+
+        if mode is None:
+            self.log.error(
+                "error when getting mirror mode for {}/{}/{}: {}".format(
+                    pool_id, namespace, image_id, comp.get_return_value()))
+            self.close_image(image_spec, image)
+            return
+
+        if mode != rbd.RBD_MIRROR_IMAGE_MODE_SNAPSHOT:
+            self.log.debug(
+                "CreateSnapshotRequests.handle_get_mirror_mode: {}/{}/{}: {}".format(
+                    pool_id, namespace, image_id,
+                    "not enabled for snapshot mirroring"))
             self.close_image(image_spec, image)
             return
 
@@ -214,7 +221,7 @@ class CreateSnapshotRequests:
             "CreateSnapshotRequests.create_snapshot for {}/{}/{}".format(
                 pool_id, namespace, image_id))
 
-        def cb(comp: rados.Completion, snap_id: int) -> None:
+        def cb(comp: rados.Completion, snap_id: Optional[int]) -> None:
             self.handle_create_snapshot(image_spec, image, comp, snap_id)
 
         try:
@@ -229,15 +236,14 @@ class CreateSnapshotRequests:
                                image_spec: ImageSpec,
                                image: rbd.Image,
                                comp: rados.Completion,
-                               snap_id: int) -> None:
+                               snap_id: Optional[int]) -> None:
         pool_id, namespace, image_id = image_spec
 
         self.log.debug(
             "CreateSnapshotRequests.handle_create_snapshot for {}/{}/{}: r={}, snap_id={}".format(
                 pool_id, namespace, image_id, comp.get_return_value(), snap_id))
 
-        if comp.get_return_value() < 0 and \
-           comp.get_return_value() != -errno.ENOENT:
+        if snap_id is None and comp.get_return_value() != -errno.ENOENT:
             self.log.error(
                 "error when creating snapshot for {}/{}/{}: {}".format(
                     pool_id, namespace, image_id, comp.get_return_value()))
@@ -288,6 +294,7 @@ class CreateSnapshotRequests:
 
         with self.lock:
             self.pending.remove(image_spec)
+            self.condition.notify()
             if not self.queue:
                 return
             image_spec = self.queue.pop(0)
@@ -327,28 +334,34 @@ class MirrorSnapshotScheduleHandler:
     SCHEDULE_OID = "rbd_mirror_snapshot_schedule"
     REFRESH_DELAY_SECONDS = 60.0
 
-    lock = Lock()
-    condition = Condition(lock)
-    thread = None
-
     def __init__(self, module: Any) -> None:
+        self.lock = Lock()
+        self.condition = Condition(self.lock)
         self.module = module
         self.log = module.log
-        self.last_refresh_images = datetime(1970, 1, 1)
+        self.last_refresh_images = datetime(1970, 1, 1, tzinfo=timezone.utc)
         self.create_snapshot_requests = CreateSnapshotRequests(self)
 
-        self.init_schedule_queue()
-
+        self.stop_thread = False
         self.thread = Thread(target=self.run)
+
+    def setup(self) -> None:
+        self.init_schedule_queue()
         self.thread.start()
 
-    def _cleanup(self) -> None:
+    def shutdown(self) -> None:
+        self.log.info("MirrorSnapshotScheduleHandler: shutting down")
+        self.stop_thread = True
+        if self.thread.is_alive():
+            self.log.debug("MirrorSnapshotScheduleHandler: joining thread")
+            self.thread.join()
         self.create_snapshot_requests.wait_for_pending()
+        self.log.info("MirrorSnapshotScheduleHandler: shut down")
 
     def run(self) -> None:
         try:
             self.log.info("MirrorSnapshotScheduleHandler: starting")
-            while True:
+            while not self.stop_thread:
                 refresh_delay = self.refresh_images()
                 with self.lock:
                     (image_spec, wait_time) = self.dequeue()
@@ -358,15 +371,18 @@ class MirrorSnapshotScheduleHandler:
                 pool_id, namespace, image_id = image_spec
                 self.create_snapshot_requests.add(pool_id, namespace, image_id)
                 with self.lock:
-                    self.enqueue(datetime.now(), pool_id, namespace, image_id)
+                    self.enqueue(datetime.now(timezone.utc), pool_id, namespace, image_id)
 
+        except (rados.ConnectionShutdown, rbd.ConnectionShutdown):
+            self.log.exception("MirrorSnapshotScheduleHandler: client blocklisted")
+            self.module.client_blocklisted.set()
         except Exception as ex:
             self.log.fatal("Fatal runtime error: {}\n{}".format(
                 ex, traceback.format_exc()))
 
     def init_schedule_queue(self) -> None:
         # schedule_time => image_spec
-        self.queue: Dict[str, List[ImageSpec]] = {}
+        self.queue: Dict[datetime, List[ImageSpec]] = {}
         # pool_id => {namespace => image_id}
         self.images: Dict[str, Dict[str, Dict[str, str]]] = {}
         self.schedules = Schedules(self)
@@ -378,7 +394,7 @@ class MirrorSnapshotScheduleHandler:
         self.schedules.load(namespace_validator, image_validator)
 
     def refresh_images(self) -> float:
-        elapsed = (datetime.now() - self.last_refresh_images).total_seconds()
+        elapsed = (datetime.now(timezone.utc) - self.last_refresh_images).total_seconds()
         if elapsed < self.REFRESH_DELAY_SECONDS:
             return self.REFRESH_DELAY_SECONDS - elapsed
 
@@ -390,7 +406,7 @@ class MirrorSnapshotScheduleHandler:
                 self.log.debug("MirrorSnapshotScheduleHandler: no schedules")
                 self.images = {}
                 self.queue = {}
-                self.last_refresh_images = datetime.now()
+                self.last_refresh_images = datetime.now(timezone.utc)
                 return self.REFRESH_DELAY_SECONDS
 
         images: Dict[str, Dict[str, Dict[str, str]]] = {}
@@ -406,7 +422,7 @@ class MirrorSnapshotScheduleHandler:
             self.refresh_queue(images)
             self.images = images
 
-        self.last_refresh_images = datetime.now()
+        self.last_refresh_images = datetime.now(timezone.utc)
         return self.REFRESH_DELAY_SECONDS
 
     def load_pool_images(self,
@@ -450,19 +466,18 @@ class MirrorSnapshotScheduleHandler:
                     self.log.debug(
                         "load_pool_images: adding image {}".format(name))
                     images[pool_id][namespace][image_id] = name
+        except rbd.ConnectionShutdown:
+            raise
         except Exception as e:
             self.log.error(
                 "load_pool_images: exception when scanning pool {}: {}".format(
                     pool_name, e))
 
     def rebuild_queue(self) -> None:
-        now = datetime.now()
-
         # don't remove from queue "due" images
-        now_string = datetime.strftime(now, "%Y-%m-%d %H:%M:00")
-
+        now = datetime.now(timezone.utc)
         for schedule_time in list(self.queue):
-            if schedule_time > now_string:
+            if schedule_time > now:
                 del self.queue[schedule_time]
 
         if not self.schedules:
@@ -477,7 +492,7 @@ class MirrorSnapshotScheduleHandler:
 
     def refresh_queue(self,
                       current_images: Dict[str, Dict[str, Dict[str, str]]]) -> None:
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
 
         for pool_id in self.images:
             for namespace in self.images[pool_id]:
@@ -505,7 +520,8 @@ class MirrorSnapshotScheduleHandler:
                     pool_id, namespace, image_id))
             return
 
-        schedule_time = schedule.next_run(now)
+        schedule_time = schedule.next_run(
+            now, "{}/{}/{}".format(pool_id, namespace, image_id))
         if schedule_time not in self.queue:
             self.queue[schedule_time] = []
         self.log.debug(
@@ -519,16 +535,15 @@ class MirrorSnapshotScheduleHandler:
         if not self.queue:
             return None, 1000.0
 
-        now = datetime.now()
-        schedule_time = sorted(self.queue)[0]
+        now = datetime.now(timezone.utc)
+        schedule_time = min(self.queue)
 
-        if datetime.strftime(now, "%Y-%m-%d %H:%M:%S") < schedule_time:
-            wait_time = (datetime.strptime(schedule_time,
-                                           "%Y-%m-%d %H:%M:%S") - now)
-            return None, wait_time.total_seconds()
+        if now < schedule_time:
+            return None, (schedule_time - now).total_seconds()
 
         images = self.queue[schedule_time]
-        image = images.pop(0)
+        rng = random.Random(schedule_time.timestamp())
+        image = images.pop(rng.randrange(len(images)))
         if not images:
             del self.queue[schedule_time]
         return image, 0.0
@@ -599,7 +614,7 @@ class MirrorSnapshotScheduleHandler:
                         continue
                     image_name = self.images[pool_id][namespace][image_id]
                     scheduled_images.append({
-                        'schedule_time': schedule_time,
+                        'schedule_time': schedule_time.strftime("%Y-%m-%d %H:%M:00"),
                         'image': image_name
                     })
         return 0, json.dumps({'scheduled_images': scheduled_images},

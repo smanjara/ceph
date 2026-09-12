@@ -17,15 +17,26 @@ import { TimerService } from '~/app/shared/services/timer.service';
 @Component({
   selector: 'cd-context',
   templateUrl: './context.component.html',
-  styleUrls: ['./context.component.scss']
+  styleUrls: ['./context.component.scss'],
+  standalone: false
 })
 export class ContextComponent implements OnInit, OnDestroy {
   readonly REFRESH_INTERVAL = 5000;
   private subs = new Subscription();
   private rgwUrlPrefix = '/rgw';
+  private rgwUserUrlPrefix = '/rgw/user';
+  private rgwBuckerUrlPrefix = '/rgw/bucket';
+  private rgwAccountsUrlPrefix = '/rgw/accounts';
+  private rgwAccountsResourcePagePattern = /^\/rgw\/accounts\/[^/]+\/(overview|roles)(?:$|[?#])/;
+  private rgwMultisiteSyncPolicyPrefix = '/rgw/multisite/sync-policy';
   permissions: Permissions;
   featureToggleMap$: FeatureTogglesMap$;
-  isRgwRoute = document.location.href.includes(this.rgwUrlPrefix);
+  isRgwResourcePage = this.isRgwAccountsResourcePage(this.getRoutePath(document.location.href));
+  isRgwRoute =
+    document.location.href.includes(this.rgwUserUrlPrefix) ||
+    document.location.href.includes(this.rgwBuckerUrlPrefix) ||
+    document.location.href.includes(this.rgwAccountsUrlPrefix) ||
+    document.location.href.includes(this.rgwMultisiteSyncPolicyPrefix);
 
   constructor(
     private authStorageService: AuthStorageService,
@@ -42,7 +53,16 @@ export class ContextComponent implements OnInit, OnDestroy {
     this.subs.add(
       this.router.events
         .pipe(filter((event: Event) => event instanceof NavigationEnd))
-        .subscribe(() => (this.isRgwRoute = this.router.url.startsWith(this.rgwUrlPrefix)))
+        .subscribe(() => {
+          const currentRoute = this.getRoutePath(this.router.url);
+          this.isRgwRoute = [
+            this.rgwBuckerUrlPrefix,
+            this.rgwUserUrlPrefix,
+            this.rgwAccountsUrlPrefix,
+            this.rgwMultisiteSyncPolicyPrefix
+          ].some((urlPrefix) => this.router.url.startsWith(urlPrefix));
+          this.isRgwResourcePage = this.isRgwAccountsResourcePage(currentRoute);
+        })
     );
     // Set daemon list polling only when in RGW route:
     this.subs.add(
@@ -66,5 +86,14 @@ export class ContextComponent implements OnInit, OnDestroy {
     this.router.navigateByUrl(this.rgwUrlPrefix, { skipLocationChange: true }).finally(() => {
       this.router.navigate([currentUrl]);
     });
+  }
+
+  private isRgwAccountsResourcePage(url: string): boolean {
+    return this.rgwAccountsResourcePagePattern.test(url);
+  }
+
+  private getRoutePath(url: string): string {
+    const hashIndex = url.indexOf('#');
+    return hashIndex === -1 ? url : url.slice(hashIndex + 1);
   }
 }

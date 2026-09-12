@@ -1,4 +1,4 @@
-// vim: ts=8 sw=2 smarttab ft=cpp
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -149,7 +149,8 @@ void sanity_check_config(const DoutPrefixProvider* dpp, DecodedConfig& config)
       throw std::system_error(-r, std::system_category());
     }
 
-    config.zonegroup.enabled_features = std::move(enable_features);
+    config.zonegroup.enabled_features.insert(rgw::zone_features::enabled.begin(),
+                                             rgw::zone_features::enabled.end());
   }
 
   // insert the default placement target if it doesn't exist

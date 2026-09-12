@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "librbd/crypto/CryptoObjectDispatch.h"
 #include "include/ceph_assert.h"
@@ -102,7 +102,7 @@ struct C_AlignedObjectReadRequest : public Context {
       if (r == -ENOENT && !disable_read_from_parent) {
         io::util::read_parent<I>(
                 image_ctx, object_no, extents,
-                io_context->read_snap().value_or(CEPH_NOSNAP),
+                io_context->get_read_snap(),
                 parent_trace, this);
       } else {
         complete(r);

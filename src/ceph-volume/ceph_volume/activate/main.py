@@ -3,10 +3,10 @@
 import argparse
 
 from ceph_volume import terminal
-from ceph_volume.devices.lvm.activate import Activate as LVMActivate
-from ceph_volume.devices.raw.activate import Activate as RAWActivate
+from ceph_volume.objectstore.lvm import Lvm as LVMActivate
+from ceph_volume.objectstore.raw import Raw as RAWActivate
 from ceph_volume.devices.simple.activate import Activate as SimpleActivate
-
+from ceph_volume.util.lvm_osd_mappers import OsdLvmMappers
 
 class Activate(object):
 
@@ -27,7 +27,8 @@ class Activate(object):
         )
         parser.add_argument(
             '--osd-uuid',
-            help='OSD UUID to activate'
+            help='OSD UUID to activate',
+            dest='osd_fsid'
         )
         parser.add_argument(
             '--no-systemd',
@@ -42,29 +43,30 @@ class Activate(object):
         )
         self.args = parser.parse_args(self.argv)
 
+        # Close the LVM mappers to force a 'refresh'
+        # Avoid that raw activates a LVM osd that is already activated
+        # Only do this when both filters are available, because the mapper
+        # lookup builds LVM tag strings and will fail if osd_fsid is None.
+        if self.args.osd_id is not None and self.args.osd_fsid is not None:
+            OsdLvmMappers(self.args.osd_id, self.args.osd_fsid).close()
+
         # first try raw
         try:
-            RAWActivate([]).activate(
-                devs=None,
-                start_osd_id=self.args.osd_id,
-                start_osd_uuid=self.args.osd_uuid,
-                tmpfs=not self.args.no_tmpfs,
-                systemd=not self.args.no_systemd,
-            )
+            raw_activate = RAWActivate(self.args)
+            raw_activate.activate()
             return
         except Exception as e:
             terminal.info(f'Failed to activate via raw: {e}')
 
         # then try lvm
         try:
-            LVMActivate([]).activate(
-                argparse.Namespace(
-                    osd_id=self.args.osd_id,
-                    osd_fsid=self.args.osd_uuid,
-                    no_tmpfs=self.args.no_tmpfs,
-                    no_systemd=self.args.no_systemd,
-                )
-            )
+            lvm_activate = LVMActivate(argparse.Namespace(
+                no_tmpfs=self.args.no_tmpfs,
+                no_systemd=self.args.no_systemd,
+                osd_fsid=self.args.osd_fsid))
+            lvm_activate.activate(None,
+                                  self.args.osd_id,
+                                  self.args.osd_fsid)
             return
         except Exception as e:
             terminal.info(f'Failed to activate via LVM: {e}')
@@ -74,7 +76,7 @@ class Activate(object):
             SimpleActivate([]).activate(
                 argparse.Namespace(
                     osd_id=self.args.osd_id,
-                    osd_fsid=self.args.osd_uuid,
+                    osd_fsid=self.args.osd_fsid,
                     no_systemd=self.args.no_systemd,
                 )
             )

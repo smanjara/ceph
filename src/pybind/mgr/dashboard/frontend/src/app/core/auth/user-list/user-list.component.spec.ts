@@ -4,7 +4,6 @@ import { BrowserAnimationsModule } from '@angular/platform-browser/animations';
 import { RouterTestingModule } from '@angular/router/testing';
 
 import { NgbNavModule } from '@ng-bootstrap/ng-bootstrap';
-import { ToastrModule } from 'ngx-toastr';
 
 import { TableActionsComponent } from '~/app/shared/datatable/table-actions/table-actions.component';
 import { SharedModule } from '~/app/shared/shared.module';
@@ -20,7 +19,6 @@ describe('UserListComponent', () => {
     imports: [
       BrowserAnimationsModule,
       SharedModule,
-      ToastrModule.forRoot(),
       NgbNavModule,
       RouterTestingModule,
       HttpClientTestingModule
@@ -47,35 +45,75 @@ describe('UserListComponent', () => {
     expect(tableActions).toEqual({
       'create,update,delete': {
         actions: ['Create', 'Edit', 'Delete'],
-        primary: { multiple: 'Create', executing: 'Edit', single: 'Edit', no: 'Create' }
+        primary: {
+          multiple: 'Create',
+          executing: 'Create',
+          single: 'Create',
+          no: 'Create'
+        }
       },
       'create,update': {
         actions: ['Create', 'Edit'],
-        primary: { multiple: 'Create', executing: 'Edit', single: 'Edit', no: 'Create' }
+        primary: {
+          multiple: 'Create',
+          executing: 'Create',
+          single: 'Create',
+          no: 'Create'
+        }
       },
       'create,delete': {
         actions: ['Create', 'Delete'],
-        primary: { multiple: 'Create', executing: 'Delete', single: 'Delete', no: 'Create' }
+        primary: {
+          multiple: 'Create',
+          executing: 'Create',
+          single: 'Create',
+          no: 'Create'
+        }
       },
       create: {
         actions: ['Create'],
-        primary: { multiple: 'Create', executing: 'Create', single: 'Create', no: 'Create' }
+        primary: {
+          multiple: 'Create',
+          executing: 'Create',
+          single: 'Create',
+          no: 'Create'
+        }
       },
       'update,delete': {
         actions: ['Edit', 'Delete'],
-        primary: { multiple: 'Edit', executing: 'Edit', single: 'Edit', no: 'Edit' }
+        primary: {
+          multiple: '',
+          executing: '',
+          single: '',
+          no: ''
+        }
       },
       update: {
         actions: ['Edit'],
-        primary: { multiple: 'Edit', executing: 'Edit', single: 'Edit', no: 'Edit' }
+        primary: {
+          multiple: 'Edit',
+          executing: 'Edit',
+          single: 'Edit',
+          no: 'Edit'
+        }
       },
       delete: {
         actions: ['Delete'],
-        primary: { multiple: 'Delete', executing: 'Delete', single: 'Delete', no: 'Delete' }
+        primary: {
+          multiple: 'Delete',
+          executing: 'Delete',
+          single: 'Delete',
+          no: 'Delete'
+        }
       },
       'no-permissions': {
         actions: [],
-        primary: { multiple: '', executing: '', single: '', no: '' }
+        primary: {
+          multiple: '',
+          executing: '',
+          single: '',
+          no: ''
+        }
       }
     });
   });

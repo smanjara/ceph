@@ -1,10 +1,10 @@
 import { Component, OnInit } from '@angular/core';
-import { FormControl, Validators } from '@angular/forms';
+import { UntypedFormControl, Validators } from '@angular/forms';
 
 import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap';
 
 import { IscsiService } from '~/app/shared/api/iscsi.service';
-import { ActionLabelsI18n } from '~/app/shared/constants/app.constants';
+import { ActionLabelsI18n, USER } from '~/app/shared/constants/app.constants';
 import { NotificationType } from '~/app/shared/enum/notification-type.enum';
 import { CdFormGroup } from '~/app/shared/forms/cd-form-group';
 import { CdValidators } from '~/app/shared/forms/cd-validators';
@@ -15,7 +15,8 @@ import { NotificationService } from '~/app/shared/services/notification.service'
 @Component({
   selector: 'cd-iscsi-target-discovery-modal',
   templateUrl: './iscsi-target-discovery-modal.component.html',
-  styleUrls: ['./iscsi-target-discovery-modal.component.scss']
+  styleUrls: ['./iscsi-target-discovery-modal.component.scss'],
+  standalone: false
 })
 export class IscsiTargetDiscoveryModalComponent implements OnInit {
   discoveryForm: CdFormGroup;
@@ -45,14 +46,14 @@ export class IscsiTargetDiscoveryModalComponent implements OnInit {
 
   createForm() {
     this.discoveryForm = new CdFormGroup({
-      user: new FormControl({ value: '', disabled: !this.hasPermission }),
-      password: new FormControl({ value: '', disabled: !this.hasPermission }),
-      mutual_user: new FormControl({ value: '', disabled: !this.hasPermission }),
-      mutual_password: new FormControl({ value: '', disabled: !this.hasPermission })
+      user: new UntypedFormControl({ value: '', disabled: !this.hasPermission }),
+      password: new UntypedFormControl({ value: '', disabled: !this.hasPermission }),
+      mutual_user: new UntypedFormControl({ value: '', disabled: !this.hasPermission }),
+      mutual_password: new UntypedFormControl({ value: '', disabled: !this.hasPermission })
     });
 
     CdValidators.validateIf(
-      this.discoveryForm.get('user'),
+      this.discoveryForm.get(USER),
       () =>
         this.discoveryForm.getValue('password') ||
         this.discoveryForm.getValue('mutual_user') ||
@@ -69,13 +70,13 @@ export class IscsiTargetDiscoveryModalComponent implements OnInit {
     CdValidators.validateIf(
       this.discoveryForm.get('password'),
       () =>
-        this.discoveryForm.getValue('user') ||
+        this.discoveryForm.getValue(USER) ||
         this.discoveryForm.getValue('mutual_user') ||
         this.discoveryForm.getValue('mutual_password'),
       [Validators.required],
       [Validators.pattern(this.PASSWORD_REGEX)],
       [
-        this.discoveryForm.get('user'),
+        this.discoveryForm.get(USER),
         this.discoveryForm.get('mutual_user'),
         this.discoveryForm.get('mutual_password')
       ]
@@ -87,7 +88,7 @@ export class IscsiTargetDiscoveryModalComponent implements OnInit {
       [Validators.required],
       [Validators.pattern(this.USER_REGEX)],
       [
-        this.discoveryForm.get('user'),
+        this.discoveryForm.get(USER),
         this.discoveryForm.get('password'),
         this.discoveryForm.get('mutual_password')
       ]
@@ -99,7 +100,7 @@ export class IscsiTargetDiscoveryModalComponent implements OnInit {
       [Validators.required],
       [Validators.pattern(this.PASSWORD_REGEX)],
       [
-        this.discoveryForm.get('user'),
+        this.discoveryForm.get(USER),
         this.discoveryForm.get('password'),
         this.discoveryForm.get('mutual_user')
       ]

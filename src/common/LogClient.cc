@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -19,6 +20,8 @@
 #include "msg/Messenger.h"
 #include "mon/MonMap.h"
 #include "common/Graylog.h"
+
+#include <sstream>
 
 #define dout_subsys ceph_subsys_monc
 
@@ -186,13 +189,11 @@ void LogChannel::do_log(clog_type prio, const std::string& s)
 
   // log to syslog?
   if (do_log_to_syslog()) {
-    ldout(cct,0) << __func__ << " log to syslog"  << dendl;
     e.log_to_syslog(get_log_prio(), get_syslog_facility());
   }
 
   // log to graylog?
   if (do_log_to_graylog()) {
-    ldout(cct,0) << __func__ << " log to graylog"  << dendl;
     graylog->log_log_entry(&e);
   }
 }

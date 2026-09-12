@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <vector>
 #include <boost/circular_buffer.hpp>
@@ -10,8 +10,14 @@
 #include "common/dout.h"
 #include "common/errno.h"
 #include "common/random_string.h"
+#include "include/random.h" // for ceph::util::generate_random_number()
 #include "global/global_context.h"
 #include "test/librados/test_cxx.h"
+#include "test/librados/test_pool_types.h"
+using ceph::test::PoolType;
+using ceph::test::pool_type_name;
+using ceph::test::create_pool_by_type;
+using ceph::test::destroy_pool_by_type;
 
 #define dout_subsys ceph_subsys_rgw
 #define dout_context g_ceph_context
@@ -30,34 +36,6 @@ constexpr size_t max_pending = 16;
 constexpr size_t max_object_size = 4*1024*1024;
 // multipart upload threshold
 constexpr size_t max_part_size = 1024*1024;
-
-
-// create/destroy a pool that's shared by all tests in the process
-struct RadosEnv : public ::testing::Environment {
-  static std::optional<std::string> pool_name;
- public:
-  static librados::Rados rados;
-  static librados::IoCtx ioctx;
-
-  void SetUp() override {
-    // create pool
-    std::string name = get_temp_pool_name();
-    ASSERT_EQ("", create_one_pool_pp(name, rados));
-    pool_name = name;
-    ASSERT_EQ(rados.ioctx_create(name.c_str(), ioctx), 0);
-  }
-  void TearDown() override {
-    ioctx.close();
-    if (pool_name) {
-      ASSERT_EQ(destroy_one_pool_pp(*pool_name, rados), 0);
-    }
-  }
-};
-std::optional<std::string> RadosEnv::pool_name;
-librados::Rados RadosEnv::rados;
-librados::IoCtx RadosEnv::ioctx;
-
-auto *const rados_env = ::testing::AddGlobalTestEnvironment(new RadosEnv);
 
 
 std::ostream& operator<<(std::ostream& out, const rgw_bucket_category_stats& c) {
@@ -87,10 +65,7 @@ int index_prepare(librados::IoCtx& ioctx, const std::string& oid,
 {
   librados::ObjectWriteOperation op;
   const std::string loc; // empty
-  constexpr bool log_op = false;
-  constexpr int flags = 0;
-  rgw_zone_set zones;
-  cls_rgw_bucket_prepare_op(op, type, tag, key, loc, log_op, flags, zones);
+  cls_rgw_bucket_prepare_op(op, type, tag, key, loc);
   return ioctx.operate(oid, &op);
 }
 
@@ -112,11 +87,16 @@ int index_complete(librados::IoCtx& ioctx, const std::string& oid,
 void read_stats(librados::IoCtx& ioctx, const std::string& oid,
                 rgw_bucket_dir_stats& stats)
 {
-  auto oids = std::map<int, std::string>{{0, oid}};
-  std::map<int, rgw_cls_list_ret> results;
-  ASSERT_EQ(0, CLSRGWIssueGetDirHeader(ioctx, oids, results, 8)());
-  ASSERT_EQ(1, results.size());
-  stats = std::move(results.begin()->second.dir.header.stats);
+  bufferlist bl;
+  librados::ObjectReadOperation op;
+  op.omap_get_header(&bl, nullptr);
+  ASSERT_EQ(0, ioctx.operate(oid, &op, nullptr));
+
+  rgw_bucket_dir_header header;
+  auto p = bl.cbegin();
+  decode(header, p);
+
+  stats = std::move(header.stats);
 }
 
 static void account_entry(rgw_bucket_dir_stats& stats,
@@ -259,7 +239,7 @@ object_map::iterator simulator::find_or_create(const cls_rgw_obj_key& key)
 
 int simulator::try_start(const cls_rgw_obj_key& key, const std::string& tag)
 {
-  // choose randomly betwen create and delete
+  // choose randomly between create and delete
   const auto type = static_cast<RGWModifyOp>(
       ceph::util::generate_random_number<size_t, size_t>(CLS_RGW_OP_ADD,
                                                          CLS_RGW_OP_DEL));
@@ -549,7 +529,7 @@ void simulator::complete_multipart(const operation& op)
           << " size=" << part_size << dendl;
     } else {
       rgw_bucket_dir_entry_meta meta;
-      meta.category = op.meta.category;
+      meta.category = RGWObjCategory::MultiPart;
       meta.size = meta.accounted_size = part_size;
 
       int r = index_complete(ioctx, oid, part_key, op.tag, op.type,
@@ -638,9 +618,20 @@ void simulator::complete_multipart(const operation& op)
   }
 }
 
-TEST(cls_rgw_stats, simulate)
+class cls_rgw_stats : public ceph::test::ClsTestFixture {
+  // Inherits: rados, ioctx, pool_name, pool_type, SetUp(), TearDown()
+};
+
+TEST_P(cls_rgw_stats, simulate)
 {
   const char* bucket_oid = __func__;
-  auto sim = simulator{RadosEnv::ioctx, bucket_oid};
+  auto sim = simulator{ioctx, bucket_oid};
   sim.run();
 }
+
+INSTANTIATE_TEST_SUITE_P(PoolTypes, cls_rgw_stats,
+  ::testing::Values(PoolType::REPLICATED, PoolType::FAST_EC),
+  [](const ::testing::TestParamInfo<PoolType>& info) {
+  return pool_type_name(info.param);
+  }
+);

@@ -4,7 +4,10 @@
 #include <sstream>
 #include <utility>
 #include <boost/scoped_ptr.hpp>
+#include <fmt/format.h>
 
+#include "include/buffer.h"
+#include "include/byteorder.h" // for ceph_le32
 #include "include/err.h"
 #include "include/rados/librados.h"
 #include "include/types.h"
@@ -38,10 +41,11 @@ public:
     }
   }
 
-  std::string init()
+  std::string init(bool split_ops)
   {
     int ret;
-    m_pool_name = get_temp_pool_name();
+    auto pool_prefix = fmt::format("{}_", ::testing::UnitTest::GetInstance()->current_test_info()->name());
+    m_pool_name = get_temp_pool_name(pool_prefix);
     std::string err = create_one_pool(m_pool_name, &m_cluster);
     if (!err.empty()) {
       ostringstream oss;
@@ -65,10 +69,12 @@ public:
   bool m_init;
 };
 
-TEST(LibRadosAio, TooBig) {
+class LibRadosAio : public ::testing::TestWithParam<bool> {};
+
+TEST_P(LibRadosAio, TooBig) {
   AioTestData test_data;
   rados_completion_t my_completion;
-  ASSERT_EQ("", test_data.init());
+  ASSERT_EQ("", test_data.init(GetParam()));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   char buf[128];
@@ -82,10 +88,10 @@ TEST(LibRadosAio, TooBig) {
   rados_aio_release(my_completion);
 }
 
-TEST(LibRadosAio, SimpleWrite) {
+TEST_P(LibRadosAio, SimpleWrite) {
   AioTestData test_data;
   rados_completion_t my_completion;
-  ASSERT_EQ("", test_data.init());
+  ASSERT_EQ("", test_data.init(GetParam()));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   auto sg = make_scope_guard([&] { rados_aio_release(my_completion); });
@@ -113,10 +119,10 @@ TEST(LibRadosAio, SimpleWrite) {
   ASSERT_EQ(0, rados_aio_get_return_value(my_completion2));
 }
 
-TEST(LibRadosAio, WaitForSafe) {
+TEST_P(LibRadosAio, WaitForSafe) {
   AioTestData test_data;
   rados_completion_t my_completion;
-  ASSERT_EQ("", test_data.init());
+  ASSERT_EQ("", test_data.init(GetParam()));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   char buf[128];
@@ -129,10 +135,10 @@ TEST(LibRadosAio, WaitForSafe) {
   rados_aio_release(my_completion);
 }
 
-TEST(LibRadosAio, RoundTrip) {
+TEST_P(LibRadosAio, RoundTrip) {
   AioTestData test_data;
   rados_completion_t my_completion;
-  ASSERT_EQ("", test_data.init());
+  ASSERT_EQ("", test_data.init(GetParam()));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   char buf[128];
@@ -161,10 +167,10 @@ TEST(LibRadosAio, RoundTrip) {
   rados_aio_release(my_completion2);
 }
 
-TEST(LibRadosAio, RoundTrip2) {
+TEST_P(LibRadosAio, RoundTrip2) {
   AioTestData test_data;
   rados_completion_t my_completion;
-  ASSERT_EQ("", test_data.init());
+  ASSERT_EQ("", test_data.init(GetParam()));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   char buf[128];
@@ -193,10 +199,10 @@ TEST(LibRadosAio, RoundTrip2) {
   rados_aio_release(my_completion2);
 }
 
-TEST(LibRadosAio, RoundTrip3) {
+TEST_P(LibRadosAio, RoundTrip3) {
   AioTestData test_data;
   rados_completion_t my_completion;
-  ASSERT_EQ("", test_data.init());
+  ASSERT_EQ("", test_data.init(GetParam()));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   char buf[128];
@@ -252,10 +258,10 @@ TEST(LibRadosAio, RoundTrip3) {
   ASSERT_EQ(bl.crc32c(-1), checksum[1]);
 }
 
-TEST(LibRadosAio, RoundTripAppend) {
+TEST_P(LibRadosAio, RoundTripAppend) {
   AioTestData test_data;
   rados_completion_t my_completion, my_completion2, my_completion3;
-  ASSERT_EQ("", test_data.init());
+  ASSERT_EQ("", test_data.init(GetParam()));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   char buf[128];
@@ -296,12 +302,12 @@ TEST(LibRadosAio, RoundTripAppend) {
   rados_aio_release(my_completion3);
 }
 
-TEST(LibRadosAio, RemoveTest) {
+TEST_P(LibRadosAio, RemoveTest) {
   char buf[128];
   char buf2[sizeof(buf)];
   rados_completion_t my_completion;
   AioTestData test_data;
-  ASSERT_EQ("", test_data.init());
+  ASSERT_EQ("", test_data.init(GetParam()));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   memset(buf, 0xaa, sizeof(buf));
@@ -317,13 +323,13 @@ TEST(LibRadosAio, RemoveTest) {
   rados_aio_release(my_completion);
 }
 
-TEST(LibRadosAio, XattrsRoundTrip) {
+TEST_P(LibRadosAio, XattrsRoundTrip) {
   char buf[128];
   char attr1[] = "attr1";
   char attr1_buf[] = "foo bar baz";
   // append
   AioTestData test_data;
-  ASSERT_EQ("", test_data.init());
+  ASSERT_EQ("", test_data.init(GetParam()));
   memset(buf, 0xaa, sizeof(buf));
   ASSERT_EQ(0, rados_append(test_data.m_ioctx, "foo", buf, sizeof(buf)));
   // async getxattr
@@ -363,14 +369,14 @@ TEST(LibRadosAio, XattrsRoundTrip) {
   ASSERT_EQ(0, memcmp(attr1_buf, buf, sizeof(attr1_buf)));
 }
 
-TEST(LibRadosAio, RmXattr) {
+TEST_P(LibRadosAio, RmXattr) {
   char buf[128];
   char attr1[] = "attr1";
   char attr1_buf[] = "foo bar baz";
   // append
   memset(buf, 0xaa, sizeof(buf));
   AioTestData test_data;
-  ASSERT_EQ("", test_data.init());
+  ASSERT_EQ("", test_data.init(GetParam()));
   ASSERT_EQ(0, rados_append(test_data.m_ioctx, "foo", buf, sizeof(buf)));  
   // async setxattr
   rados_completion_t my_completion;
@@ -437,9 +443,9 @@ TEST(LibRadosAio, RmXattr) {
   rados_aio_release(my_completion5);
 }
 
-TEST(LibRadosAio, XattrIter) {
+TEST_P(LibRadosAio, XattrIter) {
   AioTestData test_data;
-  ASSERT_EQ("", test_data.init());
+  ASSERT_EQ("", test_data.init(GetParam()));
   // Create an object with 2 attributes
   char buf[128];
   char attr1[] = "attr1";
@@ -490,10 +496,10 @@ TEST(LibRadosAio, XattrIter) {
   rados_getxattrs_end(iter);
 }
 
-TEST(LibRadosAio, IsComplete) {
+TEST_P(LibRadosAio, IsComplete) {
   AioTestData test_data;
   rados_completion_t my_completion;
-  ASSERT_EQ("", test_data.init());
+  ASSERT_EQ("", test_data.init(GetParam()));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   char buf[128];
@@ -529,10 +535,10 @@ TEST(LibRadosAio, IsComplete) {
   rados_aio_release(my_completion2);
 }
 
-TEST(LibRadosAio, IsSafe) {
+TEST_P(LibRadosAio, IsSafe) {
   AioTestData test_data;
   rados_completion_t my_completion;
-  ASSERT_EQ("", test_data.init());
+  ASSERT_EQ("", test_data.init(GetParam()));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   char buf[128];
@@ -568,10 +574,10 @@ TEST(LibRadosAio, IsSafe) {
   rados_aio_release(my_completion2);
 }
 
-TEST(LibRadosAio, ReturnValue) {
+TEST_P(LibRadosAio, ReturnValue) {
   AioTestData test_data;
   rados_completion_t my_completion;
-  ASSERT_EQ("", test_data.init());
+  ASSERT_EQ("", test_data.init(GetParam()));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   char buf[128];
@@ -586,10 +592,10 @@ TEST(LibRadosAio, ReturnValue) {
   rados_aio_release(my_completion);
 }
 
-TEST(LibRadosAio, Flush) {
+TEST_P(LibRadosAio, Flush) {
   AioTestData test_data;
   rados_completion_t my_completion;
-  ASSERT_EQ("", test_data.init());
+  ASSERT_EQ("", test_data.init(GetParam()));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   char buf[128];
@@ -615,10 +621,10 @@ TEST(LibRadosAio, Flush) {
   rados_aio_release(my_completion2);
 }
 
-TEST(LibRadosAio, FlushAsync) {
+TEST_P(LibRadosAio, FlushAsync) {
   AioTestData test_data;
   rados_completion_t my_completion;
-  ASSERT_EQ("", test_data.init());
+  ASSERT_EQ("", test_data.init(GetParam()));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   rados_completion_t flush_completion;
@@ -653,10 +659,10 @@ TEST(LibRadosAio, FlushAsync) {
   rados_aio_release(flush_completion);
 }
 
-TEST(LibRadosAio, RoundTripWriteFull) {
+TEST_P(LibRadosAio, RoundTripWriteFull) {
   AioTestData test_data;
   rados_completion_t my_completion, my_completion2, my_completion3;
-  ASSERT_EQ("", test_data.init());
+  ASSERT_EQ("", test_data.init(GetParam()));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   char buf[128];
@@ -696,10 +702,10 @@ TEST(LibRadosAio, RoundTripWriteFull) {
   rados_aio_release(my_completion3);
 }
 
-TEST(LibRadosAio, RoundTripWriteSame) {
+TEST_P(LibRadosAio, RoundTripWriteSame) {
   AioTestData test_data;
   rados_completion_t my_completion, my_completion2, my_completion3;
-  ASSERT_EQ("", test_data.init());
+  ASSERT_EQ("", test_data.init(GetParam()));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   char full[128];
@@ -742,10 +748,10 @@ TEST(LibRadosAio, RoundTripWriteSame) {
   rados_aio_release(my_completion3);
 }
 
-TEST(LibRadosAio, SimpleStat) {
+TEST_P(LibRadosAio, SimpleStat) {
   AioTestData test_data;
   rados_completion_t my_completion;
-  ASSERT_EQ("", test_data.init());
+  ASSERT_EQ("", test_data.init(GetParam()));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   char buf[128];
@@ -774,10 +780,72 @@ TEST(LibRadosAio, SimpleStat) {
   rados_aio_release(my_completion2);
 }
 
-TEST(LibRadosAio, SimpleStatNS) {
+TEST_P(LibRadosAio, OperateMtime)
+{
+  AioTestData test_data;
+  ASSERT_EQ("", test_data.init(GetParam()));
+
+  time_t set_mtime = 1457129052;
+  {
+    rados_write_op_t op = rados_create_write_op();
+    rados_write_op_create(op, LIBRADOS_CREATE_IDEMPOTENT, nullptr);
+    rados_completion_t completion;
+    ASSERT_EQ(0, rados_aio_create_completion2(nullptr, nullptr, &completion));
+    ASSERT_EQ(0, rados_aio_write_op_operate(op, test_data.m_ioctx, completion,
+                                            "foo", &set_mtime, 0));
+    {
+      TestAlarm alarm;
+      ASSERT_EQ(0, rados_aio_wait_for_complete(completion));
+    }
+    ASSERT_EQ(0, rados_aio_get_return_value(completion));
+    rados_aio_release(completion);
+    rados_release_write_op(op);
+  }
+  {
+    uint64_t size;
+    timespec mtime;
+    ASSERT_EQ(0, rados_stat2(test_data.m_ioctx, "foo", &size, &mtime));
+    EXPECT_EQ(0, size);
+    EXPECT_EQ(set_mtime, mtime.tv_sec);
+    EXPECT_EQ(0, mtime.tv_nsec);
+  }
+}
+
+TEST_P(LibRadosAio, Operate2Mtime)
+{
+  AioTestData test_data;
+  ASSERT_EQ("", test_data.init(GetParam()));
+
+  timespec set_mtime{1457129052, 123456789};
+  {
+    rados_write_op_t op = rados_create_write_op();
+    rados_write_op_create(op, LIBRADOS_CREATE_IDEMPOTENT, nullptr);
+    rados_completion_t completion;
+    ASSERT_EQ(0, rados_aio_create_completion2(nullptr, nullptr, &completion));
+    ASSERT_EQ(0, rados_aio_write_op_operate2(op, test_data.m_ioctx, completion,
+                                             "foo", &set_mtime, 0));
+    {
+      TestAlarm alarm;
+      ASSERT_EQ(0, rados_aio_wait_for_complete(completion));
+    }
+    ASSERT_EQ(0, rados_aio_get_return_value(completion));
+    rados_aio_release(completion);
+    rados_release_write_op(op);
+  }
+  {
+    uint64_t size;
+    timespec mtime;
+    ASSERT_EQ(0, rados_stat2(test_data.m_ioctx, "foo", &size, &mtime));
+    EXPECT_EQ(0, size);
+    EXPECT_EQ(set_mtime.tv_sec, mtime.tv_sec);
+    EXPECT_EQ(set_mtime.tv_nsec, mtime.tv_nsec);
+  }
+}
+
+TEST_P(LibRadosAio, SimpleStatNS) {
   AioTestData test_data;
   rados_completion_t my_completion;
-  ASSERT_EQ("", test_data.init());
+  ASSERT_EQ("", test_data.init(GetParam()));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   char buf[128];
@@ -834,10 +902,10 @@ TEST(LibRadosAio, SimpleStatNS) {
   rados_aio_release(my_completion3);
 }
 
-TEST(LibRadosAio, StatRemove) {
+TEST_P(LibRadosAio, StatRemove) {
   AioTestData test_data;
   rados_completion_t my_completion;
-  ASSERT_EQ("", test_data.init());
+  ASSERT_EQ("", test_data.init(GetParam()));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   char buf[128];
@@ -889,10 +957,10 @@ TEST(LibRadosAio, StatRemove) {
   rados_aio_release(my_completion4);
 }
 
-TEST(LibRadosAio, ExecuteClass) {
+TEST_P(LibRadosAio, ExecuteClass) {
   AioTestData test_data;
   rados_completion_t my_completion;
-  ASSERT_EQ("", test_data.init());
+  ASSERT_EQ("", test_data.init(GetParam()));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   char buf[128];
@@ -923,10 +991,10 @@ using std::string;
 using std::map;
 using std::set;
 
-TEST(LibRadosAio, MultiWrite) {
+TEST_P(LibRadosAio, MultiWrite) {
   AioTestData test_data;
   rados_completion_t my_completion, my_completion2, my_completion3;
-  ASSERT_EQ("", test_data.init());
+  ASSERT_EQ("", test_data.init(GetParam()));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   char buf[128];
@@ -969,9 +1037,9 @@ TEST(LibRadosAio, MultiWrite) {
   rados_aio_release(my_completion3);
 }
 
-TEST(LibRadosAio, AioUnlock) {
+TEST_P(LibRadosAio, AioUnlock) {
   AioTestData test_data;
-  ASSERT_EQ("", test_data.init());
+  ASSERT_EQ("", test_data.init(GetParam()));
   ASSERT_EQ(0, rados_lock_exclusive(test_data.m_ioctx, "foo", "TestLock", "Cookie", "", NULL, 0));
   rados_completion_t my_completion;
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
@@ -1004,11 +1072,12 @@ public:
     }
   }
 
-  std::string init()
+  std::string init(bool fast_ec, bool split_ops)
   {
     int ret;
-    m_pool_name = get_temp_pool_name();
-    std::string err = create_one_ec_pool(m_pool_name, &m_cluster);
+    auto pool_prefix = fmt::format("{}_", ::testing::UnitTest::GetInstance()->current_test_info()->name());
+    m_pool_name = get_temp_pool_name(pool_prefix);
+    std::string err = create_one_ec_pool(m_pool_name, &m_cluster, fast_ec);
     if (!err.empty()) {
       ostringstream oss;
       oss << "create_one_ec_pool(" << m_pool_name << ") failed: error " << err;
@@ -1031,11 +1100,15 @@ public:
   bool m_init;
 };
 
-TEST(LibRadosAioEC, SimpleWrite) {
-  SKIP_IF_CRIMSON();
+class LibRadosAioEC : public ::testing::TestWithParam<std::tuple<bool, bool>> {};
+
+TEST_P(LibRadosAioEC, SimpleWrite) {
   AioTestDataEC test_data;
   rados_completion_t my_completion;
-  ASSERT_EQ("", test_data.init());
+  const auto& params = GetParam();
+  bool fast_ec = std::get<0>(params);
+  bool split_ops = std::get<1>(params);
+  ASSERT_EQ("", test_data.init(fast_ec, split_ops));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   auto sg = make_scope_guard([&] { rados_aio_release(my_completion); });
@@ -1063,11 +1136,13 @@ TEST(LibRadosAioEC, SimpleWrite) {
   ASSERT_EQ(0, rados_aio_get_return_value(my_completion2));
 }
 
-TEST(LibRadosAioEC, WaitForComplete) {
-  SKIP_IF_CRIMSON();
+TEST_P(LibRadosAioEC, WaitForComplete) {
   AioTestDataEC test_data;
   rados_completion_t my_completion;
-  ASSERT_EQ("", test_data.init());
+  const auto& params = GetParam();
+  bool fast_ec = std::get<0>(params);
+  bool split_ops = std::get<1>(params);
+  ASSERT_EQ("", test_data.init(fast_ec, split_ops));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   char buf[128];
@@ -1080,11 +1155,13 @@ TEST(LibRadosAioEC, WaitForComplete) {
   rados_aio_release(my_completion);
 }
 
-TEST(LibRadosAioEC, RoundTrip) {
-  SKIP_IF_CRIMSON();
+TEST_P(LibRadosAioEC, RoundTrip) {
   AioTestDataEC test_data;
   rados_completion_t my_completion;
-  ASSERT_EQ("", test_data.init());
+  const auto& params = GetParam();
+  bool fast_ec = std::get<0>(params);
+  bool split_ops = std::get<1>(params);
+  ASSERT_EQ("", test_data.init(fast_ec, split_ops));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   char buf[128];
@@ -1113,11 +1190,13 @@ TEST(LibRadosAioEC, RoundTrip) {
   rados_aio_release(my_completion2);
 }
 
-TEST(LibRadosAioEC, RoundTrip2) {
-  SKIP_IF_CRIMSON();
+TEST_P(LibRadosAioEC, RoundTrip2) {
   AioTestDataEC test_data;
   rados_completion_t my_completion;
-  ASSERT_EQ("", test_data.init());
+  const auto& params = GetParam();
+  bool fast_ec = std::get<0>(params);
+  bool split_ops = std::get<1>(params);
+  ASSERT_EQ("", test_data.init(fast_ec, split_ops));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   char buf[128];
@@ -1146,11 +1225,14 @@ TEST(LibRadosAioEC, RoundTrip2) {
   rados_aio_release(my_completion2);
 }
 
-TEST(LibRadosAioEC, RoundTripAppend) {
+TEST_P(LibRadosAioEC, RoundTripAppend) {
   SKIP_IF_CRIMSON();
   AioTestDataEC test_data;
   rados_completion_t my_completion, my_completion2, my_completion3, my_completion4;
-  ASSERT_EQ("", test_data.init());
+  const auto& params = GetParam();
+  bool fast_ec = std::get<0>(params);
+  bool split_ops = std::get<1>(params);
+  ASSERT_EQ("", test_data.init(fast_ec, split_ops));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   int req;
@@ -1217,11 +1299,13 @@ TEST(LibRadosAioEC, RoundTripAppend) {
   delete[] buf3;
 }
 
-TEST(LibRadosAioEC, IsComplete) {
-  SKIP_IF_CRIMSON();
+TEST_P(LibRadosAioEC, IsComplete) {
   AioTestDataEC test_data;
   rados_completion_t my_completion;
-  ASSERT_EQ("", test_data.init());
+  const auto& params = GetParam();
+  bool fast_ec = std::get<0>(params);
+  bool split_ops = std::get<1>(params);
+  ASSERT_EQ("", test_data.init(fast_ec, split_ops));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   char buf[128];
@@ -1257,11 +1341,13 @@ TEST(LibRadosAioEC, IsComplete) {
   rados_aio_release(my_completion2);
 }
 
-TEST(LibRadosAioEC, IsSafe) {
-  SKIP_IF_CRIMSON();
+TEST_P(LibRadosAioEC, IsSafe) {
   AioTestDataEC test_data;
   rados_completion_t my_completion;
-  ASSERT_EQ("", test_data.init());
+  const auto& params = GetParam();
+  bool fast_ec = std::get<0>(params);
+  bool split_ops = std::get<1>(params);
+  ASSERT_EQ("", test_data.init(fast_ec, split_ops));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   char buf[128];
@@ -1297,11 +1383,13 @@ TEST(LibRadosAioEC, IsSafe) {
   rados_aio_release(my_completion2);
 }
 
-TEST(LibRadosAioEC, ReturnValue) {
-  SKIP_IF_CRIMSON();
+TEST_P(LibRadosAioEC, ReturnValue) {
   AioTestDataEC test_data;
   rados_completion_t my_completion;
-  ASSERT_EQ("", test_data.init());
+  const auto& params = GetParam();
+  bool fast_ec = std::get<0>(params);
+  bool split_ops = std::get<1>(params);
+  ASSERT_EQ("", test_data.init(fast_ec, split_ops));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   char buf[128];
@@ -1316,11 +1404,13 @@ TEST(LibRadosAioEC, ReturnValue) {
   rados_aio_release(my_completion);
 }
 
-TEST(LibRadosAioEC, Flush) {
-  SKIP_IF_CRIMSON();
+TEST_P(LibRadosAioEC, Flush) {
   AioTestDataEC test_data;
   rados_completion_t my_completion;
-  ASSERT_EQ("", test_data.init());
+  const auto& params = GetParam();
+  bool fast_ec = std::get<0>(params);
+  bool split_ops = std::get<1>(params);
+  ASSERT_EQ("", test_data.init(fast_ec, split_ops));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   char buf[128];
@@ -1346,11 +1436,13 @@ TEST(LibRadosAioEC, Flush) {
   rados_aio_release(my_completion2);
 }
 
-TEST(LibRadosAioEC, FlushAsync) {
-  SKIP_IF_CRIMSON();
+TEST_P(LibRadosAioEC, FlushAsync) {
   AioTestDataEC test_data;
   rados_completion_t my_completion;
-  ASSERT_EQ("", test_data.init());
+  const auto& params = GetParam();
+  bool fast_ec = std::get<0>(params);
+  bool split_ops = std::get<1>(params);
+  ASSERT_EQ("", test_data.init(fast_ec, split_ops));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   rados_completion_t flush_completion;
@@ -1385,11 +1477,13 @@ TEST(LibRadosAioEC, FlushAsync) {
   rados_aio_release(flush_completion);
 }
 
-TEST(LibRadosAioEC, RoundTripWriteFull) {
-  SKIP_IF_CRIMSON();
+TEST_P(LibRadosAioEC, RoundTripWriteFull) {
   AioTestDataEC test_data;
   rados_completion_t my_completion, my_completion2, my_completion3;
-  ASSERT_EQ("", test_data.init());
+  const auto& params = GetParam();
+  bool fast_ec = std::get<0>(params);
+  bool split_ops = std::get<1>(params);
+  ASSERT_EQ("", test_data.init(fast_ec, split_ops));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   char buf[128];
@@ -1429,11 +1523,13 @@ TEST(LibRadosAioEC, RoundTripWriteFull) {
   rados_aio_release(my_completion3);
 }
 
-TEST(LibRadosAioEC, SimpleStat) {
-  SKIP_IF_CRIMSON();
+TEST_P(LibRadosAioEC, SimpleStat) {
   AioTestDataEC test_data;
   rados_completion_t my_completion;
-  ASSERT_EQ("", test_data.init());
+  const auto& params = GetParam();
+  bool fast_ec = std::get<0>(params);
+  bool split_ops = std::get<1>(params);
+  ASSERT_EQ("", test_data.init(fast_ec, split_ops));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   char buf[128];
@@ -1463,11 +1559,13 @@ TEST(LibRadosAioEC, SimpleStat) {
 }
 
 
-TEST(LibRadosAioEC, SimpleStatNS) {
-  SKIP_IF_CRIMSON();
+TEST_P(LibRadosAioEC, SimpleStatNS) {
   AioTestDataEC test_data;
   rados_completion_t my_completion;
-  ASSERT_EQ("", test_data.init());
+  const auto& params = GetParam();
+  bool fast_ec = std::get<0>(params);
+  bool split_ops = std::get<1>(params);
+  ASSERT_EQ("", test_data.init(fast_ec, split_ops));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   char buf[128];
@@ -1524,11 +1622,13 @@ TEST(LibRadosAioEC, SimpleStatNS) {
   rados_aio_release(my_completion3);
 }
 
-TEST(LibRadosAioEC, StatRemove) {
-  SKIP_IF_CRIMSON();
+TEST_P(LibRadosAioEC, StatRemove) {
   AioTestDataEC test_data;
   rados_completion_t my_completion;
-  ASSERT_EQ("", test_data.init());
+  const auto& params = GetParam();
+  bool fast_ec = std::get<0>(params);
+  bool split_ops = std::get<1>(params);
+  ASSERT_EQ("", test_data.init(fast_ec, split_ops));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   char buf[128];
@@ -1580,11 +1680,13 @@ TEST(LibRadosAioEC, StatRemove) {
   rados_aio_release(my_completion4);
 }
 
-TEST(LibRadosAioEC, ExecuteClass) {
-  SKIP_IF_CRIMSON();
+TEST_P(LibRadosAioEC, ExecuteClass) {
   AioTestDataEC test_data;
   rados_completion_t my_completion;
-  ASSERT_EQ("", test_data.init());
+  const auto& params = GetParam();
+  bool fast_ec = std::get<0>(params);
+  bool split_ops = std::get<1>(params);
+  ASSERT_EQ("", test_data.init(fast_ec, split_ops));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   char buf[128];
@@ -1612,11 +1714,14 @@ TEST(LibRadosAioEC, ExecuteClass) {
   rados_aio_release(my_completion2);
 }
 
-TEST(LibRadosAioEC, MultiWrite) {
+TEST_P(LibRadosAioEC, MultiWrite) {
   SKIP_IF_CRIMSON();
   AioTestDataEC test_data;
   rados_completion_t my_completion, my_completion2, my_completion3;
-  ASSERT_EQ("", test_data.init());
+  const auto& params = GetParam();
+  bool fast_ec = std::get<0>(params);
+  bool split_ops = std::get<1>(params);
+  ASSERT_EQ("", test_data.init(fast_ec, split_ops));
   ASSERT_EQ(0, rados_aio_create_completion2(nullptr,
 	      nullptr, &my_completion));
   char buf[128];
@@ -1657,3 +1762,62 @@ TEST(LibRadosAioEC, MultiWrite) {
   rados_aio_release(my_completion2);
   rados_aio_release(my_completion3);
 }
+
+TEST_P(LibRadosAio, CancelBeforeSubmit) {
+  AioTestData test_data;
+  ASSERT_EQ("", test_data.init(GetParam()));
+
+  rados_completion_t completion;
+  ASSERT_EQ(0, rados_aio_create_completion2(nullptr, nullptr, &completion));
+
+  ASSERT_EQ(0, rados_aio_cancel(test_data.m_ioctx, completion));
+  rados_aio_release(completion);
+}
+
+TEST_P(LibRadosAio, CancelBeforeComplete) {
+  AioTestData test_data;
+  ASSERT_EQ("", test_data.init(GetParam()));
+
+  // cancellation tests are racy, so retry if completion beats the cancellation
+  int ret = 0;
+  int tries = 10;
+  do {
+    rados_completion_t completion;
+    ASSERT_EQ(0, rados_aio_create_completion2(nullptr, nullptr, &completion));
+    char buf[128];
+    ASSERT_EQ(0, rados_aio_read(test_data.m_ioctx, "nonexistent",
+                                completion, buf, sizeof(buf), 0));
+
+    ASSERT_EQ(0, rados_aio_cancel(test_data.m_ioctx, completion));
+    {
+      TestAlarm alarm;
+      ASSERT_EQ(0, rados_aio_wait_for_complete(completion));
+    }
+    ret = rados_aio_get_return_value(completion);
+    rados_aio_release(completion);
+  } while (ret == -ENOENT && --tries);
+
+  ASSERT_EQ(-ECANCELED, ret);
+}
+
+TEST_P(LibRadosAio, CancelAfterComplete) {
+  AioTestData test_data;
+  rados_completion_t completion;
+  ASSERT_EQ("", test_data.init(GetParam()));
+
+  ASSERT_EQ(0, rados_aio_create_completion2(nullptr, nullptr, &completion));
+  char buf[128];
+  ASSERT_EQ(0, rados_aio_read(test_data.m_ioctx, "nonexistent",
+                              completion, buf, sizeof(buf), 0));
+
+  {
+    TestAlarm alarm;
+    ASSERT_EQ(0, rados_aio_wait_for_complete(completion));
+  }
+  ASSERT_EQ(0, rados_aio_cancel(test_data.m_ioctx, completion));
+  ASSERT_EQ(-ENOENT, rados_aio_get_return_value(completion));
+  rados_aio_release(completion);
+}
+
+INSTANTIATE_TEST_SUITE_P_REPLICA(LibRadosAio);
+INSTANTIATE_TEST_SUITE_P_EC(LibRadosAioEC);

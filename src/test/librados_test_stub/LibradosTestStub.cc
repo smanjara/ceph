@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "test/librados_test_stub/LibradosTestStub.h"
 #include "include/rados/librados.hpp"
@@ -20,6 +20,7 @@
 #include "objclass/objclass.h"
 #include "osd/osd_types.h"
 #include <arpa/inet.h>
+#include <stdarg.h>
 #include <boost/shared_ptr.hpp>
 #include <deque>
 #include <functional>
@@ -446,7 +447,7 @@ int IoCtx::aio_operate(const std::string& oid, AioCompletion *c,
                        ObjectWriteOperation *op) {
   TestIoCtxImpl *ctx = reinterpret_cast<TestIoCtxImpl*>(io_ctx_impl);
   TestObjectOperationImpl *ops = reinterpret_cast<TestObjectOperationImpl*>(op->impl);
-  return ctx->aio_operate(oid, *ops, c->pc, NULL, 0);
+  return ctx->aio_operate(oid, *ops, c->pc, nullptr, nullptr, 0);
 }
 
 int IoCtx::aio_operate(const std::string& oid, AioCompletion *c,
@@ -462,7 +463,7 @@ int IoCtx::aio_operate(const std::string& oid, AioCompletion *c,
     snv[i] = snaps[i];
   SnapContext snapc(seq, snv);
 
-  return ctx->aio_operate(oid, *ops, c->pc, &snapc, flags);
+  return ctx->aio_operate(oid, *ops, c->pc, &snapc, nullptr, flags);
 }
 
 int IoCtx::aio_operate(const std::string& oid, AioCompletion *c,
@@ -525,11 +526,11 @@ void IoCtx::dup(const IoCtx& rhs) {
   io_ctx_impl = reinterpret_cast<IoCtxImpl*>(ctx->clone());
 }
 
-int IoCtx::exec(const std::string& oid, const char *cls, const char *method,
+int IoCtx::exec_impl(const std::string& oid, const char *cls, const char *method,
                 bufferlist& inbl, bufferlist& outbl) {
   TestIoCtxImpl *ctx = reinterpret_cast<TestIoCtxImpl*>(io_ctx_impl);
   return ctx->execute_operation(
-    oid, std::bind(&TestIoCtxImpl::exec, _1, _2,
+    oid, std::bind(&TestIoCtxImpl::exec_internal, _1, _2,
                      librados_test_stub::get_class_handler(), cls,
                      method, inbl, &outbl, ctx->get_snap_read(),
                      ctx->get_snap_context()));
@@ -601,6 +602,13 @@ int IoCtx::omap_get_vals(const std::string& oid,
   return ctx->execute_operation(
     oid, std::bind(&TestIoCtxImpl::omap_get_vals, _1, _2, start_after, "",
                      max_return, out_vals));
+}
+
+int IoCtx::omap_rm_keys(const std::string& oid,
+                        const std::set<std::string>& keys) {
+  TestIoCtxImpl *ctx = reinterpret_cast<TestIoCtxImpl*>(io_ctx_impl);
+  return ctx->execute_operation(
+    oid, std::bind(&TestIoCtxImpl::omap_rm_keys, _1, _2, keys));
 }
 
 int IoCtx::operate(const std::string& oid, ObjectWriteOperation *op) {
@@ -829,10 +837,10 @@ void ObjectOperation::assert_version(uint64_t ver) {
   o->ops.push_back(std::bind(&TestIoCtxImpl::assert_version, _1, _2, ver));
 }
 
-void ObjectOperation::exec(const char *cls, const char *method,
+void ObjectOperation::exec_impl(const char *cls, const char *method,
                            bufferlist& inbl) {
   TestObjectOperationImpl *o = reinterpret_cast<TestObjectOperationImpl*>(impl);
-  o->ops.push_back(std::bind(&TestIoCtxImpl::exec, _1, _2,
+  o->ops.push_back(std::bind(&TestIoCtxImpl::exec_internal, _1, _2,
 			       librados_test_stub::get_class_handler(), cls,
 			       method, inbl, _3, _4, _5));
 }
@@ -1152,13 +1160,11 @@ int Rados::ioctx_create2(int64_t pool_id, IoCtx &io)
   return 0;
 }
 
-int Rados::mon_command(std::string cmd, const bufferlist& inbl,
+int Rados::mon_command(std::string&& cmd, bufferlist&& inbl,
                        bufferlist *outbl, std::string *outs) {
   TestRadosClient *impl = reinterpret_cast<TestRadosClient*>(client);
 
-  std::vector<std::string> cmds;
-  cmds.push_back(cmd);
-  return impl->mon_command(cmds, inbl, outbl, outs);
+  return impl->mon_command({std::move(cmd)}, std::move(inbl), outbl, outs);
 }
 
 int Rados::service_daemon_register(const std::string& service,
@@ -1516,7 +1522,7 @@ int cls_register(const char *name, cls_handle_t *handle) {
   return cls->create(name, handle);
 }
 
-int cls_register_cxx_method(cls_handle_t hclass, const char *method,
+int detail::cls_register_cxx_method_impl(cls_handle_t hclass, const char *method,
     int flags,
     cls_method_cxx_call_t class_call,
     cls_method_handle_t *handle) {

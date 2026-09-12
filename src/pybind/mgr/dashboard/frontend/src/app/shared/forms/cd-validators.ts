@@ -10,15 +10,21 @@ import _ from 'lodash';
 import { Observable, of as observableOf, timer as observableTimer } from 'rxjs';
 import { map, switchMapTo, take } from 'rxjs/operators';
 
+import { hasMirroringMdsCaps } from '~/app/ceph/cephfs/cephfs-utils';
 import { RgwBucketService } from '~/app/shared/api/rgw-bucket.service';
+import { CLIENT_PREFIX } from '~/app/shared/models/cephfs.model';
+import { CephAuthUser } from '~/app/shared/models/cluster.model';
 import { DimlessBinaryPipe } from '~/app/shared/pipes/dimless-binary.pipe';
 import { FormatterService } from '~/app/shared/services/formatter.service';
+import validator from 'validator';
 
 export function isEmptyInputValue(value: any): boolean {
   return value == null || value.length === 0;
 }
 
-export type existsServiceFn = (value: any) => Observable<boolean>;
+export type existsServiceFn = (value: any, ...args: any[]) => Observable<boolean>;
+
+export const DUE_TIMER = 500;
 
 export class CdValidators {
   /**
@@ -110,7 +116,7 @@ export class CdValidators {
    *   if the validation check fails, otherwise `null`.
    */
   static pemCert(): ValidatorFn {
-    return Validators.pattern(/^-----BEGIN .+-----$.+^-----END .+-----$/ms);
+    return Validators.pattern(/^-----BEGIN .+-----$\s[\s\S]+^-----END .+-----$/m);
   }
 
   /**
@@ -192,6 +198,10 @@ export class CdValidators {
                   result = value.length >= prerequisite['arg1'];
                 }
                 break;
+              case 'minValue':
+                if (_.isNumber(value)) {
+                  result = value >= prerequisite['arg1'];
+                }
             }
             return result;
           }
@@ -266,6 +276,92 @@ export class CdValidators {
   }
 
   /**
+   * Fails when an existing CephX user lacks MDS caps for CephFS mirroring.
+   * Missing users are valid (they will be created). Empty values are skipped.
+   * Revalidates when the filesystem control changes, same as {@link requiredIf}.
+   *
+   * @param getUsers Function returning the current CephX user list.
+   * @param fsControlName Name of the sibling form control with the filesystem name.
+   * @return {ValidatorFn} Error map with `invalidMdsCaps` when caps are insufficient.
+   */
+  static mirroringMdsCaps(
+    getUsers: () => CephAuthUser[],
+    fsControlName = 'filesystem'
+  ): ValidatorFn {
+    let isWatched = false;
+
+    return (control: AbstractControl): ValidationErrors | null => {
+      if (!isWatched && control.parent) {
+        const fsControl = control.parent.get(fsControlName);
+        if (fsControl) {
+          fsControl.valueChanges.subscribe(() => {
+            control.updateValueAndValidity({ emitEvent: false });
+          });
+        }
+        isWatched = true;
+      }
+
+      const username = (control.value ?? '').toString().trim();
+      const fsName = control.parent?.get(fsControlName)?.value;
+      if (isEmptyInputValue(username) || !fsName) {
+        return null;
+      }
+
+      const entity = `${CLIENT_PREFIX}${username}`;
+      const user = (getUsers() || []).find(
+        (u) => String(u.entity || u['user_entity'] || '') === entity
+      );
+      if (!user) {
+        return null;
+      }
+      return hasMirroringMdsCaps(user.caps?.mds, fsName) ? null : { invalidMdsCaps: true };
+    };
+  }
+
+  /**
+   * Validator for DH-HMAC-CHAP keys that must be Base64 encoded.
+   * Accepts plain Base64 or DHHC-1:XX:base64: format.
+   * Skips validation when value is empty (use with required validator if needed).
+   * @returns {ValidatorFn} Returns error map with `invalidBase64` if validation fails.
+   */
+  static base64(): ValidatorFn {
+    const plainBase64Regex = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+    const dhchapFormatRegex = /^DHHC-1:[0-9a-fA-F]{2}:[A-Za-z0-9+/]+:$/;
+    return (control: AbstractControl): { [key: string]: boolean } | null => {
+      if (isEmptyInputValue(control.value)) {
+        return null;
+      }
+      const value = control.value;
+      return plainBase64Regex.test(value) || dhchapFormatRegex.test(value)
+        ? null
+        : { invalidBase64: true };
+    };
+  }
+
+  /**
+   * Validator that checks whether the control value is a Base64 encoded JSON string.
+   * Whitespace characters are ignored. Skips validation when value is empty.
+   * @returns {ValidatorFn} Returns error map with `invalidBase64Json` if validation fails.
+   */
+  static base64Json(): ValidatorFn {
+    return (control: AbstractControl): ValidationErrors | null => {
+      const value = (control.value || '').replace(/\s/g, '');
+      if (isEmptyInputValue(value)) {
+        return null;
+      }
+      if (!/^[A-Za-z0-9+/]+=*$/.test(value)) {
+        return { invalidBase64Json: true };
+      }
+      try {
+        JSON.parse(atob(value));
+        return null;
+      } catch {
+        return { invalidBase64Json: true };
+      }
+    };
+  }
+
+  /**
    * Validate form control if condition is true with validators.
    *
    * @param {AbstractControl} formControl
@@ -285,18 +381,22 @@ export class CdValidators {
   ) {
     conditionalValidators = conditionalValidators.concat(permanentValidators);
 
-    formControl.setValidators((control: AbstractControl): {
-      [key: string]: any;
-    } => {
-      const value = condition.call(this);
-      if (value) {
-        return Validators.compose(conditionalValidators)(control);
+    formControl.setValidators(
+      (
+        control: AbstractControl
+      ): {
+        [key: string]: any;
+      } => {
+        const value = condition.call(this);
+        if (value) {
+          return Validators.compose(conditionalValidators)(control);
+        }
+        if (permanentValidators.length > 0) {
+          return Validators.compose(permanentValidators)(control);
+        }
+        return null;
       }
-      if (permanentValidators.length > 0) {
-        return Validators.compose(permanentValidators)(control);
-      }
-      return null;
-    });
+    );
 
     watchControls.forEach((control: AbstractControl) => {
       control.valueChanges.subscribe(() => {
@@ -321,8 +421,9 @@ export class CdValidators {
       if (!ctrl1 || !ctrl2) {
         return null;
       }
-      if (ctrl1.value !== ctrl2.value) {
-        ctrl2.setErrors({ match: true });
+      if (ctrl2.value && ctrl1.value !== ctrl2.value) {
+        const errors = _.merge({}, ctrl2.errors, { match: true });
+        ctrl2.setErrors(errors);
       } else {
         const hasError = ctrl2.hasError('match');
         if (hasError) {
@@ -347,9 +448,12 @@ export class CdValidators {
    *   boolean 'true' if the given value exists, otherwise 'false'.
    * @param serviceFnThis {any} The object to be used as the 'this' object
    *   when calling the serviceFn function. Defaults to null.
-   * @param {number|Date} dueTime The delay time to wait before the
-   *   serviceFn call is executed. This is useful to prevent calls on
-   *   every keystroke. Defaults to 500.
+   * @param usernameFn {Function} Specifically used in rgw user form to
+   *   validate the tenant$username format
+   * @param uidField {boolean} Specifically used in rgw user form to
+   *   validate the tenant$username format
+   * @param extraArgs {...any} Any extra arguments that need to be passed
+   *   to the serviceFn function.
    * @return {AsyncValidatorFn} Returns an asynchronous validator function
    *   that returns an error map with the `notUnique` property if the
    *   validation check succeeds, otherwise `null`.
@@ -358,7 +462,8 @@ export class CdValidators {
     serviceFn: existsServiceFn,
     serviceFnThis: any = null,
     usernameFn?: Function,
-    uidField = false
+    uidField = false,
+    ...extraArgs: any[]
   ): AsyncValidatorFn {
     let uName: string;
     return (control: AbstractControl): Observable<ValidationErrors | null> => {
@@ -376,8 +481,8 @@ export class CdValidators {
         }
       }
 
-      return observableTimer().pipe(
-        switchMapTo(serviceFn.call(serviceFnThis, uName)),
+      return observableTimer(DUE_TIMER).pipe(
+        switchMapTo(serviceFn.call(serviceFnThis, uName, ...extraArgs)),
         map((resp: boolean) => {
           if (!resp) {
             return null;
@@ -451,6 +556,22 @@ export class CdValidators {
   }
 
   /**
+   * Validator function to ensure the entered value is a multiple of a typical block size (512 or 4096).
+   * It checks the numeric value directly against the modulo 512 calculation.
+   */
+  static blockSizeMultiple(): ValidatorFn {
+    return (control: AbstractControl): { [key: string]: boolean } | null => {
+      const value = control.value;
+      if (value !== null && value !== undefined && value !== '') {
+        if (Number(value) % 512 !== 0) {
+          return { blockSizeMultiple: true };
+        }
+      }
+      return null;
+    };
+  }
+
+  /**
    * Asynchronous validator that checks if the password meets the password
    * policy.
    * @param userServiceThis The object to be used as the 'this' object
@@ -479,7 +600,7 @@ export class CdValidators {
       if (_.isFunction(usernameFn)) {
         username = usernameFn();
       }
-      return observableTimer(500).pipe(
+      return observableTimer(DUE_TIMER).pipe(
         switchMapTo(_.invoke(userServiceThis, 'validatePassword', control.value, username)),
         map((resp: { valid: boolean; credits: number; valuation: string }) => {
           if (_.isFunction(callback)) {
@@ -518,7 +639,8 @@ export class CdValidators {
       let errorName: string;
       // - Bucket names cannot be formatted as IP address.
       constraints.push(() => {
-        const ipv4Rgx = /^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/i;
+        const ipv4Rgx =
+          /^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/i;
         const ipv6Rgx = /^(?:[a-f0-9]{1,4}:){7}[a-f0-9]{1,4}$/i;
         const name = control.value;
         let notIP = true;
@@ -600,13 +722,119 @@ export class CdValidators {
       if (control.pristine || !control.value) {
         return observableOf({ required: true });
       }
-      return rgwBucketService
-        .exists(control.value)
-        .pipe(
-          map((existenceResult: boolean) =>
-            existenceResult === requiredExistenceResult ? null : { bucketNameNotAllowed: true }
-          )
-        );
+      return observableTimer(DUE_TIMER).pipe(
+        switchMapTo(rgwBucketService.exists(control.value)),
+        map((existenceResult: boolean) =>
+          existenceResult === requiredExistenceResult ? null : { bucketNameNotAllowed: true }
+        )
+      );
     };
+  }
+
+  static json(): ValidatorFn {
+    return (control: AbstractControl): Record<string, any> | null => {
+      if (!control.value) return null;
+      try {
+        JSON.parse(control.value);
+        return null;
+      } catch (e) {
+        return { invalidJson: true };
+      }
+    };
+  }
+
+  static xml(): ValidatorFn {
+    return (control: AbstractControl): Record<string, boolean> | null => {
+      if (!control.value) return null;
+      const parser = new DOMParser();
+      const xml = parser.parseFromString(control.value, 'application/xml');
+      const errorNode = xml.querySelector('parsererror');
+      if (errorNode) {
+        return { invalidXml: true };
+      }
+      return null;
+    };
+  }
+
+  static jsonOrXml(): ValidatorFn {
+    return (control: AbstractControl): Record<string, boolean> | null => {
+      if (!control.value) return null;
+
+      if (control.value.trim().startsWith('<')) {
+        const parser = new DOMParser();
+        const xml = parser.parseFromString(control.value, 'application/xml');
+        const errorNode = xml.querySelector('parsererror');
+        if (errorNode) {
+          return { invalidXml: true };
+        }
+        return null;
+      } else {
+        try {
+          JSON.parse(control.value);
+          return null;
+        } catch (e) {
+          return { invalidJson: true };
+        }
+      }
+    };
+  }
+
+  static oauthAddressTest(): ValidatorFn {
+    // Pattern matches: IPv4 addresses or hostnames (with or without dots, like 'localhost')
+    const OAUTH2_HTTPS_ADDRESS_PATTERN =
+      /^((\d{1,3}\.){3}\d{1,3}|([a-zA-Z0-9-_]+\.)*[a-zA-Z0-9-_]+)$/;
+    return (control: AbstractControl): Record<string, boolean> | null => {
+      if (!control.value) {
+        return null;
+      }
+
+      if (!control.value.includes(':')) {
+        return { invalidAddress: true };
+      }
+      const [address, port] = control.value.split(':');
+      const addressTest = OAUTH2_HTTPS_ADDRESS_PATTERN.test(address);
+      const portTest = Number(port) >= 0 && Number(port) <= 65535;
+      return addressTest && portTest ? null : { invalidAddress: true };
+    };
+  }
+
+  /**
+   * Validator function to validate endpoints, allowing FQDN, IPv4, and IPv6 addresses with ports.
+   * Accepts multiple endpoints separated by commas.
+   */
+
+  static url(control: AbstractControl): ValidationErrors | null {
+    return CdValidators.urlInternal(control, true);
+  }
+
+  static urlWithProtocolOption(require_protocol: boolean) {
+    return (control: AbstractControl): ValidationErrors | null =>
+      CdValidators.urlInternal(control, require_protocol);
+  }
+
+  private static urlInternal(
+    control: AbstractControl,
+    require_protocol: boolean
+  ): ValidationErrors | null {
+    const value = control.value;
+
+    if (_.isEmpty(value)) {
+      return null;
+    }
+
+    const urls = value.includes(',')
+      ? value.split(',').map((v: string) => v.trim())
+      : [value.trim()];
+
+    const invalidUrls = urls.filter(
+      (url: string) =>
+        !validator.isURL(url, {
+          require_protocol: require_protocol,
+          allow_underscores: true,
+          require_tld: false
+        }) && !validator.isIP(url)
+    );
+
+    return invalidUrls.length > 0 ? { invalidURL: true } : null;
   }
 }

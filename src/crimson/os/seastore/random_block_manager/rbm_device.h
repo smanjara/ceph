@@ -1,5 +1,5 @@
-//-*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+//-*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -66,11 +66,6 @@ using discard_ertr = crimson::errorator<
   crimson::ct_error::input_output_error>;
 
 constexpr uint32_t RBM_SUPERBLOCK_SIZE = 4096;
-enum {
-  // TODO: This allows the device to manage crc on a block by itself
-  RBM_NVME_END_TO_END_PROTECTION = 1,
-  RBM_BITMAP_BLOCK_CRC = 2,
-};
 
 class RBMDevice : public Device {
 public:
@@ -82,10 +77,25 @@ public:
     uint64_t rbm_addr = convert_paddr_to_abs_addr(addr);
     return read(rbm_addr, out);
   }
+  read_ertr::future<> readv(
+    paddr_t addr,
+    std::vector<bufferptr> ptrs) final {
+    uint64_t rbm_addr = convert_paddr_to_abs_addr(addr);
+    return _readv(rbm_addr, std::move(ptrs));
+  }
 protected:
-  rbm_metadata_header_t super;
+  device_superblock_t super;
+  device_shard_info_t shard_info;
+  uint32_t device_shard_nums = 0;
+  store_index_t store_index = 0;
+  bool shard_status = true;
+  virtual read_ertr::future<> _readv(
+    uint64_t offset,
+    std::vector<bufferptr> ptrs) = 0;
+
 public:
-  RBMDevice() {}
+  RBMDevice(store_index_t store_index = 0)
+  : store_index(store_index) {}
   virtual ~RBMDevice() = default;
 
   template <typename T>
@@ -101,7 +111,7 @@ public:
     return super.config.spec.magic;
   }
 
-  device_type_t get_device_type() const final {
+  virtual device_type_t get_device_type() const {
     return device_type_t::RANDOM_BLOCK_SSD;
   }
 
@@ -116,8 +126,10 @@ public:
   secondary_device_set_t& get_secondary_devices() final {
     return super.config.secondary_devices;
   }
-  std::size_t get_available_size() const { return super.size; }
+  std::size_t get_available_size() const { return super.total_size; }
   extent_len_t get_block_size() const { return super.block_size; }
+
+  read_ertr::future<uint32_t> get_shard_nums() final;
 
   virtual read_ertr::future<> read(
     uint64_t offset,
@@ -132,7 +144,7 @@ public:
    */
   virtual write_ertr::future<> write(
     uint64_t offset,
-    bufferptr &bptr,
+    bufferptr bptr,
     uint16_t stream = 0) = 0;
 
   virtual discard_ertr::future<> discard(
@@ -148,35 +160,56 @@ public:
     ceph::bufferlist bl,
     uint16_t stream = 0) = 0;
 
-  bool is_data_protection_enabled() const { return false; }
+  bool is_end_to_end_data_protection() const final {
+    return super.is_end_to_end_data_protection();
+  }
 
-  mkfs_ret mkfs(device_config_t) final;
+  virtual nvme_command_ertr::future<> initialize_nvme_features() { 
+    return nvme_command_ertr::now(); 
+  }
 
-  write_ertr::future<> write_rbm_header();
+  mkfs_ret do_mkfs(device_config_t);
 
-  read_ertr::future<rbm_metadata_header_t> read_rbm_header(rbm_abs_addr addr);
+  // shard 0 mkfs
+  mkfs_ret do_primary_mkfs(device_config_t, int shard_num, size_t journal_size);
+
+  mount_ret do_mount();
+
+  mount_ret do_shard_mount();
+
+  write_ertr::future<> write_rbm_superblock();
+
+  read_ertr::future<device_superblock_t> read_rbm_superblock(rbm_abs_addr addr);
 
   using stat_device_ret =
     read_ertr::future<seastar::stat_data>;
   virtual stat_device_ret stat_device() = 0;
 
+  virtual std::string get_device_path() const = 0;
+
   uint64_t get_journal_size() const {
     return super.journal_size;
   }
 
-  static rbm_abs_addr get_journal_start() {
+  static rbm_abs_addr get_shard_reserved_size() {
     return RBM_SUPERBLOCK_SIZE;
   }
 
-  // interfaces for test
-  void set_device_id(device_id_t id) {
-    super.config.spec.id = id;
+  rbm_abs_addr get_shard_journal_start() {
+    return shard_info.start_offset + get_shard_reserved_size();
   }
-  void set_journal_size(uint64_t size) {
-    super.journal_size = size;
+
+  uint64_t get_shard_start() const {
+    return shard_info.start_offset;
+  }
+
+  uint64_t get_shard_end() const {
+    return shard_info.start_offset + shard_info.size;
   }
 };
 using RBMDeviceRef = std::unique_ptr<RBMDevice>;
+
+constexpr uint64_t DEFAULT_TEST_CBJOURNAL_SIZE = 1 << 26;
 
 class EphemeralRBMDevice : public RBMDevice {
 public:
@@ -197,17 +230,8 @@ public:
   std::size_t get_available_size() const final { return size; }
   extent_len_t get_block_size() const final { return block_size; }
 
-  mount_ret mount() final {
-    return open("", seastar::open_flags::rw
-    ).safe_then([]() {
-      return mount_ertr::now();
-    }).handle_error(
-      mount_ertr::pass_further{},
-      crimson::ct_error::assert_all{
-	"Invalid error mount"
-      }
-    );
-  }
+  mount_ret mount() final;
+  mkfs_ret mkfs(device_config_t config) final;
 
   open_ertr::future<> open(
     const std::string &in_path,
@@ -215,13 +239,16 @@ public:
 
   write_ertr::future<> write(
     uint64_t offset,
-    bufferptr &bptr,
+    bufferptr bptr,
     uint16_t stream = 0) override;
 
   using RBMDevice::read;
   read_ertr::future<> read(
     uint64_t offset,
     bufferptr &bptr) override;
+  read_ertr::future<> _readv(
+    uint64_t offset,
+    std::vector<bufferptr> ptrs) override;
 
   close_ertr::future<> close() override;
 
@@ -239,9 +266,36 @@ public:
       stat
     );
   }
+
+  std::string get_device_path() const final {
+    return "";
+  }
+
   char *buf;
 };
 using EphemeralRBMDeviceRef = std::unique_ptr<EphemeralRBMDevice>;
-EphemeralRBMDeviceRef create_test_ephemeral(uint64_t journal_size, uint64_t data_size);
+EphemeralRBMDeviceRef create_test_ephemeral(
+  uint64_t journal_size = DEFAULT_TEST_CBJOURNAL_SIZE,
+  uint64_t data_size = DEFAULT_TEST_CBJOURNAL_SIZE);
+
+template <typename T>
+class MultiShardDevices {
+  public:
+    std::vector<std::unique_ptr<T>> mshard_devices;
+
+  public:
+  MultiShardDevices(size_t count,
+                    const std::string path)
+  : mshard_devices() {
+    mshard_devices.reserve(count);
+    for (size_t store_index = 0; store_index < count; ++store_index) {
+      mshard_devices.emplace_back(std::make_unique<T>(
+        path, store_index));
+    }
+  }
+  ~MultiShardDevices() {
+    mshard_devices.clear();
+  }
+};
 
 }

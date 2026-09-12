@@ -1,8 +1,7 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
-#ifndef RGW_FRONTEND_H
-#define RGW_FRONTEND_H
+#pragma once
 
 #include <map>
 #include <string>
@@ -16,7 +15,9 @@
 #include "rgw_realm_reloader.h"
 
 #include "rgw_auth_registry.h"
+#ifdef WITH_RADOSGW_RADOS
 #include "rgw_sal_rados.h"
+#endif
 
 #define dout_context g_ceph_context
 
@@ -132,7 +133,7 @@ public:
   RGWLoadGenFrontend(RGWProcessEnv& pe, RGWFrontendConfig *_conf)
     : RGWProcessFrontend(pe, _conf) {}
 
-  CephContext *get_cct() const { 
+  CephContext *get_cct() const {
     return env.driver->ctx();
   }
 
@@ -210,5 +211,3 @@ class RGWFrontendPauser : public RGWRealmReloader::Pauser {
       pauser->resume(driver);
   }
 };
-
-#endif /* RGW_FRONTEND_H */

@@ -1,15 +1,19 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "include/crc32c.h"
 #include "arch/probe.h"
 #include "arch/intel.h"
 #include "arch/arm.h"
 #include "arch/ppc.h"
+#include "arch/s390x.h"
+#include "arch/riscv.h"
 #include "common/sctp_crc32.h"
 #include "common/crc32c_intel_fast.h"
 #include "common/crc32c_aarch64.h"
 #include "common/crc32c_ppc.h"
+#include "common/crc32c_s390x.h"
+#include "common/crc32c_riscv.h"
 
 /*
  * choose best implementation based on the CPU architecture.
@@ -23,7 +27,13 @@ ceph_crc32c_func_t ceph_choose_crc32(void)
   // if the CPU supports it, *and* the fast version is compiled in,
   // use that.
 #if defined(__i386__) || defined(__x86_64__)
+  if (ceph_arch_intel_avx512_vpclmul && ceph_crc32c_intel_fast_avx512_vpclmul_exists()) {
+    return ceph_crc32c_intel_fast_avx512_vpclmul;
+  }
   if (ceph_arch_intel_sse42 && ceph_crc32c_intel_fast_exists()) {
+    if (ceph_arch_intel_pclmul) {
+      return ceph_crc32c_intel_fast_pclmul;
+    }
     return ceph_crc32c_intel_fast;
   }
 #elif defined(__arm__) || defined(__aarch64__)
@@ -35,6 +45,21 @@ ceph_crc32c_func_t ceph_choose_crc32(void)
 #elif defined(__powerpc__) || defined(__ppc__)
   if (ceph_arch_ppc_crc32) {
     return ceph_crc32c_ppc;
+  }
+#elif defined(__riscv)
+# if defined(HAVE_RISCV_ZVBC)
+  if (ceph_arch_riscv_zvbc) {
+    return ceph_crc32c_riscv;
+  }
+# endif
+# if defined(HAVE_RISCV_ZBC)
+  if (ceph_arch_riscv_zbc) {
+    return ceph_crc32c_riscv_zbc;
+  }
+# endif
+#elif defined(__s390__)
+  if (ceph_arch_s390x_crc32) {
+    return ceph_crc32c_s390x;
   }
 #endif
   // default

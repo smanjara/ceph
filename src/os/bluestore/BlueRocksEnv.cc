@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "BlueRocksEnv.h"
 #include "BlueFS.h"
@@ -36,7 +36,7 @@ std::pair<std::string_view, std::string_view>
 split(const std::string &fn)
 {
   size_t slash = fn.rfind('/');
-  assert(slash != fn.npos);
+  ceph_assert(slash != fn.npos);
   size_t file_begin = slash + 1;
   while (slash && fn[slash - 1] == '/')
     --slash;
@@ -213,26 +213,22 @@ class BlueRocksWritableFile : public rocksdb::WritableFile {
   // size due to whole pages writes. The behavior is undefined if called
   // with other writes to follow.
   rocksdb::Status Truncate(uint64_t size) override {
-    // we mirror the posix env, which does nothing here; instead, it
-    // truncates to the final size on close.  whatever!
+    int r = fs->truncate(h, size);
+    if (r < 0) {
+      return err_to_status(r);
+    }
     return rocksdb::Status::OK();
-    //int r = fs->truncate(h, size);
-    //  return err_to_status(r);
   }
 
   rocksdb::Status Close() override {
-    fs->fsync(h);
-
-    // mimic posix env, here.  shrug.
-    size_t block_size;
-    size_t last_allocated_block;
-    GetPreallocationStatus(&block_size, &last_allocated_block);
-    if (last_allocated_block > 0) {
-      int r = fs->truncate(h, h->pos);
-      if (r < 0)
-	return err_to_status(r);
+    // RocksDB assumes that when the file is closed, unused allocated
+    // space is truncated. It's not explicitly documented, but compare
+    // PosixWritableFile::Close().
+    int r = fs->truncate_unused(h);
+    if (r < 0) {
+      return err_to_status(r);
     }
-
+    fs->fsync(h);
     return rocksdb::Status::OK();
   }
 
@@ -254,7 +250,7 @@ class BlueRocksWritableFile : public rocksdb::WritableFile {
 
   // Indicates the upper layers if the current WritableFile implementation
   // uses direct IO.
-  bool UseDirectIO() const {
+  bool use_direct_io() const override {
     return false;
   }
 
@@ -285,14 +281,12 @@ class BlueRocksWritableFile : public rocksdb::WritableFile {
     return rocksdb::Status::OK();
   }
 
-  using rocksdb::WritableFile::RangeSync;
   // Sync a file range with disk.
   // offset is the starting byte of the file range to be synchronized.
   // nbytes specifies the length of the range to be synchronized.
   // This asks the OS to initiate flushing the cached data to disk,
   // without waiting for completion.
-  // Default implementation does nothing.
-  rocksdb::Status RangeSync(off_t offset, off_t nbytes) {
+  rocksdb::Status RangeSync(uint64_t offset, uint64_t nbytes) override {
     // round down to page boundaries
     int partial = offset & 4095;
     offset -= partial;
@@ -304,11 +298,10 @@ class BlueRocksWritableFile : public rocksdb::WritableFile {
   }
 
  protected:
-  using rocksdb::WritableFile::Allocate;
   /*
    * Pre-allocate space for a file.
    */
-  rocksdb::Status Allocate(off_t offset, off_t len) {
+  rocksdb::Status Allocate(uint64_t offset, uint64_t len) override {
     int r = fs->preallocate(h->file, offset, len);
     return err_to_status(r);
   }

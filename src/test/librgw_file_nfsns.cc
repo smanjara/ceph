@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -20,9 +21,9 @@
 
 #include "include/rados/librgw.h"
 #include "include/rados/rgw_file.h"
-#include "rgw_file.h"
 #include "rgw_lib.h"
-#include "rgw_lib_frontend.h" // direct requests
+#include "rgw/rgw_file_int.h"
+#include "rgw/rgw_lib_frontend.h" // direct requests
 
 #include "gtest/gtest.h"
 #include "common/ceph_argparse.h"
@@ -649,6 +650,9 @@ TEST(LibRGW, BAD_DELETES_DIRS1) {
 TEST(LibRGW, GETATTR_DIRS1)
 {
   if (do_dirs1) {
+    if (verbose) {
+      std::cout << "\ttesting Unix attributes " << std::endl;
+    }
     int rc;
     struct stat st;
     for (auto& dirs_rec : dirs_vec) {
@@ -873,7 +877,7 @@ TEST(LibRGW, RELEASE_DIRS1) {
 }
 
 extern "C" {
-  static bool r1_cb(const char* name, void *arg, uint64_t offset,
+  static int r1_cb(const char* name, void *arg, uint64_t offset,
 		    struct stat* st, uint32_t st_mask,
 		    uint32_t flags) {
     struct rgw_file_handle* parent_fh
@@ -1031,7 +1035,7 @@ TEST(LibRGW, MARKER1_SETUP_OBJECTS)
 }
 
 extern "C" {
-  static bool r2_cb(const char* name, void *arg, uint64_t offset,
+  static int r2_cb(const char* name, void *arg, uint64_t offset,
 		    struct stat* st, uint32_t st_mask,
 		    uint32_t flags) {
     dirent_vec& dvec =

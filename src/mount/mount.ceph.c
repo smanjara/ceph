@@ -449,6 +449,8 @@ static int fetch_config_info(struct ceph_mount_info *cmi)
 				memcpy(cmi->cmi_secret, cci->cci_secret, len + 1);
 			} else {
 				mount_ceph_debug("secret is too long (len=%zu max=%zu)!\n", len, SECRET_BUFSIZE);
+        ret = EX_SYSERR;
+        goto out;
 			}
 		}
 		if (!cmi->cmi_mons && cci->cci_mons[0]) {
@@ -569,8 +571,12 @@ static int parse_options(const char *data, struct ceph_mount_info *cmi,
 			}
 
 			len = strnlen(value, sizeof(cmi->cmi_secret)) + 1;
-			if (len <= sizeof(cmi->cmi_secret))
+			if (len <= sizeof(cmi->cmi_secret)) {
 				memcpy(cmi->cmi_secret, value, len);
+      } else {
+				fprintf(stderr, "mount option secret is too long.\n");
+				return -EINVAL;
+      }
 		} else if (strcmp(data, "conf") == 0) {
 			if (!value || !*value) {
 				fprintf(stderr, "mount option conf requires a value.\n");
@@ -912,7 +918,8 @@ static int do_mount(const char *dev, const char *node,
 			fprintf(stderr, "mount error: ceph filesystem not supported by the system\n");
 			break;
 		case EHOSTUNREACH:
-			fprintf(stderr, "mount error: no mds server is up or the cluster is laggy\n");
+			fprintf(stderr, "mount error: no mds (Metadata Server) is up. "
+			"The cluster might be laggy, or you may not be authorized\n");
 			break;
 		default:
 			fprintf(stderr, "mount error %d = %s\n", errno, strerror(errno));

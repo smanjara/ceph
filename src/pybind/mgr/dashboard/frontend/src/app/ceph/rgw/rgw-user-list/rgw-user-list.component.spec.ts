@@ -11,12 +11,15 @@ import { TableActionsComponent } from '~/app/shared/datatable/table-actions/tabl
 import { SharedModule } from '~/app/shared/shared.module';
 import { configureTestBed, PermissionHelper } from '~/testing/unit-test-helper';
 import { RgwUserListComponent } from './rgw-user-list.component';
+import { RgwUserAccountsService } from '~/app/shared/api/rgw-user-accounts.service';
 
 describe('RgwUserListComponent', () => {
   let component: RgwUserListComponent;
   let fixture: ComponentFixture<RgwUserListComponent>;
   let rgwUserService: RgwUserService;
   let rgwUserServiceListSpy: jasmine.Spy;
+  let rgwUserAccountService: RgwUserAccountsService;
+  let rgwUserAccountServiceListSpy: jasmine.Spy;
 
   configureTestBed({
     declarations: [RgwUserListComponent],
@@ -26,8 +29,11 @@ describe('RgwUserListComponent', () => {
 
   beforeEach(() => {
     rgwUserService = TestBed.inject(RgwUserService);
+    rgwUserAccountService = TestBed.inject(RgwUserAccountsService);
     rgwUserServiceListSpy = spyOn(rgwUserService, 'list');
+    rgwUserAccountServiceListSpy = spyOn(rgwUserAccountService, 'list');
     rgwUserServiceListSpy.and.returnValue(of([]));
+    rgwUserAccountServiceListSpy.and.returnValue(of([]));
     fixture = TestBed.createComponent(RgwUserListComponent);
     component = fixture.componentInstance;
     spyOn(component, 'setTableRefreshTimeout').and.stub();
@@ -48,40 +54,80 @@ describe('RgwUserListComponent', () => {
     expect(tableActions).toEqual({
       'create,update,delete': {
         actions: ['Create', 'Edit', 'Delete'],
-        primary: { multiple: 'Delete', executing: 'Edit', single: 'Edit', no: 'Create' }
+        primary: {
+          multiple: 'Create',
+          executing: 'Create',
+          single: 'Create',
+          no: 'Create'
+        }
       },
       'create,update': {
         actions: ['Create', 'Edit'],
-        primary: { multiple: 'Create', executing: 'Edit', single: 'Edit', no: 'Create' }
+        primary: {
+          multiple: 'Create',
+          executing: 'Create',
+          single: 'Create',
+          no: 'Create'
+        }
       },
       'create,delete': {
         actions: ['Create', 'Delete'],
-        primary: { multiple: 'Delete', executing: 'Create', single: 'Create', no: 'Create' }
+        primary: {
+          multiple: 'Create',
+          executing: 'Create',
+          single: 'Create',
+          no: 'Create'
+        }
       },
       create: {
         actions: ['Create'],
-        primary: { multiple: 'Create', executing: 'Create', single: 'Create', no: 'Create' }
+        primary: {
+          multiple: 'Create',
+          executing: 'Create',
+          single: 'Create',
+          no: 'Create'
+        }
       },
       'update,delete': {
         actions: ['Edit', 'Delete'],
-        primary: { multiple: 'Delete', executing: 'Edit', single: 'Edit', no: 'Edit' }
+        primary: {
+          multiple: '',
+          executing: '',
+          single: '',
+          no: ''
+        }
       },
       update: {
         actions: ['Edit'],
-        primary: { multiple: 'Edit', executing: 'Edit', single: 'Edit', no: 'Edit' }
+        primary: {
+          multiple: 'Edit',
+          executing: 'Edit',
+          single: 'Edit',
+          no: 'Edit'
+        }
       },
       delete: {
         actions: ['Delete'],
-        primary: { multiple: 'Delete', executing: 'Delete', single: 'Delete', no: 'Delete' }
+        primary: {
+          multiple: 'Delete',
+          executing: 'Delete',
+          single: 'Delete',
+          no: 'Delete'
+        }
       },
       'no-permissions': {
         actions: [],
-        primary: { multiple: '', executing: '', single: '', no: '' }
+        primary: {
+          multiple: '',
+          executing: '',
+          single: '',
+          no: ''
+        }
       }
     });
   });
 
-  it('should test if rgw-user data is tranformed correctly', () => {
+  it('should test if rgw-user data is transformed correctly', () => {
     rgwUserServiceListSpy.and.returnValue(
       of([
         {
@@ -102,6 +148,7 @@ describe('RgwUserListComponent', () => {
     expect(rgwUserServiceListSpy).toHaveBeenCalledTimes(2);
     expect(component.users).toEqual([
       {
+        account: { name: '' },
         user_id: 'testid',
         stats: {
           size_actual: 6,

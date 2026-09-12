@@ -4,23 +4,30 @@
 
 Currently, the ceph mgr code in python is most commonly written by adding mgr
 modules and corresponding classes and then adding methods to those classes that
-are decorated using `@CLICommand` from  `mgr_module.py`.  These methods (that
-will be called endpoints subsequently) then implement the logic that is
-executed when the mgr receives a command from a client.  These endpoints are
+are decorated using per-module command registries created from `CLICommandBase`
+in `mgr_module.py`. These methods (endpoints) then implement the logic that is
+executed when the mgr receives a command from a client. These endpoints are
 currently responsible for forming a response tuple of (int, str, str) where the
 int represents a return value (error code) and the first string the "body" of
 the response. The mgr supports a generic `format` parameter (`--format` on the
-ceph cli) that each endpoint must then explicitly handle. At the time of this
+ceph CLI) that each endpoint must then explicitly handle. At the time of this
 writing, many endpoints do not handle alternate formats and are each
 implementing formatting/serialization of values in various different ways.
 
 The `object_format` module aims to make the process of writing endpoint
 functions easier, more consistent, and (hopefully) better documented.  At the
 highest level, the module provides a new decorator `Responder` that must be
-placed below the `CLICommand` decorator (so that it decorates the endpoint
-before `CLICommand`). This decorator helps automatically convert Python objects
-to response tuples expected by the manager, while handling the `format`
+placed below the command decorator so that it decorates the endpoint before
+the command decorator. This decorator helps automatically convert Python
+objects to response tuples expected by the manager, while handling the `format`
 parameter automatically.
+
+NOTE: The examples below use placeholder names like `StatusCLICommand` to
+represent module-specific command registries. Each module must create its own
+registry using `CLICommandBase.make_registry_subtype()` in a `cli.py` file,
+then import and use that specific registry type in decorators. The decorators
+must use the specific type name (e.g., `@StatusCLICommand.Read`), NOT
+`@CLICommand`. See `doc/mgr/modules.rst` for complete setup instructions.
 
 In addition to the decorator the module provides a few other types and methods
 that intended to interoperate with the decorator and make small customizations
@@ -29,7 +36,7 @@ and error handling easier.
 == Using Responder ==
 
 The simple and intended way to use the decorator is as follows:
-    @CLICommand("command name", perm="r")
+    @StatusCLICommand.Read("command name")
     Responder()
     def create_something(self, name: str) -> Dict[str, str]:
         ...  # implementation
@@ -44,7 +51,7 @@ implementation then the response code is always zero (success).
 The object_format module provides an exception type `ErrorResponse`
 that assists in returning "clean" error conditions to the client.
 Extending the previous example to use this exception:
-    @CLICommand("command name", perm="r")
+    @StatusCLICommand.Read("command name")
     Responder()
     def create_something(self, name: str) -> Dict[str, str]:
         try:
@@ -84,7 +91,7 @@ the method will be called and the result serialized. Example:
       def to_simplified(self) -> Dict[str, int]:
          return {"temp": self.temperature, "qty": self.quantity}
 
-    @CLICommand("command name", perm="r")
+    @StatusCLICommand.Read("command name")
     Responder()
     def create_something_cool(self) -> CoolStuff:
        cool_stuff: CoolStuff = self._make_cool_stuff()  # implementation
@@ -108,7 +115,7 @@ enabled. Note that Responder takes as an argument any callable that returns a
       def to_json(self) -> Dict[str, Any]:
          return {"name": self.name, "height": self.height}
 
-    @CLICommand("command name", perm="r")
+    @StatusCLICommand.Read("command name")
     Responder(functools.partial(ObjectFormatAdapter, compatible=True))
     def create_an_item(self) -> MyExistingClass:
        item: MyExistingClass = self._new_item()  # implementation
@@ -228,9 +235,18 @@ class YAMLFormatter(Protocol):
 
 class ReturnValueProvider(Protocol):
     def mgr_return_value(self) -> int:
-        """Return an integer value to provide the Ceph MGR with a error code
-        for the MGR's response tuple. Zero means success. Return an negative
+        """Return an integer value to provide the Ceph MGR with an error code
+        for the MGR's response tuple. Zero means success. Return a negative
         errno otherwise.
+        """
+        ...  # pragma: no cover
+
+
+class StatusValueProvider(Protocol):
+    def mgr_status_value(self) -> str:
+        """Return a string value to provide the Ceph MGR with an error status
+        for the MGR's response tuple. Empty string means success. Return a string
+        containing error info otherwise.
         """
         ...  # pragma: no cover
 
@@ -272,8 +288,13 @@ def _is_yaml_data_provider(obj: YAMLDataProvider) -> bool:
 
 
 def _is_return_value_provider(obj: ReturnValueProvider) -> bool:
-    """Return true if obj is usable as a YAMLDataProvider."""
+    """Return true if obj is usable as a ReturnValueProvider."""
     return callable(getattr(obj, 'mgr_return_value', None))
+
+
+def _is_status_value_provider(obj: StatusValueProvider) -> bool:
+    """Return true if obj is usable as a StatusValueProvider"""
+    return callable(getattr(obj, 'mgr_status_value', None))
 
 
 class ObjectFormatAdapter:
@@ -295,6 +316,11 @@ class ObjectFormatAdapter:
     serialization. If the object can not be safely serialized an exception will
     be raised.
 
+    By default both JSON and YAML output will use sorted keys. This behavior
+    can be toggled via the `sort_json` and `sort_yaml` keyword arguments.
+    If set to None, the internal default (sorted) will be used. Otherwise,
+    explicitly set them to true or false as desired.
+
     NOTE: Some code may use methods named like `to_json` to return a JSON
     string. If that is the case, you should not use that method with the
     ObjectFormatAdapter. Do not set compatible=True for objects of this type.
@@ -305,10 +331,18 @@ class ObjectFormatAdapter:
         obj: Any,
         json_indent: Optional[int] = DEFAULT_JSON_INDENT,
         compatible: bool = False,
+        *,
+        sort_json: Optional[bool] = None,
+        sort_yaml: Optional[bool] = None,
     ) -> None:
         self.obj = obj
         self._compatible = compatible
         self.json_indent = json_indent
+        # For our sorting options None means use the internal default.  For
+        # compatibility reasons means setting True for json and leaving yaml
+        # dumper built-in default untouched.
+        self.sort_json: bool = True if sort_json is None else sort_json
+        self.sort_yaml = sort_yaml
 
     def _fetch_json_data(self) -> Any:
         # if the data object provides a specific simplified representation for
@@ -324,7 +358,9 @@ class ObjectFormatAdapter:
     def format_json(self) -> str:
         """Return a JSON formatted string representing the input object."""
         return json.dumps(
-            self._fetch_json_data(), indent=self.json_indent, sort_keys=True
+            self._fetch_json_data(),
+            indent=self.json_indent,
+            sort_keys=self.sort_json,
         )
 
     def _fetch_yaml_data(self) -> Any:
@@ -336,7 +372,10 @@ class ObjectFormatAdapter:
 
     def format_yaml(self) -> str:
         """Return a YAML formatted string representing the input object."""
-        return yaml.safe_dump(self._fetch_yaml_data())
+        kwargs: Dict[str, Any] = {}
+        if self.sort_yaml is not None:
+            kwargs['sort_keys'] = self.sort_yaml
+        return yaml.safe_dump(self._fetch_yaml_data(), **kwargs)
 
     format_json_pretty = format_json
 
@@ -364,6 +403,27 @@ class ReturnValueAdapter:
         if _is_return_value_provider(self.obj):
             return int(self.obj.mgr_return_value())
         return self.default_return_value
+
+
+class StatusValueAdapter:
+    """A status-value adapter for an object.
+    Given an input object, this type will attempt to get a mgr status value
+    from the object if provides a `mgr_status_value` function.
+    If not it returns a default status value, typically an empty string.
+    """
+
+    def __init__(
+            self,
+            obj: Any,
+            default: str = "",
+    ) -> None:
+        self.obj = obj
+        self.default_status = default
+
+    def mgr_status_value(self) -> str:
+        if _is_status_value_provider(self.obj):
+            return str(self.obj.mgr_status_value())
+        return self.default_status
 
 
 class ErrorResponseBase(Exception):
@@ -448,6 +508,7 @@ ObjectResponseFuncType = Union[
     Callable[..., JSONDataProvider],
     Callable[..., YAMLDataProvider],
     Callable[..., ReturnValueProvider],
+    Callable[..., StatusValueProvider],
 ]
 
 
@@ -487,15 +548,19 @@ class Responder:
         """Return a ReturnValueProvider for the given object."""
         return ReturnValueAdapter(obj)
 
+    def _statusval_provider(self, obj: Any) -> StatusValueProvider:
+        """Return a StatusValueProvider for the given object."""
+        return StatusValueAdapter(obj)
+
     def _get_format_func(
         self, obj: Any, format_req: Optional[str] = None
     ) -> Callable:
         formatter = self._formatter(obj)
         if format_req is None:
             format_req = self.default_format
-        if format_req not in formatter.valid_formats():
-            raise UnknownFormat(format_req)
         req = str(format_req).replace("-", "_")
+        if req not in formatter.valid_formats():
+            raise UnknownFormat(format_req)
         ffunc = getattr(formatter, f"format_{req}", None)
         if ffunc is None:
             raise UnsupportedFormat(format_req)
@@ -515,6 +580,12 @@ class Responder:
         """Return a mgr return-value for the given object (usually zero)."""
         return self._retval_provider(obj).mgr_return_value()
 
+    def _return_status(self, obj: Any) -> str:
+        """Return a mgr status-value for the given object (usually empty
+        string).
+        """
+        return self._statusval_provider(obj).mgr_status_value()
+
     def __call__(self, f: ObjectResponseFuncType) -> HandlerFuncType:
         """Wrap a python function so that the original function's return value
         becomes the source for an automatically formatted mgr response.
@@ -528,9 +599,10 @@ class Responder:
                 robj = f(*args, **kwargs)
                 body = self._formatted(robj, format_req)
                 retval = self._return_value(robj)
+                statusval = self._return_status(robj)
             except ErrorResponseBase as e:
                 return e.format_response()
-            return retval, body, ""
+            return retval, body, statusval
 
         # set the extra args on our wrapper function. this will be consumed by
         # the CLICommand decorator and added to the set of optional arguments

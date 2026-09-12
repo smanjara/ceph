@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -22,7 +22,6 @@
 namespace crimson::os::seastore {
 
 class OnodeManager {
-  using base_iertr = TransactionManager::base_iertr;
 public:
   using mkfs_iertr = base_iertr;
   using mkfs_ret = mkfs_iertr::future<>;
@@ -57,12 +56,6 @@ public:
   virtual get_or_create_onodes_ret get_or_create_onodes(
     Transaction &trans,
     const std::vector<ghobject_t> &hoids) = 0;
-
-  using write_dirty_iertr = base_iertr;
-  using write_dirty_ret = write_dirty_iertr::future<>;
-  virtual write_dirty_ret write_dirty(
-    Transaction &trans,
-    const std::vector<OnodeRef> &onodes) = 0;
 
   using erase_onode_iertr = base_iertr;
   using erase_onode_ret = erase_onode_iertr::future<>;

@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -141,7 +141,7 @@ class ValueDeltaRecorder {
   /// Called by DeltaRecorderT to apply user-defined value delta.
   virtual void apply_value_delta(ceph::bufferlist::const_iterator&,
                                  NodeExtentMutable&,
-                                 laddr_t) = 0;
+                                 laddr_offset_t) = 0;
 
  protected:
   ValueDeltaRecorder(ceph::bufferlist& encoded) : encoded{encoded} {}
@@ -201,7 +201,18 @@ class Value {
     return read_value_header()->payload_size;
   }
 
-  laddr_t get_hint() const;
+  laddr_hint_t init_hint(
+    extent_len_t block_size,
+    bool is_metadata) const;
+  laddr_hint_t generate_clone_hint(
+    local_object_id_t object_id,
+    extent_len_t block_size,
+    bool is_metadata) const;
+  laddr_hint_t generate_temp_hint(
+    local_object_id_t object_id,
+    extent_len_t block_size,
+    bool is_metadata) const;
+
 
   bool operator==(const Value& v) const { return p_cursor == v.p_cursor; }
   bool operator!=(const Value& v) const { return !(*this == v); }
@@ -312,11 +323,12 @@ struct ValueBuilderImpl final : public ValueBuilder {
     return ret;
   }
 
-  ValueImpl build_value(NodeExtentManager& nm,
+  ValueImpl build_value(const hobject_t &hobj,
+			NodeExtentManager& nm,
                         const ValueBuilder& vb,
                         Ref<tree_cursor_t>& p_cursor) const {
     assert(vb.get_header_magic() == get_header_magic());
-    return ValueImpl(nm, vb, p_cursor);
+    return ValueImpl(hobj, nm, vb, p_cursor);
   }
 };
 

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -19,7 +20,9 @@
 #error "!GTEST_IS_THREADSAFE"
 #endif
 
+#include "include/compat.h"
 #include "include/cephfs/libcephfs.h"
+#include "include/fs_types.h"
 #include <errno.h>
 #include <sys/fcntl.h>
 #include <unistd.h>
@@ -31,7 +34,10 @@
 #include <stdlib.h>
 #include <semaphore.h>
 #include <time.h>
+
+#ifndef _WIN32
 #include <sys/mman.h>
+#endif
 
 #ifdef __linux__
 #include <limits.h>
@@ -762,6 +768,7 @@ static void process_ConcurrentRecordLocking(str_ConcurrentRecordLocking& s) {
 }
 
 // Disabled because of fork() issues (http://tracker.ceph.com/issues/16556)
+#ifndef _WIN32
 TEST(LibCephFS, DISABLED_InterProcessRecordLocking) {
   PROCESS_SLOW_MS();
   // Process synchronization
@@ -922,7 +929,9 @@ TEST(LibCephFS, DISABLED_InterProcessRecordLocking) {
   ASSERT_EQ(0, ceph_ll_unlink(cmount, root, c_file, perms));
   CLEANUP_CEPH();
 }
+#endif
 
+#ifndef _WIN32
 // Disabled because of fork() issues (http://tracker.ceph.com/issues/16556)
 TEST(LibCephFS, DISABLED_ThreesomeInterProcessRecordLocking) {
   PROCESS_SLOW_MS();
@@ -1094,3 +1103,4 @@ TEST(LibCephFS, DISABLED_ThreesomeInterProcessRecordLocking) {
   ASSERT_EQ(0, ceph_ll_unlink(cmount, root, c_file, perms));
   CLEANUP_CEPH();
 }
+#endif

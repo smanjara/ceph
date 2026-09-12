@@ -1,5 +1,13 @@
-import { Component, OnInit, TemplateRef, ViewChild } from '@angular/core';
-import { FormControl } from '@angular/forms';
+import {
+  Component,
+  Input,
+  OnInit,
+  TemplateRef,
+  ViewChild,
+  Output,
+  EventEmitter
+} from '@angular/core';
+import { UntypedFormControl } from '@angular/forms';
 import { Router } from '@angular/router';
 
 import { NgbModalRef } from '@ng-bootstrap/ng-bootstrap';
@@ -11,7 +19,7 @@ import { OrchestratorService } from '~/app/shared/api/orchestrator.service';
 import { OsdService } from '~/app/shared/api/osd.service';
 import { ListWithDetails } from '~/app/shared/classes/list-with-details.class';
 import { ConfirmationModalComponent } from '~/app/shared/components/confirmation-modal/confirmation-modal.component';
-import { CriticalConfirmationModalComponent } from '~/app/shared/components/critical-confirmation-modal/critical-confirmation-modal.component';
+import { DeleteConfirmationModalComponent } from '~/app/shared/components/delete-confirmation-modal/delete-confirmation-modal.component';
 import { FormModalComponent } from '~/app/shared/components/form-modal/form-modal.component';
 import { ActionLabelsI18n, URLVerbs } from '~/app/shared/constants/app.constants';
 import { CellTemplate } from '~/app/shared/enum/cell-template.enum';
@@ -31,13 +39,16 @@ import { AuthStorageService } from '~/app/shared/services/auth-storage.service';
 import { ModalService } from '~/app/shared/services/modal.service';
 import { NotificationService } from '~/app/shared/services/notification.service';
 import { TaskWrapperService } from '~/app/shared/services/task-wrapper.service';
-import { URLBuilderService } from '~/app/shared/services/url-builder.service';
 import { OsdFlagsIndivModalComponent } from '../osd-flags-indiv-modal/osd-flags-indiv-modal.component';
 import { OsdFlagsModalComponent } from '../osd-flags-modal/osd-flags-modal.component';
 import { OsdPgScrubModalComponent } from '../osd-pg-scrub-modal/osd-pg-scrub-modal.component';
 import { OsdRecvSpeedModalComponent } from '../osd-recv-speed-modal/osd-recv-speed-modal.component';
 import { OsdReweightModalComponent } from '../osd-reweight-modal/osd-reweight-modal.component';
 import { OsdScrubModalComponent } from '../osd-scrub-modal/osd-scrub-modal.component';
+import { ModalCdsService } from '~/app/shared/services/modal-cds.service';
+import { CdTableFetchDataContext } from '~/app/shared/models/cd-table-fetch-data-context';
+import { Osd } from '~/app/shared/models/osd.model';
+import { DeletionImpact } from '~/app/shared/enum/delete-confirmation-modal-impact.enum';
 
 const BASE_URL = 'osd';
 
@@ -45,9 +56,13 @@ const BASE_URL = 'osd';
   selector: 'cd-osd-list',
   templateUrl: './osd-list.component.html',
   styleUrls: ['./osd-list.component.scss'],
-  providers: [{ provide: URLBuilderService, useValue: new URLBuilderService(BASE_URL) }]
+  standalone: false
 })
 export class OsdListComponent extends ListWithDetails implements OnInit {
+  @Input() showTabs = true;
+  @Input() inlineCreate = false;
+  @Output() createAction = new EventEmitter<void>();
+
   @ViewChild('osdUsageTpl', { static: true })
   osdUsageTpl: TemplateRef<any>;
   @ViewChild('markOsdConfirmationTpl', { static: true })
@@ -70,6 +85,7 @@ export class OsdListComponent extends ListWithDetails implements OnInit {
   clusterWideActions: CdTableAction[];
   icons = Icons;
   osdSettings = new OsdSettings();
+  count = 0;
 
   selection = new CdTableSelection();
   osds: any[] = [];
@@ -104,12 +120,12 @@ export class OsdListComponent extends ListWithDetails implements OnInit {
     private osdService: OsdService,
     private dimlessBinaryPipe: DimlessBinaryPipe,
     private modalService: ModalService,
-    private urlBuilder: URLBuilderService,
     private router: Router,
     private taskWrapper: TaskWrapperService,
     public actionLabels: ActionLabelsI18n,
     public notificationService: NotificationService,
-    private orchService: OrchestratorService
+    private orchService: OrchestratorService,
+    private cdsModalService: ModalCdsService
   ) {
     super();
     this.permissions = this.authStorageService.getPermissions();
@@ -118,7 +134,13 @@ export class OsdListComponent extends ListWithDetails implements OnInit {
         name: this.actionLabels.CREATE,
         permission: 'create',
         icon: Icons.add,
-        click: () => this.router.navigate([this.urlBuilder.getCreate()]),
+        click: () => {
+          if (this.inlineCreate) {
+            this.createAction.emit();
+          } else {
+            this.router.navigate([BASE_URL, { outlets: { modal: [URLVerbs.CREATE] } }]);
+          }
+        },
         disable: (selection: CdTableSelection) => this.getDisable('create', selection),
         canBePrimary: (selection: CdTableSelection) => !selection.hasSelection
       },
@@ -233,7 +255,7 @@ export class OsdListComponent extends ListWithDetails implements OnInit {
             }
           ),
         disable: () => this.isNotSelectedOrInState('up'),
-        icon: Icons.destroyCircle
+        icon: Icons.clearFilters
       },
       {
         name: this.actionLabels.DELETE,
@@ -284,14 +306,14 @@ export class OsdListComponent extends ListWithDetails implements OnInit {
         prop: 'collectedStates',
         name: $localize`Status`,
         flexGrow: 1,
-        cellTransformation: CellTemplate.badge,
+        cellTransformation: CellTemplate.tag,
         customTemplateConfig: {
           map: {
-            in: { class: 'badge-success' },
-            up: { class: 'badge-success' },
-            down: { class: 'badge-danger' },
-            out: { class: 'badge-danger' },
-            destroyed: { class: 'badge-danger' }
+            in: { class: 'tag-success' },
+            up: { class: 'tag-success' },
+            down: { class: 'tag-danger' },
+            out: { class: 'tag-danger' },
+            destroyed: { class: 'tag-danger' }
           }
         }
       },
@@ -299,11 +321,11 @@ export class OsdListComponent extends ListWithDetails implements OnInit {
         prop: 'tree.device_class',
         name: $localize`Device class`,
         flexGrow: 1.2,
-        cellTransformation: CellTemplate.badge,
+        cellTransformation: CellTemplate.tag,
         customTemplateConfig: {
           map: {
-            hdd: { class: 'badge-hdd' },
-            ssd: { class: 'badge-ssd' }
+            hdd: { class: 'tag-hdd' },
+            ssd: { class: 'tag-ssd' }
           }
         }
       },
@@ -424,10 +446,13 @@ export class OsdListComponent extends ListWithDetails implements OnInit {
     }
   }
 
-  getOsdList() {
-    const observables = [this.osdService.getList(), this.osdService.getFlags()];
-    observableForkJoin(observables).subscribe((resp: [any[], string[]]) => {
-      this.osds = resp[0].map((osd) => {
+  getOsdList(context?: CdTableFetchDataContext) {
+    if (!context) context = new CdTableFetchDataContext();
+    const pagination_obs = this.osdService.getList(context.toParams());
+    const observables = [pagination_obs.observable, this.osdService.getFlags()];
+    observableForkJoin(observables).subscribe((resp: any) => {
+      this.osds = resp[0].map((osd: Osd) => {
+        this.count = pagination_obs.count;
         osd.collectedStates = OsdListComponent.collectStates(osd);
         osd.stats_history.out_bytes = osd.stats_history.op_out_bytes.map((i: string) => i[1]);
         osd.stats_history.in_bytes = osd.stats_history.op_in_bytes.map((i: string) => i[1]);
@@ -447,7 +472,7 @@ export class OsdListComponent extends ListWithDetails implements OnInit {
   editAction() {
     const selectedOsd = _.filter(this.osds, ['id', this.selection.first().id]).pop();
 
-    this.modalService.show(FormModalComponent, {
+    this.cdsModalService.show(FormModalComponent, {
       titleText: $localize`Edit OSD: ${selectedOsd.id}`,
       fields: [
         {
@@ -458,7 +483,7 @@ export class OsdListComponent extends ListWithDetails implements OnInit {
           required: true
         }
       ],
-      submitButtonText: $localize`Edit OSD`,
+      submitButtonText: this.actionLabels.SAVE_CHANGES,
       onSubmit: (values: any) => {
         this.osdService.update(selectedOsd.id, values.deviceClass).subscribe(() => {
           this.notificationService.show(
@@ -485,19 +510,19 @@ export class OsdListComponent extends ListWithDetails implements OnInit {
   }
 
   configureFlagsAction() {
-    this.bsModalRef = this.modalService.show(OsdFlagsModalComponent);
+    this.bsModalRef = this.cdsModalService.show(OsdFlagsModalComponent);
   }
 
   configureFlagsIndivAction() {
     const initialState = {
       selected: this.getSelectedOsds()
     };
-    this.bsModalRef = this.modalService.show(OsdFlagsIndivModalComponent, initialState);
+    this.bsModalRef = this.cdsModalService.show(OsdFlagsIndivModalComponent, initialState);
   }
 
   showConfirmationModal(markAction: string, onSubmit: (id: number) => Observable<any>) {
     const osdIds = this.getSelectedOsdIds();
-    this.bsModalRef = this.modalService.show(ConfirmationModalComponent, {
+    this.bsModalRef = this.cdsModalService.show(ConfirmationModalComponent, {
       titleText: $localize`Mark OSD ${markAction}`,
       buttonText: $localize`Mark ${markAction}`,
       bodyTpl: this.markOsdConfirmationTpl,
@@ -508,7 +533,7 @@ export class OsdListComponent extends ListWithDetails implements OnInit {
       onSubmit: () => {
         observableForkJoin(
           this.getSelectedOsdIds().map((osd: any) => onSubmit.call(this.osdService, osd))
-        ).subscribe(() => this.bsModalRef.close());
+        ).subscribe(() => this.cdsModalService.dismissAll());
       }
     });
   }
@@ -523,7 +548,7 @@ export class OsdListComponent extends ListWithDetails implements OnInit {
 
   delete() {
     const deleteFormGroup = new CdFormGroup({
-      preserve: new FormControl(false)
+      preserve: new UntypedFormControl(false)
     });
 
     this.showCriticalConfirmationModal(
@@ -573,7 +598,10 @@ export class OsdListComponent extends ListWithDetails implements OnInit {
     childFormGroupTemplate?: TemplateRef<any>
   ): void {
     check(this.getSelectedOsdIds()).subscribe((result) => {
-      const modalRef = this.modalService.show(CriticalConfirmationModalComponent, {
+      const osdIds = this.getSelectedOsdIds();
+      this.cdsModalService.show(DeleteConfirmationModalComponent, {
+        impact: DeletionImpact.high,
+        itemNames: osdIds,
         actionDescription: actionDescription,
         itemDescription: itemDescription,
         bodyTemplate: this.criticalConfirmationTpl,
@@ -584,7 +612,7 @@ export class OsdListComponent extends ListWithDetails implements OnInit {
           missingStats: result.missing_stats,
           storedPgs: result.stored_pgs,
           actionDescription: templateItemDescription,
-          osdIds: this.getSelectedOsdIds()
+          osdIds
         },
         childFormGroup: childFormGroup,
         childFormGroupTemplate: childFormGroupTemplate,
@@ -596,17 +624,17 @@ export class OsdListComponent extends ListWithDetails implements OnInit {
             observable.subscribe({
               error: () => {
                 this.getOsdList();
-                modalRef.close();
+                this.cdsModalService.dismissAll();
               },
-              complete: () => modalRef.close()
+              complete: () => this.cdsModalService.dismissAll()
             });
           } else {
             observable.subscribe(
               () => {
                 this.getOsdList();
-                modalRef.close();
+                this.cdsModalService.dismissAll();
               },
-              () => modalRef.close()
+              () => this.cdsModalService.dismissAll()
             );
           }
         }

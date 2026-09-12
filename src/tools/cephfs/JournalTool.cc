@@ -1,5 +1,6 @@
-// -*- mode:c++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:c++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * ceph - scalable distributed file system
  *
@@ -15,7 +16,9 @@
 #include <sstream>
 
 #include "common/ceph_argparse.h"
+#include "common/debug.h"
 #include "common/errno.h"
+#include "common/JSONFormatter.h"
 #include "osdc/Journaler.h"
 #include "mds/mdstypes.h"
 #include "mds/LogEvent.h"
@@ -47,8 +50,8 @@ void JournalTool::usage()
     << "      inspect\n"
     << "      import <path> [--force]\n"
     << "      export <path>\n"
-    << "      reset [--force]\n"
-    << "  cephfs-journal-tool [options] header <get|set> <field> <value>\n"
+    << "      reset [--force] <--yes-i-really-really-mean-it>\n"
+    << "  cephfs-journal-tool [options] header {<get|set> <field> <value> | <recover> [--force]}\n"
     << "    <field>: [trimmed_pos|expire_pos|write_pos|pool_id]\n"
     << "  cephfs-journal-tool [options] event <effect> <selector> <output> [special options]\n"
     << "    <selector>:\n"
@@ -62,14 +65,16 @@ void JournalTool::usage()
     << "    <output>: [summary|list|binary|json] [--path <path>]\n"
     << "\n"
     << "General options:\n"
-    << "  --rank=filesystem:mds-rank|all Journal rank (mandatory)\n"
+    << "  --rank=filesystem:{mds-rank|all} journal rank or \"all\" ranks (mandatory)\n"
     << "  --journal=<mdlog|purge_queue>  Journal type (purge_queue means\n"
     << "                                 this journal is used to queue for purge operation,\n"
     << "                                 default is mdlog, and only mdlog support event mode)\n"
     << "\n"
     << "Special options\n"
     << "  --alternate-pool <name>     Alternative metadata pool to target\n"
-    << "                              when using recover_dentries.\n";
+    << "                              when using recover_dentries.\n"
+    << "  --max-rss <bytes>           Maximum RSS allowed per batch during\n"
+    << "                              event recover_dentries.\n";
 
   generic_client_usage();
 }
@@ -138,9 +143,14 @@ int JournalTool::main(std::vector<const char*> &argv)
     return r;
   }
  
-  auto fs = fsmap->get_filesystem(role_selector.get_ns());
-  ceph_assert(fs != nullptr);
-  int64_t const pool_id = fs->mds_map.get_metadata_pool();
+  auto& fs = fsmap->get_filesystem(role_selector.get_ns());
+  stringstream (rank_str.substr(rank_str.find(':') + 1)) >> rank;
+  if (fs.get_mds_map().is_active(rank)) {
+    derr << "Cannot run cephfs-journal-tool on an active file system!" << dendl;
+    return -EPERM;
+  }
+
+  int64_t const pool_id = fs.get_mds_map().get_metadata_pool();
   dout(4) << "JournalTool: resolving pool " << pool_id << dendl;
   std::string pool_name;
   r = rados.pool_reverse_lookup(pool_id, &pool_name);
@@ -197,7 +207,7 @@ int JournalTool::validate_type(const std::string &type)
   if (type == "mdlog" || type == "purge_queue") {
     return 0;
   }
-  return -1;
+  return -EPERM;
 }
 
 std::string JournalTool::gen_dump_file_path(const std::string &prefix) {
@@ -251,14 +261,36 @@ int JournalTool::main_journal(std::vector<const char*> &argv)
     }
   } else if (command == "reset") {
     bool force = false;
-    if (argv.size() == 2) {
+    if (argv.size() == 1) {
+        std::cerr << "warning: this operation resets the journal!!!\n"
+                  << "Do not run this operation if you do not understand CephFS' internal storage mechanisms or have received specific instructions from those who do.\n"
+                  << "If you want to continue, please add --yes-i-really-really-mean-it!!!"
+                  << std::endl;
+        return -EINVAL;
+    } else if (argv.size() == 2) {
+      if (std::string(argv[1]) == "--force") {
+        std::cerr << "warning: this operation resets the journal!!!\n"
+                  << "Do not run this operation if you do not understand CephFS' internal storage mechanisms or have received specific instructions from those who do.\n"
+                  << "If you want to continue, please add --yes-i-really-really-mean-it!!!"
+                  << std::endl;
+        return -EINVAL;
+      } else if (std::string(argv[1]) != "--yes-i-really-really-mean-it") {
+        std::cerr << "Unknown argument " << argv[1] << std::endl;
+        return -EINVAL;
+      }
+    } else if (argv.size() == 3) {
       if (std::string(argv[1]) == "--force") {
         force = true;
       } else {
         std::cerr << "Unknown argument " << argv[1] << std::endl;
         return -EINVAL;
       }
-    } else if (argv.size() > 2) {
+
+      if (std::string(argv[2]) != "--yes-i-really-really-mean-it") {
+	std::cerr << "Unknown argument " << argv[2] << std::endl;
+        return -EINVAL;
+      }
+    } else if (argv.size() > 3) {
       std::cerr << "Too many arguments!" << std::endl;
       return -EINVAL;
     }
@@ -297,7 +329,7 @@ int JournalTool::main_header(std::vector<const char*> &argv)
   }
 
   if (argv.empty()) {
-    derr << "Missing header command, must be [get|set]" << dendl;
+    derr << "Missing header command, must be [get|set|recover]" << dendl;
     return -EINVAL;
   }
   std::vector<const char *>::iterator arg = argv.begin();
@@ -354,6 +386,22 @@ int JournalTool::main_header(std::vector<const char*> &argv)
     output.write_full(js.obj_name(0), header_bl);
     dout(4) << "Write complete." << dendl;
     std::cout << "Successfully updated header." << std::endl;
+  } else if (command == std::string("recover")) {
+    bool dry_run = true;
+    if (arg != argv.end()) {
+      if (std::string_view(*arg) == "--force") {
+        dry_run = false;
+        ++arg;
+      } else {
+        std::cerr << "Unknown argument trailing recover: " << *arg << std::endl;
+        return -EINVAL;
+      }
+    }
+    if (arg != argv.end()) {
+      std::cerr << "Too many arguments passed to recover command." << std::endl;
+      return -EINVAL;
+    }
+    return recover_header(dry_run);
   } else {
     derr << "Bad header command '" << command << "'" << dendl;
     return -EINVAL;
@@ -424,6 +472,9 @@ int JournalTool::main_event(std::vector<const char*> &argv)
   }
 
   std::string output_path = "dump";
+  uint64_t batch_size = 0;
+  uint64_t batch_bytes = 0;
+  JournalScanner::EventCallback flush = nullptr;
   while(arg != argv.end()) {
     std::string arg_str;
     if (ceph_argparse_witharg(argv, arg, &arg_str, "--path", (char*)NULL)) {
@@ -434,6 +485,16 @@ int JournalTool::main_event(std::vector<const char*> &argv)
       int r = rados.ioctx_create(arg_str.c_str(), output);
       ceph_assert(r == 0);
       other_pool = true;
+    } else if (ceph_argparse_witharg(argv, arg, &arg_str, "--max-rss",
+				     nullptr)) {
+      std::string parse_err;
+      /* an estimate based on calculating journal event sizes, a decoded event 
+      holds ~3x its encoded stream */
+      batch_size = strict_strtoll(arg_str.c_str(), 0, &parse_err) / 3;
+      if (!parse_err.empty()) {
+        derr << "Invalid --max-rss value '" << arg_str << "': " << parse_err << dendl;
+        return -EINVAL;
+      }
     } else {
       cerr << "Unknown argument: '" << *arg << "'" << std::endl;
       return -EINVAL;
@@ -452,35 +513,75 @@ int JournalTool::main_event(std::vector<const char*> &argv)
       return r;
     }
   } else if (command == "recover_dentries") {
-    r = js.scan();
-    if (r) {
+    std::set<inodeno_t> consumed_inos;
+    progress_tracker->set_operation_name("Processing events");
+    
+    // decode the journal first to check if the journal pointer and header are valid
+    r = js.scan(false);
+    if (r < 0) {
       derr << "Failed to scan journal (" << cpp_strerror(r) << ")" << dendl;
       return r;
     }
-
-    /**
-     * Iterate over log entries, attempting to scavenge from each one
-     */
-    std::set<inodeno_t> consumed_inos;
-    for (JournalScanner::EventMap::iterator i = js.events.begin();
-         i != js.events.end(); ++i) {
-      auto& le = i->second.log_event;
-      EMetaBlob const *mb = le->get_metablob();
-      if (mb) {
-        int scav_r = recover_dentries(*mb, dry_run, &consumed_inos);
-        if (scav_r) {
-          dout(1) << "Error processing event 0x" << std::hex << i->first << std::dec
-                  << ": " << cpp_strerror(scav_r) << ", continuing..." << dendl;
-          if (r == 0) {
-            r = scav_r;
-          }
-          // Our goal is to read all we can, so don't stop on errors, but
-          // do record them for possible later output
-          js.errors.insert(std::make_pair(i->first,
-                JournalScanner::EventError(scav_r, cpp_strerror(r))));
-        }
-      }
+    if (!js.pointer_present) {
+      derr << "Cannot recover dentries: journal pointer is missing" << dendl;
+      return 0;
     }
+    // if header_valid is false, header_present is also false
+    if (!js.header_valid) {
+      derr << "Cannot recover dentries: journal header is missing or invalid" << dendl;
+      return 0;
+    }
+
+    // start the progress tracker with the diff b/w write and expire position
+    progress_tracker->start(js.header->write_pos - js.header->expire_pos);
+
+    auto flush_events = [&]() {
+      for (auto it = js.events.begin(); it != js.events.end(); ) {
+        const auto& le = it->second.log_event;
+        EMetaBlob const *mb = le->get_metablob();
+        if (mb) {
+          int scav_r = recover_dentries(*mb, dry_run, &consumed_inos);
+          if (scav_r) {
+            dout(1) << "Error processing event 0x" << std::hex << it->first << std::dec
+                    << ": " << cpp_strerror(scav_r) << ", continuing..." << dendl;
+            js.errors.insert(std::make_pair(it->first,
+                  JournalScanner::EventError(scav_r, cpp_strerror(scav_r))));
+          }
+        }
+        it = js.events.erase(it);
+        progress_tracker->increment();
+        progress_tracker->display_progress();
+      }
+      batch_bytes = 0;
+    };
+
+    if (batch_size) {
+      std::cout << "Batch size: " << batch_size << " bytes" << std::endl;
+
+      flush = [&](uint64_t offset, JournalScanner::EventRecord& er) {
+        batch_bytes += er.raw_size;
+        bool flushable = er.log_event
+            // factor in mds_debug_subtrees conf
+            && (er.log_event->get_type() == EVENT_SUBTREEMAP || er.log_event->get_type() == EVENT_SUBTREEMAP_TEST)
+            && batch_bytes >= batch_size;
+        js.events.insert_or_assign(offset, std::move(er));
+        if (flushable) {
+          flush_events();
+        }
+      };
+    }
+
+    r = js.scan_events(flush);
+
+    flush_events();
+
+    if (r) {
+      derr << "Failed to scan events (" << cpp_strerror(r) << ")" << dendl;
+      return r;
+    }
+
+    progress_tracker->display_final_summary();
+
 
     /**
      * Update InoTable to reflect any inode numbers consumed during scavenge
@@ -584,6 +685,9 @@ int JournalTool::journal_inspect()
 {
   int r;
 
+  progress_tracker->set_operation_name("Scanning journal");
+  progress_tracker->start(0); // Unknown total initially
+
   JournalFilter filter(type);
   JournalScanner js(input, rank, type, filter);
   r = js.scan();
@@ -592,6 +696,7 @@ int JournalTool::journal_inspect()
     return r;
   }
 
+  progress_tracker->display_final_summary();
   js.report(std::cout);
 
   return 0;
@@ -697,6 +802,10 @@ int JournalTool::recover_dentries(
   ceph_assert(consumed_inos != NULL);
 
   int r = 0;
+
+  // Initialize progress tracking for dentry recovery
+  progress_tracker->set_operation_name("Recovering dentries");
+  progress_tracker->start(metablob.lump_order.size());
 
   // Replay fullbits (dentry+inode)
   for (const auto& frag : metablob.lump_order) {
@@ -861,14 +970,25 @@ int JournalTool::recover_dentries(
       }
 
       if ((other_pool || write_dentry) && !dry_run) {
-        dout(4) << "writing I dentry " << key << " into frag "
+        dout(4) << "writing i dentry " << key << " into frag "
           << frag_oid.name << dendl;
+        dout(20) << " dnfirst = " << fb.dnfirst << dendl;
+        if (!fb.alternate_name.empty()) {
+          bufferlist bl, b64;
+          bl.append(fb.alternate_name);
+          bl.encode_base64(b64);
+          auto encoded = std::string_view(b64.c_str(), b64.length());
+          dout(20) << " alternate_name = b64:" << encoded << dendl;
+        }
 
-        // Compose: Dentry format is dnfirst, [I|L], InodeStore(bare=true)
+        // Compose: Dentry format is dnfirst, [i|l], InodeStore
         bufferlist dentry_bl;
         encode(fb.dnfirst, dentry_bl);
-        encode('I', dentry_bl);
-        encode_fullbit_as_inode(fb, true, &dentry_bl);
+        encode('i', dentry_bl);
+        ENCODE_START(2, 1, dentry_bl);
+        encode(fb.alternate_name, dentry_bl);
+        encode_fullbit_as_inode(fb, &dentry_bl);
+        ENCODE_FINISH(dentry_bl);
 
         // Record for writing to RADOS
         write_vals[key] = dentry_bl;
@@ -923,12 +1043,15 @@ int JournalTool::recover_dentries(
         dout(4) << "writing L dentry " << key << " into frag "
           << frag_oid.name << dendl;
 
-        // Compose: Dentry format is dnfirst, [I|L], InodeStore(bare=true)
+        // Compose: Dentry format is dnfirst, [I|L], ino, d_type, alternate_name
         bufferlist dentry_bl;
         encode(rb.dnfirst, dentry_bl);
-        encode('L', dentry_bl);
+        encode('l', dentry_bl);
+        ENCODE_START(2, 1, dentry_bl);
         encode(rb.ino, dentry_bl);
         encode(rb.d_type, dentry_bl);
+        encode(rb.alternate_name, dentry_bl);
+        ENCODE_FINISH(dentry_bl);
 
         // Record for writing to RADOS
         write_vals[key] = dentry_bl;
@@ -997,7 +1120,13 @@ int JournalTool::recover_dentries(
 	return r;
       }
     }
+
+    progress_tracker->increment();
+    progress_tracker->display_progress();
   }
+
+    progress_tracker->display_final_summary();
+
 
   /* Now that we've looked at the dirlumps, we finally pay attention to
    * the roots (i.e. inodes without ancestry).  This is necessary in order
@@ -1007,7 +1136,7 @@ int JournalTool::recover_dentries(
    */
   for (const auto& fb : metablob.roots) {
     inodeno_t ino = fb.inode->ino;
-    dout(4) << "updating root 0x" << std::hex << ino << std::dec << dendl;
+    dout(4) << "updating root " << ino << dendl;
 
     object_t root_oid = InodeStore::get_object_name(ino, frag_t(), ".inode");
     dout(4) << "object id " << root_oid.name << dendl;
@@ -1047,10 +1176,10 @@ int JournalTool::recover_dentries(
       dout(4) << "writing root ino " << root_oid.name
                << " version " << fb.inode->version << dendl;
 
-      // Compose: root ino format is magic,InodeStore(bare=false)
+      // Compose: root ino format is magic,InodeStore
       bufferlist new_root_ino_bl;
       encode(std::string(CEPH_FS_ONDISK_MAGIC), new_root_ino_bl);
-      encode_fullbit_as_inode(fb, false, &new_root_ino_bl);
+      encode_fullbit_as_inode(fb, &new_root_ino_bl);
 
       // Write to RADOS
       r = output.write_full(root_oid.name, new_root_ino_bl);
@@ -1160,7 +1289,6 @@ int JournalTool::erase_region(JournalScanner const &js, uint64_t const pos, uint
  */
 void JournalTool::encode_fullbit_as_inode(
   const EMetaBlob::fullbit &fb,
-  const bool bare,
   bufferlist *out_bl)
 {
   ceph_assert(out_bl != NULL);
@@ -1175,11 +1303,7 @@ void JournalTool::encode_fullbit_as_inode(
   new_inode.old_inodes = fb.old_inodes;
 
   // Serialize InodeStore
-  if (bare) {
-    new_inode.encode_bare(*out_bl, CEPH_FEATURES_SUPPORTED_DEFAULT);
-  } else {
-    new_inode.encode(*out_bl, CEPH_FEATURES_SUPPORTED_DEFAULT);
-  }
+  new_inode.encode(*out_bl, CEPH_FEATURES_SUPPORTED_DEFAULT);
 }
 
 /**
@@ -1201,9 +1325,9 @@ int JournalTool::consume_inos(const std::set<inodeno_t> &inos)
   int r = 0;
 
   // InoTable is a per-MDS structure, so iterate over assigned ranks
-  auto fs = fsmap->get_filesystem(role_selector.get_ns());
+  auto& fs = fsmap->get_filesystem(role_selector.get_ns());
   std::set<mds_rank_t> in_ranks;
-  fs->mds_map.get_mds_set(in_ranks);
+  fs.get_mds_map().get_mds_set(in_ranks);
 
   for (std::set<mds_rank_t>::iterator rank_i = in_ranks.begin();
       rank_i != in_ranks.end(); ++rank_i)
@@ -1238,7 +1362,7 @@ int JournalTool::consume_inos(const std::set<inodeno_t> &inos)
     {
       const inodeno_t ino = *i;
       if (ino_table.force_consume(ino)) {
-        dout(4) << "Used ino 0x" << std::hex << ino << std::dec
+        dout(4) << "Used ino " << ino
           << " requires inotable update" << dendl;
         inotable_modified = true;
       }
@@ -1264,3 +1388,167 @@ int JournalTool::consume_inos(const std::set<inodeno_t> &inos)
   return r;
 }
 
+/**
+ * Returns a string view representation of journal events
+ * @param event_type the type of journal event
+ * @returns a string view of event_type
+ */
+std::string_view JournalTool::get_event_name_str(uint32_t event_type)
+{
+  switch (event_type) {
+    case EVENT_SUBTREEMAP:      return "EVENT_SUBTREEMAP";
+    case EVENT_SUBTREEMAP_TEST: return "EVENT_SUBTREEMAP_TEST";
+    case EVENT_LID:             return "EVENT_LID";
+    case EVENT_RESETJOURNAL:    return "EVENT_RESETJOURNAL";
+    default:                    return "EVENT_UNKNOWN";
+  }
+}
+
+/**
+ * Analyzes journal corruptions and repositions header markers (write_pos, expire_pos)
+ * safely to resolve broken log segments.
+ * @params dry_run only displays the Proposed Journal Header Updates.
+ * @returns 0 if success, error code otherwise.
+ */
+int JournalTool::recover_header(bool dry_run)
+{
+  std::cerr << "WARNING: 'header recover' performs a best-effort recovery assuming the "
+            << "existing journal starting pointer (expire_pos) is sane. It is highly "
+            << "recommended to manually inspect this position relative to the object "
+            << "layout before relying on this tool." << std::endl;
+
+  dout(4) << "Starting journal header recover analysis (dry_run="
+          << std::boolalpha << dry_run << ")" << dendl;
+
+  JournalFilter filter("mdlog");
+  JournalScanner js(input, rank, type, filter);
+
+  // First do a header scan (full=false), so that we could do error reporting
+  int r = js.scan(false);
+  if (r < 0) {
+    derr << "Failed to parse initial journal status: " << cpp_strerror(r) << dendl;
+    return -EIO;
+  }
+
+  if (!js.header_present) {
+    derr << "Journal header object is missing entirely, cannot execute recovery" << dendl;
+    return -EIO;
+  }
+
+  if (!js.header_valid) {
+    // Check if the invalidity is due to a completely unrecognized/corrupt header
+    if (js.header->magic != CEPH_FS_ONDISK_MAGIC) {
+      derr << "Critical failure: Invalid journal magic number ('"
+           << js.header->magic << "'). This does not appear to be a valid CephFS journal."
+           << dendl;
+      return -EINVAL;
+    }
+    // If magic is correct, the invalidity is just offset inconsistency
+    dout(1) << "Journal header is present but marked invalid due to offset inconsistencies. "
+            << "Attempting analytical recovery from stream base..." << dendl;
+  }
+
+  uint64_t first_pos = std::numeric_limits<uint64_t>::max();
+  uint64_t last_pos = 0;
+  uint64_t last_raw_size = 0;
+  uint64_t expected_next_pos = 0;
+  bool is_first = true;
+  BoundaryMatch boundary_match;
+
+  // Events scan: execute events dynamically via the new callback interface.
+  r = js.scan_events([&](uint64_t pos, JournalScanner::EventRecord& er) {
+    if (is_first) {
+      first_pos = pos;
+    } else if (expected_next_pos != pos) {
+      // Alert the user
+      std::cerr << "warning: Discontinuity detected in journal offsets. Expected: 0x"
+                << std::hex << expected_next_pos << ", Found: 0x" << pos << std::dec
+                << ". Attempting to skip gap and continue recovery..." << std::endl;
+      // Log it
+      dout(1) << "warning: Discontinuity detected in journal offsets. Expected: 0x"
+              << std::hex << expected_next_pos << ", Found: 0x" << pos << std::dec << dendl;
+    }
+    is_first = false;
+    expected_next_pos = pos + er.raw_size;
+
+    // Tracks the absolute last element seen in log timeline stream
+    last_pos = pos;
+    last_raw_size = er.raw_size;
+
+    // Check for the earliest major alignment boundary block
+    if (boundary_match.pos == std::numeric_limits<uint64_t>::max()) {
+      if (er.log_event) {
+        const uint32_t type = er.log_event->get_type();
+        if (type == EVENT_SUBTREEMAP ||
+            type == EVENT_SUBTREEMAP_TEST ||
+            type == EVENT_LID        ||
+            type == EVENT_RESETJOURNAL) {
+          boundary_match.event_type = type;
+          boundary_match.pos = pos;
+        }
+      }
+    }
+  });
+
+  if (r < 0) {
+    derr << "Failed streaming scan over journal objects: " << cpp_strerror(r) << dendl;
+    return r;
+  }
+
+  if (is_first) {
+    derr << "No events discovered in scanned journal stream. Nothing to recover." << dendl;
+    return -ENOENT;
+  }
+
+  if (boundary_match.pos == std::numeric_limits<uint64_t>::max()) {
+    derr << "Critical failure: No valid major segment boundary event found in logs." << dendl;
+    return -EIO;
+  }
+
+  // Save the current values for the logs
+  const auto old_trimmed_pos = js.header->trimmed_pos;
+  const auto old_expire_pos  = js.header->expire_pos;
+  const auto old_write_pos   = js.header->write_pos;
+  const auto old_read_pos    = js.header->unused_field;
+
+  // Calculate new parameters
+  uint64_t obj_size = js.header->layout.object_size;
+  if (obj_size == 0) {
+    obj_size = 4194304; // 4MB fallback
+  }
+  if (js.header_present && old_trimmed_pos <= first_pos) {
+    js.header->trimmed_pos = old_trimmed_pos; // Safest: keep the known good boundary
+  } else {
+    js.header->trimmed_pos = first_pos - (first_pos % obj_size); // Fallback: force alignment
+  }
+  js.header->expire_pos   = boundary_match.pos;
+  js.header->write_pos    = last_pos + last_raw_size;
+  js.header->unused_field = boundary_match.pos;
+
+  // Output
+  std::cout << "Proposed Journal Header Updates:" << std::endl << std::hex
+            << "  trimmed_pos: 0x" << old_trimmed_pos << " -> 0x" << js.header->trimmed_pos << std::endl
+            << "  expire_pos:  0x" << old_expire_pos  << " -> 0x" << js.header->expire_pos  << std::endl
+            << "  read_pos:    0x" << old_read_pos    << " -> 0x" << js.header->unused_field << std::endl
+            << "  write_pos:   0x" << old_write_pos   << " -> 0x" << js.header->write_pos   << std::endl << std::dec
+            << "  Target event type at proposed read_pos: " << get_event_name_str(boundary_match.event_type) << std::endl;
+
+  if (dry_run) {
+    std::cout << "Dry-run mode enabled. Header modifications skipped." << std::endl;
+    return 0;
+  }
+
+  // Save changes to RADOS
+  dout(4) << "Serializing modified header to pool layer..." << dendl;
+  bufferlist header_bl;
+  encode(*(js.header), header_bl);
+  r = output.write_full(js.obj_name(0), header_bl);
+  if (r < 0) {
+    derr << "Failed writing updated journal header object: " << cpp_strerror(r) << dendl;
+    return r;
+  }
+
+  dout(4) << "RADOS header mutation finalized successfully." << dendl;
+  std::cout << "Successfully recovered journal header." << std::endl;
+  return 0;
+}

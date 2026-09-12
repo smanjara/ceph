@@ -1,9 +1,10 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "include/compat.h"
 #include "common/Formatter.h"
 #include "common/admin_socket.h"
+#include "common/Cond.h"
 #include "common/debug.h"
 #include "common/errno.h"
 #include "include/stringify.h"
@@ -29,6 +30,9 @@
 #include "tools/rbd_mirror/image_replayer/journal/Replayer.h"
 #include "tools/rbd_mirror/image_replayer/journal/StateBuilder.h"
 #include <map>
+#include <shared_mutex> // for std::shared_lock
+
+#include <boost/optional/optional_io.hpp>
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rbd_mirror
@@ -348,10 +352,6 @@ void ImageReplayer<I>::bootstrap() {
   ceph_assert(!m_peers.empty());
   m_remote_image_peer = *m_peers.begin();
 
-  if (on_start_interrupted(m_lock)) {
-    return;
-  }
-
   ceph_assert(m_state_builder == nullptr);
   auto ctx = create_context_callback<
       ImageReplayer, &ImageReplayer<I>::handle_bootstrap>(this);
@@ -364,6 +364,13 @@ void ImageReplayer<I>::bootstrap() {
 
   request->get();
   m_bootstrap_request = request;
+
+  // proceed even if stop was requested to allow for m_delete_requested
+  // to get set; cancel() would prevent BootstrapRequest from going into
+  // image sync
+  if (m_stop_requested) {
+    request->cancel();
+  }
   locker.unlock();
 
   update_mirror_image_status(false, boost::none);
@@ -377,6 +384,14 @@ void ImageReplayer<I>::handle_bootstrap(int r) {
     std::lock_guard locker{m_lock};
     m_bootstrap_request->put();
     m_bootstrap_request = nullptr;
+  }
+
+  // set m_delete_requested early to ensure that in case remote
+  // image no longer exists local image gets deleted even if start
+  // is interrupted
+  if (r == -ENOLINK) {
+    dout(5) << "remote image no longer exists" << dendl;
+    m_delete_requested = true;
   }
 
   if (on_start_interrupted()) {
@@ -393,7 +408,6 @@ void ImageReplayer<I>::handle_bootstrap(int r) {
     on_start_fail(r, "split-brain detected");
     return;
   } else if (r == -ENOLINK) {
-    m_delete_requested = true;
     on_start_fail(0, "remote image no longer exists");
     return;
   } else if (r == -ERESTART) {
@@ -418,6 +432,7 @@ void ImageReplayer<I>::start_replay() {
   ceph_assert(m_replayer == nullptr);
   m_replayer = m_state_builder->create_replayer(m_threads, m_instance_watcher,
                                                 m_local_mirror_uuid,
+                                                m_remote_image_peer.uuid,
                                                 m_pool_meta_cache,
                                                 m_replayer_listener);
 
@@ -581,12 +596,12 @@ void ImageReplayer<I>::stop(Context *on_finish, bool manual, bool restart)
   }
 
   if (shut_down_replay) {
-    on_stop_journal_replay();
+    on_stop_replay();
   }
 }
 
 template <typename I>
-void ImageReplayer<I>::on_stop_journal_replay(int r, const std::string &desc)
+void ImageReplayer<I>::on_stop_replay(int r, const std::string &desc)
 {
   dout(10) << dendl;
 
@@ -657,7 +672,7 @@ bool ImageReplayer<I>::on_replay_interrupted()
   }
 
   if (shut_down) {
-    on_stop_journal_replay();
+    on_stop_replay();
   }
   return shut_down;
 }
@@ -706,10 +721,12 @@ void ImageReplayer<I>::handle_update_mirror_image_replay_status(int r) {
   auto ctx = new LambdaContext([this](int) {
       update_mirror_image_status(false, boost::none);
 
-      std::unique_lock locker{m_lock};
-      std::unique_lock timer_locker{m_threads->timer_lock};
+      {
+	std::unique_lock locker{m_lock};
+	std::unique_lock timer_locker{m_threads->timer_lock};
 
-      schedule_update_mirror_image_replay_status();
+	schedule_update_mirror_image_replay_status();
+      }
       m_in_flight_op_tracker.finish_op();
     });
 
@@ -1040,7 +1057,7 @@ void ImageReplayer<I>::handle_replayer_notification() {
   if (m_replayer->is_resync_requested()) {
     dout(10) << "resync requested" << dendl;
     m_resync_requested = true;
-    on_stop_journal_replay(0, "resync requested");
+    on_stop_replay(0, "resync requested");
     return;
   }
 
@@ -1050,7 +1067,7 @@ void ImageReplayer<I>::handle_replayer_notification() {
     dout(10) << "replay interrupted: "
              << "r=" << error_code << ", "
              << "error=" << error_description << dendl;
-    on_stop_journal_replay(error_code, error_description);
+    on_stop_replay(error_code, error_description);
     return;
   }
 

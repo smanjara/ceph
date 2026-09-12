@@ -6,14 +6,26 @@ from typing import Optional, Tuple, Iterator, List, Any
 from contextlib import contextmanager
 from unittest import mock
 from unittest.mock import MagicMock
+import mgr_util
 from mgr_module import MgrModule, NFS_POOL_NAME
 
 from rados import ObjectNotFound
 
-from ceph.deployment.service_spec import NFSServiceSpec
+from ceph.deployment.service_spec import NFSServiceSpec, PlacementSpec
+from ceph.utils import with_units_to_int, bytes_to_human
 from nfs import Module
 from nfs.export import ExportMgr, normalize_path
-from nfs.ganesha_conf import GaneshaConfParser, Export, RawBlock
+from nfs.utils import cephfs_client_for_mgr
+from nfs.ganesha_conf import GaneshaConfParser, Export
+from nfs.qos_conf import (
+    RawBlock,
+    QOS,
+    QOSType,
+    QOSParams,
+    QOS_REQ_BW_PARAMS,
+    QOSBandwidthControl,
+    QOSOpsControl,
+    QOS_REQ_OPS_PARAMS)
 from nfs.cluster import NFSCluster
 from orchestrator import ServiceDescription, DaemonDescription, OrchResult
 
@@ -76,9 +88,8 @@ EXPORT
 EXPORT {
     FSAL {
         name = "CEPH";
-        user_id = "nfs.foo.1";
         filesystem = "a";
-        secret_access_key = "AQCjU+hgjyReLBAAddJa0Dza/ZHqjX5+JiePMA==";
+        cmount_path = "/";
     }
     export_id = 1;
     path = "/";
@@ -95,9 +106,8 @@ EXPORT {
 EXPORT {
     FSAL {
         name = "CEPH";
-        user_id = "nfs.foo.1";
         filesystem = "a";
-        secret_access_key = "AQCjU+hgjyReLBAAddJa0Dza/ZHqjX5+JiePMA==";
+        cmount_path = "/";
     }
     export_id = 1;
     path = "/secure/me";
@@ -111,11 +121,105 @@ EXPORT {
     transports = "TCP";
 }
 """
+    export_5 = """
+EXPORT {
+    Export_ID=3;
+    Protocols = 4;
+    Path = /;
+    Pseudo = /cephfs_b/;
+    Access_Type = RW;
+    Protocols = 3, 4;
+    Attr_Expiration_Time = 0;
+
+    FSAL {
+        Name = CEPH;
+        Filesystem = "b";
+        User_Id = "nfs.foo.b.lgudhr";
+        Secret_Access_Key = "YOUR SECRET KEY HERE";
+        cmount_path = "/";
+    }
+}
+"""
 
     conf_nfs_foo = f'''
 %url "rados://{NFS_POOL_NAME}/{cluster_id}/export-1"
 
 %url "rados://{NFS_POOL_NAME}/{cluster_id}/export-2"'''
+
+    qos_cluster_block = """
+QOS {
+    enable_qos = true;
+    enable_bw_control = true;
+    combined_rw_bw_control = false;
+    qos_type = "Per_Export_Per_Client";
+    max_export_write_bw = 2000000;
+    max_export_read_bw = 2000000;
+    max_client_write_bw = 3000000;
+    max_client_read_bw = 4000000;
+    max_export_combined_bw = 0;
+    max_client_combined_bw = 0;
+}
+"""
+
+    qos_export_block = """
+QOS_BLOCK {
+    enable_qos = true;
+    enable_bw_control = true;
+    combined_rw_bw_control = false;
+    max_export_write_bw = 2000000;
+    max_export_read_bw = 2000000;
+    max_client_write_bw = 3000000;
+    max_client_read_bw = 4000000;
+    max_export_combined_bw = 0;
+    max_client_combined_bw = 0;
+
+}
+"""
+
+    qos_cluster_dict = {
+        "enable_bw_control": True,
+        "enable_qos": True,
+        "combined_rw_bw_control": False,
+        "max_client_read_bw": bytes_to_human(4000000, mode='binary'),
+        "max_client_write_bw": bytes_to_human(3000000, mode='binary'),
+        "max_export_read_bw": bytes_to_human(2000000, mode='binary'),
+        "max_export_write_bw": bytes_to_human(2000000, mode='binary'),
+        "qos_type": "PerShare_PerClient",
+        "enable_iops_control": False
+    }
+
+    qos_cluster_dict_bw_in_bytes = {
+        "enable_bw_control": True,
+        "enable_qos": True,
+        "combined_rw_bw_control": False,
+        "max_client_read_bw": "4000000",
+        "max_client_write_bw": "3000000",
+        "max_export_read_bw": "2000000",
+        "max_export_write_bw": "2000000",
+        "qos_type": "PerShare_PerClient",
+        "enable_iops_control": False
+    }
+
+    qos_export_dict = {
+        "enable_bw_control": True,
+        "enable_qos": True,
+        "combined_rw_bw_control": False,
+        "max_client_read_bw": bytes_to_human(4000000, mode='binary'),
+        "max_client_write_bw": bytes_to_human(3000000, mode='binary'),
+        "max_export_read_bw": bytes_to_human(2000000, mode='binary'),
+        "max_export_write_bw": bytes_to_human(2000000, mode='binary'),
+        "enable_iops_control": False
+    }
+    qos_export_dict_bw_in_bytes = {
+        "enable_bw_control": True,
+        "enable_qos": True,
+        "combined_rw_bw_control": False,
+        "max_client_read_bw": "4000000",
+        "max_client_write_bw": "3000000",
+        "max_export_read_bw": "2000000",
+        "max_export_write_bw": "2000000",
+        "enable_iops_control": False
+    }
 
     class RObject(object):
         def __init__(self, key: str, raw: str) -> None:
@@ -159,6 +263,7 @@ EXPORT {
             'foo': {
                 'export-1': TestNFS.RObject("export-1", self.export_1),
                 'export-2': TestNFS.RObject("export-2", self.export_2),
+                'export-3': TestNFS.RObject("export-3", self.export_5),
                 'conf-nfs.foo': TestNFS.RObject("conf-nfs.foo", self.conf_nfs_foo)
             }
         }
@@ -251,7 +356,8 @@ EXPORT {
                 mock.patch('nfs.export.check_fs', return_value=True), \
                 mock.patch('nfs.ganesha_conf.check_fs', return_value=True), \
                 mock.patch('nfs.export.ExportMgr._create_user_key',
-                           return_value='thekeyforclientabc'):
+                           return_value='thekeyforclientabc'), \
+                mock.patch('nfs.export.cephfs_path_is_dir'):
 
             rados.open_ioctx.return_value.__enter__.return_value = self.io_mock
             rados.open_ioctx.return_value.__exit__ = mock.Mock(return_value=None)
@@ -381,6 +487,29 @@ NFS_CORE_PARAM {
         export = Export.from_export_block(blocks[0], self.cluster_id)
         self._validate_export_2(export)
 
+    def _validate_export_3(self, export: Export):
+        assert export.export_id == 3
+        assert export.path == "/"
+        assert export.pseudo == "/cephfs_b/"
+        assert export.access_type == "RW"
+        assert export.squash == "no_root_squash"
+        assert export.protocols == [3, 4]
+        assert export.fsal.name == "CEPH"
+        assert export.fsal.user_id == "nfs.foo.b.lgudhr"
+        assert export.fsal.fs_name == "b"
+        assert export.fsal.sec_label_xattr == None
+        assert export.fsal.cmount_path == "/"
+        assert export.cluster_id == 'foo'
+        assert export.attr_expiration_time == 0
+        assert export.security_label == True
+
+    def test_export_parser_3(self) -> None:
+        blocks = GaneshaConfParser(self.export_5).parse()
+        assert isinstance(blocks, list)
+        assert len(blocks) == 1
+        export = Export.from_export_block(blocks[0], self.cluster_id)
+        self._validate_export_3(export)
+
     def test_daemon_conf_parser(self) -> None:
         blocks = GaneshaConfParser(self.conf_nfs_foo).parse()
         assert isinstance(blocks, list)
@@ -403,10 +532,11 @@ NFS_CORE_PARAM {
         ganesha_conf = ExportMgr(nfs_mod)
         exports = ganesha_conf.exports[self.cluster_id]
 
-        assert len(exports) == 2
+        assert len(exports) == 3
 
         self._validate_export_1([e for e in exports if e.export_id == 1][0])
         self._validate_export_2([e for e in exports if e.export_id == 2][0])
+        self._validate_export_3([e for e in exports if e.export_id == 3][0])
 
     def test_config_dict(self) -> None:
         self._do_mock_test(self._do_test_config_dict)
@@ -669,7 +799,11 @@ NFS_CORE_PARAM {
         assert export.clients[0].access_type is None
         assert export.cluster_id == self.cluster_id
 
-        # again, but without export_id
+        # again, but without export_id and qos_block
+        cluster = NFSCluster(nfs_mod)
+        bw_obj = QOSBandwidthControl(True, export_writebw='100MB', export_readbw='200MB')
+        cluster.enable_cluster_qos_bw(self.cluster_id, QOSType['PerShare'], bw_obj)
+
         r = conf.apply_export(self.cluster_id, json.dumps({
             'path': 'newestbucket',
             'pseudo': '/rgw/bucket',
@@ -689,6 +823,13 @@ NFS_CORE_PARAM {
                 'user_id': 'nfs.foo.newestbucket',
                 'access_key_id': 'the_access_key',
                 'secret_access_key': 'the_secret_key',
+            },
+            'qos_block': {
+               'combined_rw_bw_control': False,
+               'enable_bw_control': True,
+               'enable_qos': True,
+               'max_export_read_bw': '3000000',
+               'max_export_write_bw': '2000000'
             }
         }))
         assert len(r.changes) == 1
@@ -708,6 +849,11 @@ NFS_CORE_PARAM {
         assert export.clients[0].squash is None
         assert export.clients[0].access_type is None
         assert export.cluster_id == self.cluster_id
+        assert export.qos_block.enable_qos == True
+        assert export.qos_block.bw_obj.enable_bw_ctrl == True
+        assert export.qos_block.bw_obj.combined_bw_ctrl == False
+        assert export.qos_block.bw_obj.export_writebw == 2000000
+        assert export.qos_block.bw_obj.export_readbw == 3000000
 
     def test_update_export_sectype(self):
         self._do_mock_test(self._test_update_export_sectype)
@@ -744,6 +890,7 @@ NFS_CORE_PARAM {
         assert info["export_id"] == 2
         assert info["path"] == "bucket"
         assert "sectype" not in info
+        assert 'XprtSec' not in info
 
         r = conf.apply_export(self.cluster_id, json.dumps({
             'export_id': 2,
@@ -761,6 +908,7 @@ NFS_CORE_PARAM {
                 'squash': None
             }],
             'sectype': ["krb5p", "krb5i", "sys"],
+            'XprtSec': 'tls',
             'fsal': {
                 'name': 'RGW',
                 'user_id': 'nfs.foo.bucket',
@@ -775,6 +923,7 @@ NFS_CORE_PARAM {
         assert info["export_id"] == 2
         assert info["path"] == "bucket"
         assert info["sectype"] == ["krb5p", "krb5i", "sys"]
+        assert info['XprtSec'] == 'tls'
 
     def test_update_export_with_ganesha_conf(self):
         self._do_mock_test(self._do_test_update_export_with_ganesha_conf)
@@ -810,6 +959,9 @@ NFS_CORE_PARAM {
 
     def test_update_export_with_list(self):
         self._do_mock_test(self._do_test_update_export_with_list)
+    
+    def test_update_export_cephfs(self):
+        self._do_mock_test(self._do_test_update_export_cephfs)
 
     def _do_test_update_export_with_list(self):
         nfs_mod = Module('nfs', '', '')
@@ -864,7 +1016,7 @@ NFS_CORE_PARAM {
         assert len(r.changes) == 2
 
         export = conf._fetch_export('foo', '/rgw/bucket')
-        assert export.export_id == 3
+        assert export.export_id == 4
         assert export.path == "bucket"
         assert export.pseudo == "/rgw/bucket"
         assert export.access_type == "RW"
@@ -880,7 +1032,7 @@ NFS_CORE_PARAM {
         assert export.cluster_id == self.cluster_id
 
         export = conf._fetch_export('foo', '/rgw/bucket2')
-        assert export.export_id == 4
+        assert export.export_id == 5
         assert export.path == "bucket2"
         assert export.pseudo == "/rgw/bucket2"
         assert export.access_type == "RO"
@@ -895,17 +1047,50 @@ NFS_CORE_PARAM {
         assert export.clients[0].access_type is None
         assert export.cluster_id == self.cluster_id
 
+    def _do_test_update_export_cephfs(self):
+        nfs_mod = Module('nfs', '', '')
+        conf = ExportMgr(nfs_mod)
+        r = conf.apply_export(self.cluster_id, json.dumps({
+            'export_id': 3,
+            'path': '/',
+            'cluster_id': self.cluster_id,
+            'pseudo': '/cephfs_c',
+            'access_type': 'RW',
+            'squash': 'root_squash',
+            'security_label': True,
+            'protocols': [4],
+            'transports': ['TCP', 'UDP'],
+            'fsal': {
+                'name': 'CEPH',
+                'fs_name': 'c',
+            }
+        }))
+        assert len(r.changes) == 1
+
+        export = conf._fetch_export('foo', '/cephfs_c')
+        assert export.export_id == 3
+        assert export.path == "/"
+        assert export.pseudo == "/cephfs_c"
+        assert export.access_type == "RW"
+        assert export.squash == "root_squash"
+        assert export.protocols == [4]
+        assert export.transports == ["TCP", "UDP"]
+        assert export.fsal.name == "CEPH"
+        assert export.fsal.cmount_path == "/"
+        assert export.fsal.user_id == "nfs.foo.c.02de2980"
+        assert export.cluster_id == self.cluster_id
+    
     def test_remove_export(self) -> None:
         self._do_mock_test(self._do_test_remove_export)
 
     def _do_test_remove_export(self) -> None:
         nfs_mod = Module('nfs', '', '')
         conf = ExportMgr(nfs_mod)
-        assert len(conf.exports[self.cluster_id]) == 2
+        assert len(conf.exports[self.cluster_id]) == 3
         conf.delete_export(cluster_id=self.cluster_id,
                            pseudo_path="/rgw")
         exports = conf.exports[self.cluster_id]
-        assert len(exports) == 1
+        assert len(exports) == 2
         assert exports[0].export_id == 1
 
     def test_create_export_rgw_bucket(self):
@@ -916,7 +1101,7 @@ NFS_CORE_PARAM {
         conf = ExportMgr(nfs_mod)
 
         ls = conf.list_exports(cluster_id=self.cluster_id)
-        assert len(ls) == 2
+        assert len(ls) == 3
 
         r = conf.create_export(
             fsal_type='rgw',
@@ -925,12 +1110,13 @@ NFS_CORE_PARAM {
             pseudo_path='/mybucket',
             read_only=False,
             squash='root',
-            addr=["192.168.0.0/16"]
+            addr=["192.168.0.0/16"],
+            xprtsec='tls'
         )
         assert r["bind"] == "/mybucket"
 
         ls = conf.list_exports(cluster_id=self.cluster_id)
-        assert len(ls) == 3
+        assert len(ls) == 4
 
         export = conf._fetch_export('foo', '/mybucket')
         assert export.export_id
@@ -949,6 +1135,7 @@ NFS_CORE_PARAM {
         assert export.clients[0].access_type == 'rw'
         assert export.clients[0].addresses == ["192.168.0.0/16"]
         assert export.cluster_id == self.cluster_id
+        assert export.xprtsec == 'tls'
 
     def test_create_export_rgw_bucket_user(self):
         self._do_mock_test(self._do_test_create_export_rgw_bucket_user)
@@ -958,7 +1145,7 @@ NFS_CORE_PARAM {
         conf = ExportMgr(nfs_mod)
 
         ls = conf.list_exports(cluster_id=self.cluster_id)
-        assert len(ls) == 2
+        assert len(ls) == 3
 
         r = conf.create_export(
             fsal_type='rgw',
@@ -973,7 +1160,7 @@ NFS_CORE_PARAM {
         assert r["bind"] == "/mybucket"
 
         ls = conf.list_exports(cluster_id=self.cluster_id)
-        assert len(ls) == 3
+        assert len(ls) == 4
 
         export = conf._fetch_export('foo', '/mybucket')
         assert export.export_id
@@ -1001,7 +1188,7 @@ NFS_CORE_PARAM {
         conf = ExportMgr(nfs_mod)
 
         ls = conf.list_exports(cluster_id=self.cluster_id)
-        assert len(ls) == 2
+        assert len(ls) == 3
 
         r = conf.create_export(
             fsal_type='rgw',
@@ -1015,7 +1202,7 @@ NFS_CORE_PARAM {
         assert r["bind"] == "/mybucket"
 
         ls = conf.list_exports(cluster_id=self.cluster_id)
-        assert len(ls) == 3
+        assert len(ls) == 4
 
         export = conf._fetch_export('foo', '/mybucket')
         assert export.export_id
@@ -1037,13 +1224,19 @@ NFS_CORE_PARAM {
 
     def test_create_export_cephfs(self):
         self._do_mock_test(self._do_test_create_export_cephfs)
+    
+    def test_create_export_cephfs_with_cmount_path(self):
+        self._do_mock_test(self._do_test_create_export_cephfs_with_cmount_path)
+    
+    def test_create_export_cephfs_with_invalid_cmount_path(self):
+        self._do_mock_test(self._do_test_create_export_cephfs_with_invalid_cmount_path)
 
     def _do_test_create_export_cephfs(self):
         nfs_mod = Module('nfs', '', '')
         conf = ExportMgr(nfs_mod)
 
         ls = conf.list_exports(cluster_id=self.cluster_id)
-        assert len(ls) == 2
+        assert len(ls) == 3
 
         r = conf.create_export(
             fsal_type='cephfs',
@@ -1058,7 +1251,7 @@ NFS_CORE_PARAM {
         assert r["bind"] == "/cephfs2"
 
         ls = conf.list_exports(cluster_id=self.cluster_id)
-        assert len(ls) == 3
+        assert len(ls) == 4
 
         export = conf._fetch_export('foo', '/cephfs2')
         assert export.export_id
@@ -1069,13 +1262,160 @@ NFS_CORE_PARAM {
         assert export.protocols == [4]
         assert export.transports == ["TCP"]
         assert export.fsal.name == "CEPH"
-        assert export.fsal.user_id == "nfs.foo.3"
+        assert export.fsal.user_id == "nfs.foo.myfs.86ca58ef"
         assert export.fsal.cephx_key == "thekeyforclientabc"
         assert len(export.clients) == 1
         assert export.clients[0].squash == 'root'
         assert export.clients[0].access_type == 'rw'
         assert export.clients[0].addresses == ["192.168.1.0/8"]
         assert export.cluster_id == self.cluster_id
+
+    def test_create_export_default_transports_rdma_cluster(self):
+        """When cluster has enable_rdma=True, new exports get default Transports = tcp, RDMA."""
+        self._do_mock_test(self._do_test_create_export_default_transports_rdma_cluster)
+
+    def _do_test_create_export_default_transports_rdma_cluster(self):
+        nfs_mod = Module('nfs', '', '')
+        conf = ExportMgr(nfs_mod)
+        rdma_spec = NFSServiceSpec(service_id=self.cluster_id, enable_rdma=True)
+        with mock.patch('nfs.export.get_nfs_spec_for_cluster', return_value=rdma_spec):
+            r = conf.create_export(
+                fsal_type='rgw',
+                cluster_id=self.cluster_id,
+                bucket='rdmabucket',
+                pseudo_path='/rdmabucket',
+                read_only=False,
+                squash='root',
+                addr=["192.168.0.0/16"],
+            )
+        assert r["bind"] == "/rdmabucket"
+        export = conf._fetch_export(self.cluster_id, '/rdmabucket')
+        assert export is not None
+        assert sorted(export.transports) == ["RDMA", "TCP"]
+
+    def test_export_transport_rdma_valid(self):
+        """Export with Transports = TCP, RDMA is valid."""
+        export_block = """
+EXPORT {
+    export_id = 1;
+    path = "/";
+    pseudo = "/rdma_export";
+    access_type = "RW";
+    squash = "none";
+    protocols = 4;
+    transports = "TCP", "RDMA";
+    FSAL {
+        name = "CEPH";
+        filesystem = "a";
+        cmount_path = "/";
+    }
+}
+"""
+        blocks = GaneshaConfParser(export_block).parse()
+        export = Export.from_export_block(blocks[0], self.cluster_id)
+        assert set(export.transports) == {"TCP", "RDMA"}
+        # Validate should pass (RDMA is in valid_transport)
+        nfs_mod = Module('nfs', '', '')
+        conf = ExportMgr(nfs_mod)
+        with mock.patch('nfs.export.check_fs', return_value=True), \
+                mock.patch('nfs.ganesha_conf.check_fs', return_value=True):
+            export.validate(conf.mgr)
+
+    def test_update_export_without_transport_rdma_cluster(self):
+        """Apply export update without Transport fields; result has Transports = TCP, RDMA."""
+        self._do_mock_test(self._do_test_update_export_without_transport_rdma_cluster)
+
+    def _do_test_update_export_without_transport_rdma_cluster(self):
+        nfs_mod = Module('nfs', '', '')
+        conf = ExportMgr(nfs_mod)
+        # Existing export at /rgw has Transports = TCP, UDP (from export_2)
+        export_before = conf._fetch_export(self.cluster_id, '/rgw')
+        assert export_before is not None
+        assert set(export_before.transports) == {"TCP", "UDP"}
+
+        # apply_export with no 'transports' field; cluster has enable_rdma -> default TCP, RDMA
+        rdma_spec = NFSServiceSpec(service_id=self.cluster_id, enable_rdma=True)
+        with mock.patch('nfs.export.get_nfs_spec_for_cluster', return_value=rdma_spec):
+            r = conf.apply_export(self.cluster_id, json.dumps({
+                'export_id': 2,
+                'path': '/',
+                'pseudo': '/rgw',
+                'cluster_id': self.cluster_id,
+                'access_type': 'RO',
+                'squash': 'root',
+                'security_label': False,
+                'protocols': [4, 3],
+                'clients': [],
+                'fsal': {
+                    'name': 'RGW',
+                    'user_id': 'nfs.foo.bucket',
+                    'access_key_id': 'the_access_key',
+                    'secret_access_key': 'the_secret_key',
+                },
+            }))
+        assert len(r.changes) == 1
+
+        export_after = conf._fetch_export(self.cluster_id, '/rgw')
+        assert export_after is not None
+        assert export_after.export_id == 2
+        assert export_after.access_type == 'RO'
+        assert export_after.squash == 'root'
+        # Updated export has Transports = TCP, RDMA (default when transports omitted and RDMA enabled)
+        assert set(export_after.transports) == {'TCP', 'RDMA'}
+    
+    def _do_test_create_export_cephfs_with_cmount_path(self):
+        nfs_mod = Module('nfs', '', '')
+        conf = ExportMgr(nfs_mod)
+
+        ls = conf.list_exports(cluster_id=self.cluster_id)
+        assert len(ls) == 3
+
+        r = conf.create_export(
+            fsal_type='cephfs',
+            cluster_id=self.cluster_id,
+            fs_name='myfs',
+            path='/',
+            pseudo_path='/cephfs3',
+            read_only=False,
+            squash='root',
+            cmount_path='/',
+            )
+        assert r["bind"] == "/cephfs3"
+
+        ls = conf.list_exports(cluster_id=self.cluster_id)
+        assert len(ls) == 4
+
+        export = conf._fetch_export('foo', '/cephfs3')
+        assert export.export_id
+        assert export.path == "/"
+        assert export.pseudo == "/cephfs3"
+        assert export.access_type == "RW"
+        assert export.squash == "root"
+        assert export.protocols == [4]
+        assert export.fsal.name == "CEPH"
+        assert export.fsal.user_id == "nfs.foo.myfs.86ca58ef"
+        assert export.fsal.cephx_key == "thekeyforclientabc"
+        assert export.fsal.cmount_path == "/"
+        assert export.cluster_id == self.cluster_id
+    
+    def _do_test_create_export_cephfs_with_invalid_cmount_path(self):
+        import object_format
+
+        nfs_mod = Module('nfs', '', '')
+        conf = ExportMgr(nfs_mod)
+
+        with pytest.raises(object_format.ErrorResponse) as e:
+            conf.create_export(
+                fsal_type='cephfs',
+                cluster_id=self.cluster_id,
+                fs_name='myfs',
+                path='/',
+                pseudo_path='/cephfs4',
+                read_only=False,
+                squash='root',
+                cmount_path='/invalid',
+                )
+        assert "Invalid cmount_path: '/invalid'" in str(e.value)
 
     def _do_test_cluster_ls(self):
         nfs_mod = Module('nfs', '', '')
@@ -1092,7 +1432,12 @@ NFS_CORE_PARAM {
         cluster = NFSCluster(nfs_mod)
 
         out = cluster.show_nfs_cluster_info(self.cluster_id)
-        assert out == {"foo": {"virtual_ip": None, "backend": []}}
+        assert out == {"foo": {
+            "deployment_type": "standalone",
+            "virtual_ip": None,
+            "backend": [],
+            "placement": {}
+        }}
 
     def test_cluster_info(self):
         self._do_mock_test(self._do_test_cluster_info)
@@ -1116,6 +1461,451 @@ NFS_CORE_PARAM {
 
     def test_cluster_config(self):
         self._do_mock_test(self._do_test_cluster_config)
+
+    def test_is_log_only_config(self):
+        from nfs.cluster import _is_log_only_config
+
+        assert _is_log_only_config("LOG { Default_log_level = FULL_DEBUG; }")
+        assert _is_log_only_config(
+            "LOG { COMPONENTS { FSAL = FULL_DEBUG; NFS4 = FULL_DEBUG; } }")
+
+        assert not _is_log_only_config("EXPORT { Export_Id = 1; }")
+        assert not _is_log_only_config("NFS_CORE_PARAM { some_val = 1; }")
+
+        assert not _is_log_only_config(
+            "LOG { Default_log_level = FULL_DEBUG; } EXPORT { Export_Id = 1; }")
+
+        assert not _is_log_only_config("not valid ganesha config {{{")
+        assert not _is_log_only_config("")
+
+        # GaneshaConfParser does not strip comments; a comment before the
+        # LOG block gets merged into the block name, so the config is not
+        # recognised as LOG-only.  This is the safe fallback (restart).
+        assert not _is_log_only_config(
+            "# Enable debug\nLOG { Default_log_level = FULL_DEBUG; }")
+
+
+    def _do_test_cluster_config_log_only_no_restart(self):
+        nfs_mod = Module('nfs', '', '')
+        cluster = NFSCluster(nfs_mod)
+
+        log_config = "LOG {\n    Default_log_level = FULL_DEBUG;\n}\n"
+        with mock.patch('nfs.cluster.restart_nfs_service') as mock_restart:
+            cluster.set_nfs_cluster_config(self.cluster_id, log_config)
+            mock_restart.assert_not_called()
+
+    def test_cluster_config_log_only_no_restart(self):
+        self._do_mock_test(self._do_test_cluster_config_log_only_no_restart)
+
+    def _do_test_cluster_config_non_log_restarts(self):
+        nfs_mod = Module('nfs', '', '')
+        cluster = NFSCluster(nfs_mod)
+
+        export_config = "EXPORT {\n    Export_Id = 100;\n}\n"
+        with mock.patch('nfs.cluster.restart_nfs_service') as mock_restart:
+            cluster.set_nfs_cluster_config(self.cluster_id, export_config)
+            mock_restart.assert_called_once()
+
+    def test_cluster_config_non_log_restarts(self):
+        self._do_mock_test(self._do_test_cluster_config_non_log_restarts)
+
+    def _do_test_cluster_config_mixed_restarts(self):
+        nfs_mod = Module('nfs', '', '')
+        cluster = NFSCluster(nfs_mod)
+
+        mixed_config = ("LOG {\n    Default_log_level = FULL_DEBUG;\n}\n"
+                        "EXPORT {\n    Export_Id = 100;\n}\n")
+        with mock.patch('nfs.cluster.restart_nfs_service') as mock_restart:
+            cluster.set_nfs_cluster_config(self.cluster_id, mixed_config)
+            mock_restart.assert_called_once()
+
+    def test_cluster_config_mixed_restarts(self):
+        self._do_mock_test(self._do_test_cluster_config_mixed_restarts)
+
+    def _do_test_cluster_config_reset_log_only_no_restart(self):
+        nfs_mod = Module('nfs', '', '')
+        cluster = NFSCluster(nfs_mod)
+
+        log_config = "LOG {\n    Default_log_level = FULL_DEBUG;\n}\n"
+        cluster.set_nfs_cluster_config(self.cluster_id, log_config)
+        with mock.patch('nfs.cluster.restart_nfs_service') as mock_restart:
+            cluster.reset_nfs_cluster_config(self.cluster_id)
+            mock_restart.assert_not_called()
+
+    def test_cluster_config_reset_log_only_no_restart(self):
+        self._do_mock_test(self._do_test_cluster_config_reset_log_only_no_restart)
+
+    def _do_test_cluster_config_reset_non_log_restarts(self):
+        nfs_mod = Module('nfs', '', '')
+        cluster = NFSCluster(nfs_mod)
+
+        export_config = "EXPORT {\n    Export_Id = 100;\n}\n"
+        cluster.set_nfs_cluster_config(self.cluster_id, export_config)
+        with mock.patch('nfs.cluster.restart_nfs_service') as mock_restart:
+            cluster.reset_nfs_cluster_config(self.cluster_id)
+            mock_restart.assert_called_once()
+
+    def test_cluster_config_reset_non_log_restarts(self):
+        self._do_mock_test(self._do_test_cluster_config_reset_non_log_restarts)
+
+    def test_qos_from_dict(self):
+        qos = QOS.from_dict(self.qos_cluster_dict, True)
+        assert qos.to_dict() == self.qos_cluster_dict
+
+        qos = QOS.from_dict(self.qos_export_dict)
+        assert qos.to_dict() == self.qos_export_dict
+
+    @pytest.mark.parametrize("qos_block, qos_dict, qos_dict_bw_in_bytes, clust_op", [
+        (qos_cluster_block, qos_cluster_dict, qos_cluster_dict_bw_in_bytes, True),
+        (qos_export_block, qos_export_dict, qos_export_dict_bw_in_bytes, False)
+        ])
+    def test_qos_from_block(self, qos_block, qos_dict, qos_dict_bw_in_bytes, clust_op):
+        blocks = GaneshaConfParser(qos_block).parse()
+        assert isinstance(blocks, list)
+        qos = QOS.from_qos_block(blocks[0], clust_op)
+        assert qos.to_dict() == qos_dict
+        assert qos.to_dict(ret_bw_in_bytes=True) == qos_dict_bw_in_bytes
+
+    def _do_test_cluster_qos_bw(self, qos_type, combined_bw_ctrl, params, positive_tc):
+        nfs_mod = Module('nfs', '', '')
+        cluster = NFSCluster(nfs_mod)
+        try:
+            bw_obj = QOSBandwidthControl(True, combined_bw_ctrl, **params)
+            cluster.enable_cluster_qos_bw(self.cluster_id, qos_type, bw_obj)
+        except Exception:
+            if not positive_tc:
+                return
+        if not positive_tc:
+            raise Exception("This TC was supposed to fail")
+        out = cluster.get_cluster_qos(self.cluster_id)
+        expected_out = {"enable_bw_control": True, "enable_qos": True, "combined_rw_bw_control": combined_bw_ctrl, "qos_type": qos_type.name, "enable_iops_control": False}
+        for key in params:
+            expected_out[QOSParams[key].value] = bytes_to_human(with_units_to_int(params[key]), mode='binary')
+        assert out == expected_out
+        cluster.cluster_qos_set_config(self.cluster_id, 200)
+        expected_out.update({'cqos_msg_interval': 200})
+        assert cluster.get_cluster_qos(self.cluster_id) == expected_out
+        cluster.disable_cluster_qos_bw(self.cluster_id)
+        out = cluster.get_cluster_qos(self.cluster_id)
+        assert out == {"enable_bw_control": False, "enable_qos": False, "combined_rw_bw_control": False, "enable_iops_control": False}
+
+    @pytest.mark.parametrize("qos_type, combined_bw_ctrl, params, positive_tc", [
+        (QOSType['PerShare'], False, {'export_writebw': '100MB', 'export_readbw': '200MB'}, True),
+        (QOSType['PerClient'], False, {'client_writebw': '300MB', 'client_readbw': '400MB'}, True),
+        (QOSType['PerShare_PerClient'], False, {'export_writebw': '100MB', 'export_readbw': '200MB', 'client_writebw': '300MB', 'client_readbw': '400MB'}, True),
+        (QOSType['PerShare'], True, {'export_rw_bw': '100MB'}, True),
+        (QOSType['PerClient'], True, {'client_rw_bw': '200MB'}, True),
+        (QOSType['PerShare_PerClient'], True, {'export_rw_bw': '100MB', 'client_rw_bw': '200MB'}, True),
+        # negative testing
+        (QOSType['PerShare'], False, {'export_writebw': '100MB', 'client_readbw': '200MB'}, False),
+        (QOSType['PerShare'], False, {'export_writebw': '100MB'}, False),
+        (QOSType['PerClient'], False, {'client_writebw': '300MB'}, False),
+        (QOSType['PerClient'], False, {'client_writebw': '300MB', 'export_readbw': '400MB'}, False),
+        (QOSType['PerShare_PerClient'], False, {'export_writebw': '100MB', 'export_readbw': '200MB', 'client_writebw': '300MB'}, False),
+        (QOSType['PerShare_PerClient'], False, {'export_writebw': '100MB'}, False),
+        (QOSType['PerShare'], True, {'client_rw_bw': '100MB'}, False),
+        (QOSType['PerShare'], True, {}, False),
+        (QOSType['PerClient'], True, {'client_rw_bw': '200MB', 'export_rw_bw': '100MB'}, False),
+        (QOSType['PerShare_PerClient'], True, {'export_rw_bw': '100MB'}, False)
+        ])
+    def test_cluster_qos_bw(self, qos_type, combined_bw_ctrl, params, positive_tc):
+        self._do_mock_test(self._do_test_cluster_qos_bw, qos_type, combined_bw_ctrl, params, positive_tc)
+
+    def _do_test_export_qos_bw(self, qos_type, clust_combined_bw_ctrl, clust_params, export_combined_bw_ctrl, export_params):
+        nfs_mod = Module('nfs', '', '')
+        cluster = NFSCluster(nfs_mod)
+        export_mgr = ExportMgr(nfs_mod)
+        # try enabling export level qos before enabling cluster level qos
+        try:
+            bw_obj = QOSBandwidthControl(True, export_combined_bw_ctrl, **export_params)
+            export_mgr.enable_export_qos_bw(self.cluster_id, '/cephfs_a/', bw_obj)
+        except Exception as e:
+            assert str(e) == 'To configure bandwidth control for export, you must first enable bandwidth control at the cluster level for foo.'
+        bw_obj = QOSBandwidthControl(True, clust_combined_bw_ctrl, **clust_params)
+        cluster.enable_cluster_qos_bw(self.cluster_id, qos_type, bw_obj)
+        clust_qos_conf = {'global_enable_qos': True, 'global_enable_bw_control': True, 'global_enable_iops_control': False}
+        # set export qos
+        try:
+            bw_obj = QOSBandwidthControl(True, export_combined_bw_ctrl, **export_params)
+            export_mgr.enable_export_qos_bw(self.cluster_id, '/cephfs_a/', bw_obj)
+        except Exception:
+            if export_combined_bw_ctrl:
+                req = QOS_REQ_BW_PARAMS['combined_bw_enabled'][qos_type.name]
+            else:
+                req = QOS_REQ_BW_PARAMS['combined_bw_disabled'][qos_type.name]
+            if sorted(export_params.keys()) != sorted(req):
+                return
+            if qos_type.name == 'PerClient':
+                return
+        out = export_mgr.get_export_qos(self.cluster_id, '/cephfs_a/')
+        expected_out = {"enable_bw_control": True, "enable_qos": True, "combined_rw_bw_control": export_combined_bw_ctrl}
+        for key in export_params:
+            expected_out[QOSParams[key].value] = bytes_to_human(with_units_to_int(export_params[key]), mode='binary')
+        expected_out.update(clust_qos_conf)
+        assert out == expected_out
+        export_mgr.disable_export_qos_bw(self.cluster_id, '/cephfs_a/')
+        out = export_mgr.get_export_qos(self.cluster_id, '/cephfs_a/')
+        clust_qos_conf.update({"enable_bw_control": False, "enable_qos": False, "combined_rw_bw_control": False})
+        assert out == clust_qos_conf
+
+
+    @pytest.mark.parametrize("qos_type, clust_combined_bw_ctrl, clust_params", [
+        (QOSType['PerShare'], False, {'export_writebw': '100MB', 'export_readbw': '200MB'}),
+        (QOSType['PerClient'], False, {'client_writebw': '300MB', 'client_readbw': '400MB'}),
+        (QOSType['PerShare_PerClient'], False, {'export_writebw': '100MB', 'export_readbw': '200MB', 'client_writebw': '300MB', 'client_readbw': '400MB'}),
+        (QOSType['PerShare'], True, {'export_rw_bw': '100MB'}),
+        (QOSType['PerClient'], True, {'client_rw_bw': '200MB'}),
+        (QOSType['PerShare_PerClient'], True, {'export_rw_bw': '100MB', 'client_rw_bw': '200MB'})
+        ])
+    @pytest.mark.parametrize("export_combined_bw_ctrl, export_params", [
+        (False, {'export_writebw': '100MB', 'export_readbw': '200MB'}),
+        (False, {'client_writebw': '300MB', 'client_readbw': '400MB'}),
+        (False, {'export_writebw': '100MB', 'export_readbw': '200MB', 'client_writebw': '300MB', 'client_readbw': '400MB'}),
+        (True, {'export_rw_bw': '100MB'}),
+        (True, {'client_rw_bw': '200MB'}),
+        (True, {'export_rw_bw': '100MB', 'client_rw_bw': '200MB'})
+        ])
+    def test_export_qos_bw(self, qos_type, clust_combined_bw_ctrl, clust_params,
+                        export_combined_bw_ctrl, export_params):
+        self._do_mock_test(self._do_test_export_qos_bw, qos_type, clust_combined_bw_ctrl,
+                           clust_params, export_combined_bw_ctrl, export_params)
+
+    def _do_test_cluster_qos_ops(self, qos_type, params, positive_tc):
+        nfs_mod = Module('nfs', '', '')
+        cluster = NFSCluster(nfs_mod)
+        try:
+            ops_obj = QOSOpsControl(True, **params)
+            cluster.enable_cluster_qos_ops(self.cluster_id, qos_type, ops_obj)
+        except Exception:
+            if not positive_tc:
+                return
+        if not positive_tc:
+            raise Exception("This TC was supposed to fail")
+        out = cluster.get_cluster_qos(self.cluster_id)
+        expected_out = {"enable_bw_control": False, "enable_qos": True, "combined_rw_bw_control": False, "qos_type": qos_type.name, "enable_iops_control": True}
+        for key in params:
+            expected_out[QOSParams[key].value] = params[key]
+        assert out == expected_out
+        cluster.cluster_qos_set_config(self.cluster_id, 200)
+        expected_out.update({'cqos_msg_interval': 200})
+        assert cluster.get_cluster_qos(self.cluster_id) == expected_out
+        cluster.disable_cluster_qos_ops(self.cluster_id)
+        out = cluster.get_cluster_qos(self.cluster_id)
+        assert out == {"enable_bw_control": False, "enable_qos": False, "combined_rw_bw_control": False, "enable_iops_control": False}
+
+    @pytest.mark.parametrize("qos_type, params, positive_tc", [
+        (QOSType['PerShare'], {'max_export_iops': 10000}, True),
+        (QOSType['PerClient'], {'max_client_iops': 15000}, True),
+        (QOSType['PerShare_PerClient'], {'max_export_iops': 3000, 'max_client_iops': 14000}, True),
+        # negative testing
+        (QOSType['PerShare_PerClient'], {'max_export_iops': 1000}, False),
+        (QOSType['PerShare'], {'max_client_iops': 10000}, False),
+        (QOSType['PerShare'], {}, False),
+        (QOSType['PerClient'], {'max_export_iops': 2000, 'max_client_iops': 1000}, False),
+        (QOSType['PerShare_PerClient'], {'max_export_iops': 9}, False)
+        ])
+    def test_cluster_qos_ops(self, qos_type, params, positive_tc):
+        self._do_mock_test(self._do_test_cluster_qos_ops, qos_type, params, positive_tc)
+
+    def _do_test_export_qos_ops(self, qos_type, clust_params, export_params):
+        nfs_mod = Module('nfs', '', '')
+        cluster = NFSCluster(nfs_mod)
+        export_mgr = ExportMgr(nfs_mod)
+        # try enabling export level qos before enabling cluster level qos
+        try:
+            ops_obj = QOSOpsControl(True, **export_params)
+            export_mgr.enable_export_qos_ops(self.cluster_id, '/cephfs_a/', ops_obj)
+        except Exception as e:
+            assert str(e) == 'To configure IOPS control for export, you must first enable IOPS control at the cluster level foo.'
+        ops_obj = QOSOpsControl(True, **clust_params)
+        cluster.enable_cluster_qos_ops(self.cluster_id, qos_type, ops_obj)
+        clust_qos_conf = {'global_enable_qos': True, 'global_enable_bw_control': False, 'global_enable_iops_control': True}
+        # set export qos
+        try:
+            ops_obj = QOSOpsControl(True, **export_params)
+            export_mgr.enable_export_qos_ops(self.cluster_id, '/cephfs_a/', ops_obj)
+        except Exception:
+            req = QOS_REQ_OPS_PARAMS[qos_type.name]
+            if sorted(export_params.keys()) != sorted(req):
+                return
+            if qos_type.name == 'PerClient':
+                return
+        out = export_mgr.get_export_qos(self.cluster_id, '/cephfs_a/')
+        expected_out = {"enable_iops_control": True, "enable_qos": True}
+        for key in export_params:
+            expected_out[QOSParams[key].value] = export_params[key]
+        expected_out.update(clust_qos_conf)
+        assert out == expected_out
+        export_mgr.disable_export_qos_ops(self.cluster_id, '/cephfs_a/')
+        out = export_mgr.get_export_qos(self.cluster_id, '/cephfs_a/')
+        clust_qos_conf.update({"enable_iops_control": False, "enable_qos": False})
+        assert out == clust_qos_conf
+
+    @pytest.mark.parametrize("qos_type, clust_params", [
+        (QOSType['PerShare'], {'max_export_iops': 10000}),
+        (QOSType['PerClient'], {'max_client_iops': 2000}),
+        (QOSType['PerShare_PerClient'], {'max_export_iops': 3000, 'max_client_iops': 4000})
+        ])
+    @pytest.mark.parametrize("export_params", [
+        ({'max_export_iops': 10000}),
+        ({'max_client_iops': 2000}),
+        ({'max_export_iops': 3000, 'max_client_iops': 4000})
+        ])
+    def test_export_qos_ops(self, qos_type, clust_params, export_params):
+        self._do_mock_test(self._do_test_export_qos_ops, qos_type, clust_params, export_params)
+
+    def _do_test_cluster_qos_bw_ops(self, bw_qos_type, bw_params, ops_qos_type, ops_params, positive_tc):
+        nfs_mod = Module('nfs', '', '')
+        cluster = NFSCluster(nfs_mod)
+        try:
+            bw_obj = QOSBandwidthControl(True, combined_bw_ctrl=False, **bw_params)
+            cluster.enable_cluster_qos_bw(self.cluster_id, bw_qos_type, bw_obj)
+            ops_obj = QOSOpsControl(True, **ops_params)
+            cluster.enable_cluster_qos_ops(self.cluster_id, ops_qos_type, ops_obj)
+        except Exception:
+            if not positive_tc:
+                return
+        if not positive_tc:
+            raise Exception("This TC passed but it was supposed to fail")
+        out = cluster.get_cluster_qos(self.cluster_id)
+        expected_out = {"enable_bw_control": True, "enable_qos": True, "combined_rw_bw_control": False, "qos_type": ops_qos_type.name, "enable_iops_control": True}
+        bw_out = {}
+        ops_out = {}
+        for key in bw_params:
+            bw_out[QOSParams[key].value] = bytes_to_human(with_units_to_int(bw_params[key]), mode='binary')
+        for key in ops_params:
+            ops_out[QOSParams[key].value] = ops_params[key]
+        expected_out.update(bw_out)
+        expected_out.update(ops_out)
+        assert out == expected_out
+        # disable bandwidth control
+        cluster.disable_cluster_qos_bw(self.cluster_id)
+        out = cluster.get_cluster_qos(self.cluster_id)
+        ops_out.update({"enable_bw_control": False, "enable_qos": True, "combined_rw_bw_control": False, "enable_iops_control": True, "qos_type": ops_qos_type.name})
+        assert out == ops_out
+        # disable ops control
+        cluster.disable_cluster_qos_ops(self.cluster_id)
+        out = cluster.get_cluster_qos(self.cluster_id)
+        assert out == {"enable_bw_control": False, "enable_qos": False, "combined_rw_bw_control": False, "enable_iops_control": False}
+
+    @pytest.mark.parametrize("bw_qos_type, bw_params, ops_qos_type, ops_params, positive_tc", [
+        # positive TCs
+        (QOSType['PerShare'], {'export_writebw': '100MB', 'export_readbw': '200MB'}, 
+         QOSType['PerShare'], {'max_export_iops': 10000}, True),
+        (QOSType['PerClient'], {'client_writebw': '300MB', 'client_readbw': '400MB'},
+         QOSType['PerClient'], {'max_client_iops': 2000}, True),
+        (QOSType['PerShare_PerClient'],
+         {'export_writebw': '100MB', 'export_readbw': '200MB', 'client_writebw': '300MB', 'client_readbw': '400MB'},
+         QOSType['PerShare_PerClient'], {'max_export_iops': 3000, 'max_client_iops': 4000}, True),
+        # negative TCs
+        (QOSType['PerShare'], {'export_writebw': '100MB', 'export_readbw': '200MB'}, QOSType['PerClient'], {}, False),
+        (QOSType['PerClient'], {'client_writebw': '300MB', 'client_readbw': '400MB'}, QOSType['PerShare'], {}, False),
+        (QOSType['PerShare_PerClient'], {'export_writebw': '100MB', 'export_readbw': '200MB', 'client_writebw': '300MB', 'client_readbw': '400MB'}, QOSType['PerClient'], {'max_client_iops': 20000}, False),
+        ])
+    def test_cluster_qos_bw_ops(self, bw_qos_type, bw_params, ops_qos_type, ops_params, positive_tc):
+        self._do_mock_test(self._do_test_cluster_qos_bw_ops, bw_qos_type, bw_params, ops_qos_type, ops_params, positive_tc)
+
+    def _do_test_export_qos_bw_ops(self, qos_type, clust_bw_params, clust_ops_params, export_bw_params, export_ops_params):
+        nfs_mod = Module('nfs', '', '')
+        cluster = NFSCluster(nfs_mod)
+        export_mgr = ExportMgr(nfs_mod)
+        # enable cluster level bandwidth conrtol and try to enable ops control for export
+        bw_obj = QOSBandwidthControl(True, combined_bw_ctrl=False, **clust_bw_params)
+        cluster.enable_cluster_qos_bw(self.cluster_id, qos_type, bw_obj)
+        try:
+            ops_obj = QOSOpsControl(True, **export_ops_params)
+            export_mgr.enable_export_qos_ops(self.cluster_id, '/cephfs_a/', ops_obj)
+        except Exception:
+            pass
+        cluster.disable_cluster_qos_bw(self.cluster_id)
+        # enable ops control for cluster and try to enable bw control for export
+        ops_obj = QOSOpsControl(True, **clust_ops_params)
+        cluster.enable_cluster_qos_ops(self.cluster_id, qos_type, ops_obj)
+        try:
+            bw_obj = QOSBandwidthControl(True, combined_bw_ctrl=False, **export_bw_params)
+            export_mgr.enable_export_qos_bw(self.cluster_id, '/cephfs_a/', bw_obj)
+        except Exception:
+            pass
+        # enbale both and verify export get
+        bw_obj = QOSBandwidthControl(True, combined_bw_ctrl=False, **clust_bw_params)
+        cluster.enable_cluster_qos_bw(self.cluster_id, qos_type, bw_obj)
+        try:
+            bw_obj = QOSBandwidthControl(True, combined_bw_ctrl=False, **export_bw_params)
+            export_mgr.enable_export_qos_bw(self.cluster_id, '/cephfs_a/', bw_obj)
+            ops_obj = QOSOpsControl(True, **export_ops_params)
+            export_mgr.enable_export_qos_ops(self.cluster_id, '/cephfs_a/', ops_obj)
+            clust_qos_conf = {'global_enable_qos': True, 'global_enable_bw_control': True, 'global_enable_iops_control': True}
+        except Exception:
+            req = QOS_REQ_BW_PARAMS['combined_bw_disabled'][qos_type.name]
+            if sorted(export_bw_params.keys()) != sorted(req):
+                return
+            if qos_type.name == 'PerClient':
+                return
+            req = QOS_REQ_OPS_PARAMS[qos_type.name]
+            if sorted(export_ops_params.keys()) != sorted(req):
+                return
+        out = export_mgr.get_export_qos(self.cluster_id, '/cephfs_a/')
+        expected_out = {"enable_bw_control": True, "enable_qos": True, "combined_rw_bw_control": False, "enable_iops_control": True}
+        bw_out = {}
+        ops_out = {}
+        for key in export_bw_params:
+            bw_out[QOSParams[key].value] = bytes_to_human(with_units_to_int(export_bw_params[key]), mode='binary')
+        for key in export_ops_params:
+            ops_out[QOSParams[key].value] = export_ops_params[key]
+        expected_out.update(bw_out)
+        expected_out.update(ops_out)
+        expected_out.update(clust_qos_conf)
+        assert out == expected_out
+        # disable bandwidth control of export
+        export_mgr.disable_export_qos_bw(self.cluster_id, '/cephfs_a/')
+        out = export_mgr.get_export_qos(self.cluster_id, '/cephfs_a/')
+        ops_out.update({"enable_bw_control": False, "enable_qos": True, "combined_rw_bw_control": False, "enable_iops_control": True})
+        ops_out.update(clust_qos_conf)
+        assert out == ops_out
+        # disable ops control of export
+        export_mgr.disable_export_qos_ops(self.cluster_id, '/cephfs_a/')
+        out = export_mgr.get_export_qos(self.cluster_id, '/cephfs_a/')
+        clust_qos_conf.update({"enable_bw_control": False, "enable_qos": False, "combined_rw_bw_control": False, "enable_iops_control": False})
+        assert out == clust_qos_conf
+
+    @pytest.mark.parametrize("qos_type, clust_bw_params, clust_ops_params", [
+        # positive TCs
+        (QOSType['PerShare'], {'export_writebw': '100MB', 'export_readbw': '200MB'}, {'max_export_iops': 10000}),
+        (QOSType['PerClient'], {'client_writebw': '300MB', 'client_readbw': '400MB'}, {'max_client_iops': 2000}),
+        (QOSType['PerShare_PerClient'],
+         {'export_writebw': '100MB', 'export_readbw': '200MB', 'client_writebw': '300MB', 'client_readbw': '400MB'}, {'max_export_iops': 3000, 'max_client_iops': 4000})
+    ])
+    @pytest.mark.parametrize("export_bw_params, export_ops_params", [
+        ({'export_writebw': '100MB', 'export_readbw': '200MB'}, {'max_export_iops': 10000}),
+        ({'client_writebw': '300MB', 'client_readbw': '400MB'}, {'max_client_iops': 12000}),
+        ({'export_writebw': '100MB', 'export_readbw': '200MB', 'client_writebw': '300MB', 'client_readbw': '400MB'}, {'max_export_iops': 3000, 'max_client_iops': 4000})
+        ])
+    def test_export_qos_bw_ops(self, qos_type, clust_bw_params, clust_ops_params, export_bw_params, export_ops_params):
+        self._do_mock_test(self._do_test_export_qos_bw_ops, qos_type, clust_bw_params, clust_ops_params, export_bw_params, export_ops_params)
+
+
+class TestNFSClusterIngressPlacement:
+    cluster_id = 'mynfs'
+    virtual_ip = '192.168.1.100/24'
+    nfs_placement = '2 host1 host2'
+    ingress_placement = '3 host3 host4 host5'
+
+    def test_create_nfs_cluster_passes_ingress_placement(self):
+        mgr = MagicMock()
+        cluster = NFSCluster(mgr)
+        with mock.patch('nfs.cluster.create_ganesha_pool'), \
+                mock.patch.object(cluster, 'create_empty_rados_obj'), \
+                mock.patch('nfs.cluster.available_clusters', return_value=[]), \
+                mock.patch.object(cluster, '_call_orch_apply_nfs') as mock_apply:
+            cluster.create_nfs_cluster(
+                cluster_id=self.cluster_id,
+                placement='host1',
+                virtual_ip=self.virtual_ip,
+                ingress=True,
+                ingress_placement=self.ingress_placement,
+            )
+            mock_apply.assert_called_once()
+            assert mock_apply.call_args.kwargs['ingress_placement'] == self.ingress_placement
 
 
 @pytest.mark.parametrize(
@@ -1153,3 +1943,30 @@ def test_ganesha_validate_access_type():
         _validate_access_type(ok)
     with pytest.raises(NFSInvalidOperation):
         _validate_access_type("any")
+
+
+class TestCephfsClientForMgr:
+    @pytest.fixture(autouse=True)
+    def clear_cephfs_client_cache(self):
+        cephfs_client_for_mgr.cache_clear()
+        yield
+        cephfs_client_for_mgr.cache_clear()
+
+    def test_cephfs_client_for_mgr_returns_same_instance(self):
+        mgr = MagicMock()
+        with mock.patch('nfs.utils.CephfsClient') as mock_cephfs_cls:
+            mock_cephfs_cls.return_value = MagicMock()
+            first = cephfs_client_for_mgr(mgr)
+            second = cephfs_client_for_mgr(mgr)
+            assert first is second
+            mock_cephfs_cls.assert_called_once_with(mgr)
+
+    def test_multiple_earmark_resolvers_share_cached_cephfs_client(self):
+        mgr = MagicMock()
+        with mock.patch('nfs.utils.CephfsClient') as mock_cephfs_cls:
+            mock_cephfs_cls.return_value = MagicMock()
+            cached = cephfs_client_for_mgr(mgr)
+            r1 = mgr_util.CephFSEarmarkResolver(mgr=mgr, client=cached)
+            r2 = mgr_util.CephFSEarmarkResolver(mgr=mgr, client=cephfs_client_for_mgr(mgr))
+            assert r1._cephfs_client is r2._cephfs_client
+            mock_cephfs_cls.assert_called_once_with(mgr)

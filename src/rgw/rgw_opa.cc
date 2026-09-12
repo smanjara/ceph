@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include "rgw_opa.h"
 #include "rgw_http_client.h"
@@ -28,7 +28,7 @@ int rgw_opa_authorize(RGWOp *& op,
 
   int ret;
   bufferlist bl;
-  RGWHTTPTransceiver req(s->cct, "POST", opa_url.c_str(), &bl);
+  RGWHTTPTransceiver req(s->cct, "POST", opa_url, &bl);
 
   /* set required headers for OPA request */
   req.append_header("X-Auth-Token", opa_token);
@@ -42,7 +42,10 @@ int rgw_opa_authorize(RGWOp *& op,
   JSONFormatter jf;
   jf.open_object_section("");
   jf.open_object_section("input");
-  jf.dump_string("method", s->info.env->get("REQUEST_METHOD"));
+  const char *request_method = s->info.env->get("REQUEST_METHOD");
+  if (request_method) {
+    jf.dump_string("method", request_method);
+  }
   jf.dump_string("relative_uri", s->relative_uri.c_str());
   jf.dump_string("decoded_uri", s->decoded_uri.c_str());
   jf.dump_string("params", s->info.request_params.c_str());
@@ -64,11 +67,12 @@ int rgw_opa_authorize(RGWOp *& op,
 
   std::stringstream ss;
   jf.flush(ss);
-  req.set_post_data(ss.str());
-  req.set_send_length(ss.str().length());
+  const auto body = ss.str();
+  req.set_post_data(body);
+  req.set_send_length(body.length());
 
   /* send request */
-  ret = req.process(null_yield);
+  ret = req.process(op, s->yield);
   if (ret < 0) {
     ldpp_dout(op, 2) << "OPA process error:" << bl.c_str() << dendl;
     return ret;

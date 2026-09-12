@@ -6,14 +6,17 @@ from unittest.mock import Mock, patch
 
 from .. import mgr
 from ..exceptions import DashboardException
-from ..services.rgw_client import NoCredentialsException, \
-    NoRgwDaemonsException, RgwClient, _parse_frontend_config
+from ..services.rgw_client import NoRgwDaemonsException, RgwClient, \
+    RgwMultisite, _determine_rgw_addr, _parse_frontend_config
+from ..services.service import NoCredentialsException
 from ..settings import Settings
 from ..tests import CLICommandTestMixin, RgwStub
 
 
 @patch('dashboard.services.rgw_client.RgwClient._get_user_id', Mock(
     return_value='dummy_admin'))
+@patch('dashboard.services.ceph_service.CephService.send_command', Mock(
+    return_value=''))
 class RgwClientTest(TestCase, CLICommandTestMixin):
     _dashboard_user_realm1_access_key = 'VUOFXZFK24H81ISTVBTR'
     _dashboard_user_realm1_secret_key = '0PGsCvXPGWS3AGgibUZEcd9efLrbbshlUkY3jruR'
@@ -271,6 +274,57 @@ class RgwClientTest(TestCase, CLICommandTestMixin):
                 retention_period_years=years
             ))
 
+    def test_set_rgw_hostname(self):
+        result = self.exec_cmd(
+            'set-rgw-hostname',
+            daemon_name='test_daemon',
+            hostname='example.hostname.com'
+        )
+        self.assertEqual(
+            result,
+            'RGW hostname for daemon test_daemon configured'
+        )
+        self.assertEqual(
+            Settings.RGW_HOSTNAME_PER_DAEMON,
+            {'test_daemon': 'example.hostname.com'}
+        )
+
+    @patch("dashboard.services.rgw_client.RgwDaemon")
+    def test_hostname_when_rgw_hostname_config_is_set(self, mock_daemons):
+        mock_instance = Mock()
+        mock_daemons.return_value = mock_instance
+
+        self.test_set_rgw_hostname()
+
+        daemon_info = {
+            'metadata': {
+                'id': 'test_daemon',
+                'hostname': 'my-hostname.com',
+                'frontend_config#0': 'beast port=8000'
+            },
+            'addr': '192.0.2.1'
+        }
+
+        result = _determine_rgw_addr(daemon_info)
+        self.assertEqual(result.host, "example.hostname.com")
+
+    @patch("dashboard.services.rgw_client.RgwDaemon")
+    def test_hostname_when_rgw_hostname_config_is_not_set(self, mock_daemons):
+        mock_instance = Mock()
+        mock_daemons.return_value = mock_instance
+
+        daemon_info = {
+            'metadata': {
+                'id': 'test_daemon',
+                'hostname': 'my.hostname.com',
+                'frontend_config#0': 'beast port=8000'
+            },
+            'addr': '192.168.178.3:49774/1534999298'
+        }
+
+        result = _determine_rgw_addr(daemon_info)
+        self.assertEqual(result.host, "192.168.178.3")
+
 
 class RgwClientHelperTest(TestCase):
     def test_parse_frontend_config_1(self):
@@ -353,3 +407,303 @@ class RgwClientHelperTest(TestCase):
             _parse_frontend_config('mongoose port=8080')
         self.assertEqual(str(ctx.exception),
                          'Failed to determine RGW port from "mongoose port=8080"')
+
+
+class TestDictToXML(TestCase):
+    def test_empty_dict(self):
+        result = RgwClient.dict_to_xml({})
+        self.assertEqual(result, '')
+
+    def test_empty_string(self):
+        result = RgwClient.dict_to_xml("")
+        self.assertEqual(result, '')
+
+    def test_invalid_json_string(self):
+        with self.assertRaises(DashboardException):
+            RgwClient.dict_to_xml("invalid json")
+
+    def test_simple_dict(self):
+        data = {"name": "Foo", "age": 30}
+        expected_xml = "<name>Foo</name>\n<age>30</age>\n"
+        result = RgwClient.dict_to_xml(data)
+        self.assertEqual(result, expected_xml)
+
+    def test_nested_dict(self):
+        data = {"person": {"name": "Foo", "age": 30}}
+        expected_xml = "<person>\n<name>Foo</name>\n<age>30</age>\n</person>\n"
+        result = RgwClient.dict_to_xml(data)
+        self.assertEqual(result, expected_xml)
+
+    def test_list_in_dict(self):
+        data = {"names": ["Foo", "Boo"]}
+        expected_xml = "<names>\nFoo</names>\n<names>\nBoo</names>\n"
+        result = RgwClient.dict_to_xml(data)
+        self.assertEqual(result, expected_xml)
+
+    def test_rules_list_in_dict(self):
+        data = {"Rules": [{"id": 1}, {"id": 2}]}
+        expected_xml = "<Rule>\n<id>1</id>\n</Rule>\n<Rule>\n<id>2</id>\n</Rule>\n"
+        result = RgwClient.dict_to_xml(data)
+        self.assertEqual(result, expected_xml)
+
+    def test_json_string(self):
+        data = '{"name": "Foo", "age": 30}'
+        expected_xml = "<name>Foo</name>\n<age>30</age>\n"
+        result = RgwClient.dict_to_xml(data)
+        self.assertEqual(result, expected_xml)
+
+
+class RgwMultisiteTest(TestCase):
+    """Test cases for RgwMultisite class with daemon_name parameter support."""
+
+    def setUp(self):
+        RgwStub.get_daemons()
+
+    @patch('dashboard.services.rgw_client.mgr.send_rgwadmin_command')
+    @patch('dashboard.services.rgw_client._get_daemons')
+    def test_get_sync_policy_with_daemon_name(self, mock_get_daemons, mock_send_command):
+        """Test get_sync_policy with daemon_name parameter."""
+        mock_daemon = Mock()
+        mock_daemon.realm_name = 'test_realm'
+        mock_daemon.zonegroup_name = 'test_zonegroup'
+        mock_get_daemons.return_value = {'test_daemon': mock_daemon}
+
+        mock_send_command.return_value = (0, {'groups': []}, '')
+
+        multisite = RgwMultisite()
+        result = multisite.get_sync_policy(bucket_name='test_bucket', daemon_name='test_daemon')
+
+        self.assertEqual(result, {'groups': []})
+        # Verify the command includes realm and zonegroup
+        call_args = mock_send_command.call_args[0][0]
+        self.assertIn('--rgw-realm', call_args)
+        self.assertIn('test_realm', call_args)
+        self.assertIn('--rgw-zonegroup', call_args)
+        self.assertIn('test_zonegroup', call_args)
+
+    @patch('dashboard.services.rgw_client.mgr.send_rgwadmin_command')
+    @patch('dashboard.services.rgw_client._get_daemons')
+    def test_get_sync_policy_group_with_daemon_name(self, mock_get_daemons, mock_send_command):
+        """Test get_sync_policy_group with daemon_name parameter."""
+        mock_daemon = Mock()
+        mock_daemon.realm_name = 'test_realm'
+        mock_daemon.zonegroup_name = 'test_zonegroup'
+        mock_get_daemons.return_value = {'test_daemon': mock_daemon}
+
+        mock_send_command.return_value = (0, {'id': 'test_group'}, '')
+
+        multisite = RgwMultisite()
+        result = multisite.get_sync_policy_group('test_group', daemon_name='test_daemon')
+
+        self.assertEqual(result, {'id': 'test_group'})
+        call_args = mock_send_command.call_args[0][0]
+        self.assertIn('--rgw-realm', call_args)
+        self.assertIn('test_realm', call_args)
+
+    @patch('dashboard.services.rgw_client.mgr.send_rgwadmin_command')
+    @patch('dashboard.services.rgw_client._get_daemons')
+    def test_create_sync_policy_group_with_daemon_name(self, mock_get_daemons, mock_send_command):
+        """Test create_sync_policy_group with daemon_name parameter."""
+        mock_daemon = Mock()
+        mock_daemon.realm_name = 'test_realm'
+        mock_daemon.zonegroup_name = 'test_zonegroup'
+        mock_get_daemons.return_value = {'test_daemon': mock_daemon}
+
+        mock_send_command.return_value = (0, '', '')
+
+        multisite = RgwMultisite()
+        multisite.create_sync_policy_group('test_group', 'enabled', daemon_name='test_daemon')
+
+        call_args = mock_send_command.call_args[0][0]
+        self.assertIn('sync', call_args)
+        self.assertIn('group', call_args)
+        self.assertIn('create', call_args)
+        self.assertIn('--rgw-realm', call_args)
+        self.assertIn('test_realm', call_args)
+
+    @patch('dashboard.services.rgw_client.mgr.send_rgwadmin_command')
+    @patch('dashboard.services.rgw_client._get_daemons')
+    def test_update_sync_policy_group_with_daemon_name(self, mock_get_daemons, mock_send_command):
+        """Test update_sync_policy_group with daemon_name parameter."""
+        mock_daemon = Mock()
+        mock_daemon.realm_name = 'test_realm'
+        mock_daemon.zonegroup_name = 'test_zonegroup'
+        mock_get_daemons.return_value = {'test_daemon': mock_daemon}
+
+        mock_send_command.return_value = (0, '', '')
+
+        multisite = RgwMultisite()
+        multisite.update_sync_policy_group('test_group', 'enabled', daemon_name='test_daemon')
+
+        call_args = mock_send_command.call_args[0][0]
+        self.assertIn('sync', call_args)
+        self.assertIn('group', call_args)
+        self.assertIn('modify', call_args)
+        self.assertIn('--rgw-realm', call_args)
+
+    @patch('dashboard.services.rgw_client.mgr.send_rgwadmin_command')
+    @patch('dashboard.services.rgw_client._get_daemons')
+    def test_remove_sync_policy_group_with_daemon_name(self, mock_get_daemons, mock_send_command):
+        """Test remove_sync_policy_group with daemon_name parameter."""
+        mock_daemon = Mock()
+        mock_daemon.realm_name = 'test_realm'
+        mock_daemon.zonegroup_name = 'test_zonegroup'
+        mock_get_daemons.return_value = {'test_daemon': mock_daemon}
+
+        mock_send_command.return_value = (0, '', '')
+
+        multisite = RgwMultisite()
+        multisite.remove_sync_policy_group('test_group', daemon_name='test_daemon')
+
+        call_args = mock_send_command.call_args[0][0]
+        self.assertIn('sync', call_args)
+        self.assertIn('group', call_args)
+        self.assertIn('remove', call_args)
+        self.assertIn('--rgw-realm', call_args)
+
+    @patch('dashboard.services.rgw_client.mgr.send_rgwadmin_command')
+    @patch('dashboard.services.rgw_client._get_daemons')
+    def test_create_sync_flow_with_daemon_name(self, mock_get_daemons, mock_send_command):
+        """Test create_sync_flow with daemon_name parameter."""
+        mock_daemon = Mock()
+        mock_daemon.realm_name = 'test_realm'
+        mock_daemon.zonegroup_name = 'test_zonegroup'
+        mock_get_daemons.return_value = {'test_daemon': mock_daemon}
+
+        mock_send_command.return_value = (0, '', '')
+
+        multisite = RgwMultisite()
+        # For symmetrical flow, need to provide zones with added zones
+        multisite.create_sync_flow(
+            'test_group', 'test_flow', 'symmetrical',
+            zones={'added': ['zone1', 'zone2'], 'removed': []},
+            daemon_name='test_daemon'
+        )
+
+        call_args = mock_send_command.call_args[0][0]
+        self.assertIn('sync', call_args)
+        self.assertIn('group', call_args)
+        self.assertIn('flow', call_args)
+        self.assertIn('create', call_args)
+        self.assertIn('--rgw-realm', call_args)
+
+    @patch('dashboard.services.rgw_client.mgr.send_rgwadmin_command')
+    @patch('dashboard.services.rgw_client._get_daemons')
+    def test_remove_sync_flow_with_daemon_name(self, mock_get_daemons, mock_send_command):
+        """Test remove_sync_flow with daemon_name parameter."""
+        mock_daemon = Mock()
+        mock_daemon.realm_name = 'test_realm'
+        mock_daemon.zonegroup_name = 'test_zonegroup'
+        mock_get_daemons.return_value = {'test_daemon': mock_daemon}
+
+        mock_send_command.return_value = (0, '', '')
+
+        multisite = RgwMultisite()
+        multisite.remove_sync_flow(
+            'test_group', 'test_flow', 'symmetrical',
+            daemon_name='test_daemon'
+        )
+
+        call_args = mock_send_command.call_args[0][0]
+        self.assertIn('sync', call_args)
+        self.assertIn('group', call_args)
+        self.assertIn('flow', call_args)
+        self.assertIn('remove', call_args)
+        self.assertIn('--rgw-realm', call_args)
+
+    @patch('dashboard.services.rgw_client.mgr.send_rgwadmin_command')
+    @patch('dashboard.services.rgw_client._get_daemons')
+    def test_create_sync_pipe_with_daemon_name(self, mock_get_daemons, mock_send_command):
+        """Test create_sync_pipe with daemon_name parameter."""
+        mock_daemon = Mock()
+        mock_daemon.realm_name = 'test_realm'
+        mock_daemon.zonegroup_name = 'test_zonegroup'
+        mock_get_daemons.return_value = {'test_daemon': mock_daemon}
+
+        mock_send_command.return_value = (0, '', '')
+
+        multisite = RgwMultisite()
+        multisite.create_sync_pipe(
+            'test_group', 'test_pipe',
+            {'added': ['zone1'], 'removed': []},
+            {'added': ['zone2'], 'removed': []},
+            'source_bucket',
+            daemon_name='test_daemon'
+        )
+
+        call_args = mock_send_command.call_args[0][0]
+        self.assertIn('sync', call_args)
+        self.assertIn('group', call_args)
+        self.assertIn('pipe', call_args)
+        self.assertIn('create', call_args)
+        self.assertIn('--rgw-realm', call_args)
+
+    @patch('dashboard.services.rgw_client.mgr.send_rgwadmin_command')
+    @patch('dashboard.services.rgw_client._get_daemons')
+    def test_remove_sync_pipe_with_daemon_name(self, mock_get_daemons, mock_send_command):
+        """Test remove_sync_pipe with daemon_name parameter."""
+        mock_daemon = Mock()
+        mock_daemon.realm_name = 'test_realm'
+        mock_daemon.zonegroup_name = 'test_zonegroup'
+        mock_get_daemons.return_value = {'test_daemon': mock_daemon}
+
+        mock_send_command.return_value = (0, '', '')
+
+        multisite = RgwMultisite()
+        multisite.remove_sync_pipe(
+            'test_group', 'test_pipe',
+            source_zones=['zone1'],
+            destination_zones=['zone2'],
+            daemon_name='test_daemon'
+        )
+
+        call_args = mock_send_command.call_args[0][0]
+        self.assertIn('sync', call_args)
+        self.assertIn('group', call_args)
+        self.assertIn('pipe', call_args)
+        self.assertIn('remove', call_args)
+        self.assertIn('--rgw-realm', call_args)
+
+    @patch('dashboard.services.rgw_client._get_daemons')
+    def test_get_zonegroup_from_daemon(self, mock_get_daemons):
+        """Test get_zonegroup_from_daemon method."""
+        mock_daemon = Mock()
+        mock_daemon.zonegroup_name = 'test_zonegroup'
+        mock_get_daemons.return_value = {'test_daemon': mock_daemon}
+
+        multisite = RgwMultisite()
+        result = multisite.get_zonegroup_from_daemon('test_daemon')
+
+        self.assertEqual(result, 'test_zonegroup')
+
+    @patch('dashboard.services.rgw_client._get_daemons')
+    def test_get_zonegroup_from_daemon_not_found(self, mock_get_daemons):
+        """Test get_zonegroup_from_daemon with non-existent daemon."""
+        mock_get_daemons.return_value = {}
+
+        multisite = RgwMultisite()
+        result = multisite.get_zonegroup_from_daemon('non_existent_daemon')
+
+        self.assertIsNone(result)
+
+    @patch('dashboard.services.rgw_client._get_daemons')
+    def test_get_realm_from_daemon(self, mock_get_daemons):
+        """Test get_realm_from_daemon method."""
+        mock_daemon = Mock()
+        mock_daemon.realm_name = 'test_realm'
+        mock_get_daemons.return_value = {'test_daemon': mock_daemon}
+
+        multisite = RgwMultisite()
+        result = multisite.get_realm_from_daemon('test_daemon')
+
+        self.assertEqual(result, 'test_realm')
+
+    @patch('dashboard.services.rgw_client._get_daemons')
+    def test_get_realm_from_daemon_not_found(self, mock_get_daemons):
+        """Test get_realm_from_daemon with non-existent daemon."""
+        mock_get_daemons.return_value = {}
+
+        multisite = RgwMultisite()
+        result = multisite.get_realm_from_daemon('non_existent_daemon')
+
+        self.assertIsNone(result)

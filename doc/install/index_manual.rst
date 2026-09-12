@@ -9,7 +9,7 @@ Get Software
 ============
 
 There are several methods for getting Ceph software. The easiest and most common
-method is to `get packages`_ by adding repositories for use with package
+method is to :ref:`get packages <packages>` by adding repositories for use with package
 management tools such as the Advanced Package Tool (APT) or Yellowdog Updater,
 Modified (YUM). You may also retrieve pre-compiled packages from the Ceph
 repository. Finally, you can retrieve tarballs or clone the Ceph source code
@@ -19,12 +19,12 @@ repository and build Ceph yourself.
 .. toctree::
    :maxdepth: 1
 
-	Get Packages <get-packages>
-	Get Tarballs <get-tarballs>
-	Clone Source <clone-source>
-	Build Ceph <build-ceph>
-    	Ceph Mirrors <mirrors>
-	Ceph Containers <containers>
+   Get Packages <get-packages>
+   Get Tarballs <get-tarballs>
+   Clone Source <clone-source>
+   Build Ceph <build-ceph>
+   Ceph Mirrors <mirrors>
+   Ceph Containers <containers>
 
 
 Install Software
@@ -39,8 +39,8 @@ QEMU.
 .. toctree::
    :maxdepth: 1
 
-	Install Ceph Storage Cluster <install-storage-cluster>
-	Install Virtualization for Block <install-vm-cloud>
+   Install Ceph Storage Cluster <install-storage-cluster>
+   Install Virtualization for Block <install-vm-cloud>
 
 
 Deploy a Cluster Manually
@@ -52,18 +52,17 @@ deployment scripts with Chef, Juju, Puppet, etc.
 
 .. toctree::
 
-	Manual Deployment <manual-deployment>
-	Manual Deployment on FreeBSD <manual-freebsd-deployment>
+   Manual Deployment <manual-deployment>
+   Manual Deployment on FreeBSD <manual-freebsd-deployment>
 
 Upgrade Software
 ================
 
-As new versions of Ceph become available, you may upgrade your cluster to take
-advantage of new functionality. Read the upgrade documentation before you
-upgrade your cluster. Sometimes upgrading Ceph requires you to follow an upgrade
-sequence.
+As new versions of Ceph become available, you may upgrade your cluster to
+take advantage of new functionality, as well as bug fixes and performance
+and security enhancements. Read the release notes of the new
+version before you upgrade your cluster: they document the required
+upgrade sequence and any release-specific steps. See the :ref:`releases
+index <ceph-releases-general>` for the release notes, and
+:doc:`/cephadm/upgrade` if your cluster is managed by cephadm.
 
-.. toctree::
-   :maxdepth: 2
-
-.. _get packages: ../get-packages

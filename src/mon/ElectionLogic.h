@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -17,9 +18,14 @@
 #define CEPH_ELECTIONLOGIC_H
 
 #include <map>
+#include <memory>
 #include <set>
+
+#include "common/ceph_context.h"
+#include "include/buffer_fwd.h"
 #include "include/types.h"
-#include "ConnectionTracker.h"
+
+class ConnectionTracker;
 
 class ElectionOwner {
 public:
@@ -82,6 +88,18 @@ public:
    * @returns true if we have participated, false otherwise
    */
   virtual bool ever_participated() const = 0;
+  /**
+   * Check if the monitor is the tiebreaker in a stretch cluster.
+   *
+   * @returns true if the Monitor is the tiebreaker, false otherwise.
+   */
+  virtual bool is_tiebreaker(int rank) const = 0;
+  /**
+   * Check if the Monitor is marked down in a stretch cluster.
+   *
+   * @returns true if the Monitor in a stretch cluster is marked down, false otherwise.
+   */
+  virtual bool is_stretch_marked_down_mons(int rank) const = 0;
   /**
    * Ask the ElectionOwner for the size of the Paxos set. This includes
    * those monitors which may not be in the current quorum!
@@ -210,15 +228,10 @@ public:
 
   ElectionLogic(ElectionOwner *e, election_strategy es, ConnectionTracker *t,
 		double ipm,
-		CephContext *c) : elector(e), peer_tracker(t), cct(c),
-				  last_election_winner(-1), last_voted_for(-1),
-				  ignore_propose_margin(ipm),
-				  stable_peer_tracker(),
-				  leader_peer_tracker(),
-				  leader_acked(-1),
-				  strategy(es),
-				  participating(true),
-				  electing_me(false) {}
+		CephContext *c);
+
+  ~ElectionLogic() noexcept;
+
   /**
    * Set the election strategy to use. If this is not consistent across the
    * electing cluster, you're going to have a bad time.

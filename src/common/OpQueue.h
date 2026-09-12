@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -16,6 +17,7 @@
 #define OP_QUEUE_H
 
 #include "include/msgr.h"
+#include "osd/osd_types.h"
 
 #include <list>
 #include <functional>
@@ -65,6 +67,9 @@ public:
 
   // Human readable brief description of queue and relevant parameters
   virtual void print(std::ostream &f) const = 0;
+
+  // Get the type of OpQueue implementation
+  virtual op_queue_type_t get_type() const = 0;
 
   // Don't leak resources on destruction
   virtual ~OpQueue() {};

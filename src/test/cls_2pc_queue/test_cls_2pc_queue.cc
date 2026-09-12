@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "include/types.h"
 
@@ -10,7 +10,9 @@
 
 #include "gtest/gtest.h"
 #include "test/librados/test_cxx.h"
+#include "test/librados/test_pool_types.h"
 #include "global/global_context.h"
+#include "cls/2pc_queue/cls_2pc_queue_const.h"
 
 #include <string>
 #include <vector>
@@ -20,26 +22,16 @@
 #include <atomic>
 
 using namespace std;
+using ceph::test::PoolType;
+using ceph::test::pool_type_name;
+using ceph::test::create_pool_by_type;
+using ceph::test::destroy_pool_by_type;
 
-class TestCls2PCQueue : public ::testing::Test {
-protected:
-  librados::Rados rados;
-  std::string pool_name;
-  librados::IoCtx ioctx;
-
-  void SetUp() override {
-    pool_name = get_temp_pool_name();
-    ASSERT_EQ("", create_one_pool_pp(pool_name, rados));
-    ASSERT_EQ(0, rados.ioctx_create(pool_name.c_str(), ioctx));
-  }
-
-  void TearDown() override {
-    ioctx.close();
-    ASSERT_EQ(0, destroy_one_pool_pp(pool_name, rados));
-  }
+class TestCls2PCQueue : public ceph::test::ClsTestFixture {
+  // Inherits: rados, ioctx, pool_name, pool_type, SetUp(), TearDown()
 };
 
-TEST_F(TestCls2PCQueue, GetCapacity)
+TEST_P(TestCls2PCQueue, GetCapacity)
 {
   const std::string queue_name = __PRETTY_FUNCTION__;
   const auto max_size = 8*1024;
@@ -50,12 +42,12 @@ TEST_F(TestCls2PCQueue, GetCapacity)
 
   uint64_t size;
 
-  const int ret = cls_queue_get_capacity(ioctx, queue_name, size);
+  const int ret = cls_2pc_queue_get_capacity(ioctx, queue_name, size);
   ASSERT_EQ(0, ret);
   ASSERT_EQ(max_size, size);
 }
 
-TEST_F(TestCls2PCQueue, AsyncGetCapacity)
+TEST_P(TestCls2PCQueue, AsyncGetCapacity)
 {
   const std::string queue_name = __PRETTY_FUNCTION__;
   const auto max_size = 8*1024;
@@ -75,7 +67,7 @@ TEST_F(TestCls2PCQueue, AsyncGetCapacity)
   ASSERT_EQ(max_size, size);
 }
 
-TEST_F(TestCls2PCQueue, Reserve)
+TEST_P(TestCls2PCQueue, Reserve)
 {
   const std::string queue_name = __PRETTY_FUNCTION__;
   const auto max_size = 1024U*1024U;
@@ -101,7 +93,7 @@ TEST_F(TestCls2PCQueue, Reserve)
   }
 }
 
-TEST_F(TestCls2PCQueue, AsyncReserve)
+TEST_P(TestCls2PCQueue, AsyncReserve)
 {
   const std::string queue_name = __PRETTY_FUNCTION__;
   const auto max_size = 1024U*1024U;
@@ -139,7 +131,7 @@ TEST_F(TestCls2PCQueue, AsyncReserve)
   }
 }
 
-TEST_F(TestCls2PCQueue, Commit)
+TEST_P(TestCls2PCQueue, Commit)
 {
   const std::string queue_name = __PRETTY_FUNCTION__;
   const auto max_size = 1024*1024*128;
@@ -173,7 +165,132 @@ TEST_F(TestCls2PCQueue, Commit)
   ASSERT_EQ(reservations.size(), 0);
 }
 
-TEST_F(TestCls2PCQueue, Abort)
+TEST_P(TestCls2PCQueue, Stats)
+{
+  const std::string queue_name = __PRETTY_FUNCTION__;
+  const auto max_size = 1024*1024*128;
+  const auto number_of_ops = 200U;
+  const auto number_of_elements = 23U;
+  auto total_committed_elements = 0U;
+  librados::ObjectWriteOperation op;
+  op.create(true);
+  cls_2pc_queue_init(op, queue_name, max_size);
+  ASSERT_EQ(0, ioctx.operate(queue_name, &op));
+
+  for (auto i = 0U; i < number_of_ops; ++i) {
+    const std::string element_prefix("op-" +to_string(i) + "-element-");
+    auto total_size = 0UL;
+    std::vector<bufferlist> data(number_of_elements);
+    // create vector of buffer lists
+    std::generate(data.begin(), data.end(), [j = 0, &element_prefix, &total_size] () mutable {
+      bufferlist bl;
+      bl.append(element_prefix + to_string(j++));
+      total_size += bl.length();
+      return bl;
+    });
+
+    cls_2pc_reservation::id_t res_id;
+    ASSERT_EQ(cls_2pc_queue_reserve(ioctx, queue_name, total_size, number_of_elements, res_id), 0);
+    ASSERT_NE(res_id, cls_2pc_reservation::NO_ID);
+    cls_2pc_queue_commit(op, data, res_id);
+    ASSERT_EQ(0, ioctx.operate(queue_name, &op));
+
+    total_committed_elements += number_of_elements;
+    uint32_t committed_entries;
+    uint64_t size;
+
+    ASSERT_EQ(cls_2pc_queue_get_topic_stats(ioctx, queue_name, committed_entries, size), 0);
+    ASSERT_EQ(committed_entries, total_committed_elements);
+  }
+  cls_2pc_reservations reservations;
+  ASSERT_EQ(0, cls_2pc_queue_list_reservations(ioctx, queue_name, reservations));
+  ASSERT_EQ(reservations.size(), 0);
+}
+
+TEST_P(TestCls2PCQueue, UpgradeFromReef)
+{
+  const std::string queue_name = __PRETTY_FUNCTION__;
+  const auto max_size = 1024*1024*128;
+  const auto number_of_ops = 200U;
+  const auto number_of_elements = 23U;
+  auto total_committed_elements = 0U;
+  librados::ObjectWriteOperation wop;
+  wop.create(true);
+  cls_2pc_queue_init(wop, queue_name, max_size);
+  ASSERT_EQ(0, ioctx.operate(queue_name, &wop));
+
+  for (auto i = 0U; i < number_of_ops; ++i) {
+    const std::string element_prefix("wop-" +to_string(i) + "-element-");
+    auto total_size = 0UL;
+    std::vector<bufferlist> data(number_of_elements);
+    // create vector of buffer lists
+    std::generate(data.begin(), data.end(), [j = 0, &element_prefix, &total_size] () mutable {
+      bufferlist bl;
+      bl.append(element_prefix + to_string(j++));
+      total_size += bl.length();
+      return bl;
+    });
+
+    cls_2pc_reservation::id_t res_id;
+    ASSERT_EQ(cls_2pc_queue_reserve(ioctx, queue_name, total_size, number_of_elements, res_id), 0);
+    ASSERT_NE(res_id, cls_2pc_reservation::NO_ID);
+    cls_2pc_queue_commit(wop, data, res_id);
+    ASSERT_EQ(0, ioctx.operate(queue_name, &wop));
+
+    total_committed_elements += number_of_elements;
+    uint32_t committed_entries;
+    uint64_t size;
+
+    ASSERT_EQ(cls_2pc_queue_get_topic_stats(ioctx, queue_name, committed_entries, size), 0);
+    ASSERT_EQ(committed_entries, total_committed_elements);
+  }
+  cls_2pc_reservations reservations;
+  ASSERT_EQ(0, cls_2pc_queue_list_reservations(ioctx, queue_name, reservations));
+  ASSERT_EQ(reservations.size(), 0);
+
+  constexpr auto max_elements = 42U;
+  std::string marker;
+  std::string end_marker;
+  librados::ObjectReadOperation rop;
+  auto consume_count = 0U;
+  std::vector<cls_queue_entry> entries;
+  bool truncated = true;
+
+  auto simulate_reef_cls_2pc_queue_remove_entries = [](librados::ObjectWriteOperation& wop, const std::string& end_marker) {
+    bufferlist in;
+    cls_queue_remove_op rem_op;
+    rem_op.end_marker = end_marker;
+    encode(rem_op, in);
+    wop.exec(cls::tpc_queue::method::remove_entries, in);
+  };
+
+  while (truncated) {
+    bufferlist bl;
+    int rc;
+    cls_2pc_queue_list_entries(rop, marker, max_elements, &bl, &rc);
+    ASSERT_EQ(0, ioctx.operate(queue_name, &rop, nullptr));
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(cls_2pc_queue_list_entries_result(bl, entries, &truncated, end_marker), 0);
+
+    consume_count += entries.size();
+    // simulating reef cls_2pc_queue_remove_entries with cls_queue_remove_op
+    simulate_reef_cls_2pc_queue_remove_entries(wop, end_marker);
+    marker = end_marker;
+    total_committed_elements -= entries.size();
+  }
+
+  // execute all delete operations in a batch
+  ASSERT_EQ(0, ioctx.operate(queue_name, &wop));
+  ASSERT_EQ(consume_count, number_of_ops*number_of_elements);
+
+  uint32_t entries_number;
+  uint64_t size;
+  ASSERT_EQ(cls_2pc_queue_get_topic_stats(ioctx, queue_name, entries_number, size), 0);
+  ASSERT_EQ(total_committed_elements, 0);
+  ASSERT_EQ(entries_number, 0);
+}
+
+TEST_P(TestCls2PCQueue, Abort)
 {
   const std::string queue_name = __PRETTY_FUNCTION__;
   const auto max_size = 1024U*1024U;
@@ -197,7 +314,7 @@ TEST_F(TestCls2PCQueue, Abort)
   ASSERT_EQ(reservations.size(), 0);
 }
 
-TEST_F(TestCls2PCQueue, ReserveError)
+TEST_P(TestCls2PCQueue, ReserveError)
 {
   const std::string queue_name = __PRETTY_FUNCTION__;
   const auto max_size = 256U*1024U;
@@ -233,7 +350,7 @@ TEST_F(TestCls2PCQueue, ReserveError)
   }
 }
 
-TEST_F(TestCls2PCQueue, CommitError)
+TEST_P(TestCls2PCQueue, CommitError)
 {
   const std::string queue_name = __PRETTY_FUNCTION__;
   const auto max_size = 1024*1024;
@@ -283,11 +400,11 @@ TEST_F(TestCls2PCQueue, CommitError)
   }
   cls_2pc_reservations reservations;
   ASSERT_EQ(0, cls_2pc_queue_list_reservations(ioctx, queue_name, reservations));
-  // 2 reservations were not comitted
+  // 2 reservations were not committed
   ASSERT_EQ(reservations.size(), 2);
 }
 
-TEST_F(TestCls2PCQueue, AbortError)
+TEST_P(TestCls2PCQueue, AbortError)
 {
   const std::string queue_name = __PRETTY_FUNCTION__;
   const auto max_size = 1024*1024;
@@ -320,7 +437,7 @@ TEST_F(TestCls2PCQueue, AbortError)
   ASSERT_EQ(reservations.size(), 1);
 }
 
-TEST_F(TestCls2PCQueue, MultiReserve)
+TEST_P(TestCls2PCQueue, MultiReserve)
 {
   const std::string queue_name = __PRETTY_FUNCTION__;
   const auto max_size = 1024*1024;
@@ -337,7 +454,7 @@ TEST_F(TestCls2PCQueue, MultiReserve)
   for (auto& p : producers) {
     p = std::thread([this, &queue_name] {
       librados::ObjectWriteOperation op;
-  	  for (auto i = 0U; i < number_of_ops; ++i) {
+      for (auto i = 0U; i < number_of_ops; ++i) {
         cls_2pc_reservation::id_t res_id = cls_2pc_reservation::NO_ID;
         ASSERT_EQ(cls_2pc_queue_reserve(ioctx, queue_name, size_to_reserve, number_of_elements, res_id), 0);
         ASSERT_NE(res_id, 0);
@@ -357,7 +474,7 @@ TEST_F(TestCls2PCQueue, MultiReserve)
   ASSERT_EQ(total_reservations, number_of_ops*max_producer_count*size_to_reserve);
 }
 
-TEST_F(TestCls2PCQueue, MultiCommit)
+TEST_P(TestCls2PCQueue, MultiCommit)
 {
   const std::string queue_name = __PRETTY_FUNCTION__;
   const auto max_size = 1024*1024;
@@ -373,7 +490,7 @@ TEST_F(TestCls2PCQueue, MultiCommit)
   for (auto& p : producers) {
     p = std::thread([this, &queue_name] {
       librados::ObjectWriteOperation op;
-  	  for (auto i = 0U; i < number_of_ops; ++i) {
+      for (auto i = 0U; i < number_of_ops; ++i) {
         const std::string element_prefix("op-" +to_string(i) + "-element-");
         std::vector<bufferlist> data(number_of_elements);
         auto total_size = 0UL;
@@ -400,7 +517,7 @@ TEST_F(TestCls2PCQueue, MultiCommit)
   ASSERT_EQ(reservations.size(), 0);
 }
 
-TEST_F(TestCls2PCQueue, MultiAbort)
+TEST_P(TestCls2PCQueue, MultiAbort)
 {
   const std::string queue_name = __PRETTY_FUNCTION__;
   const auto max_size = 1024*1024;
@@ -417,7 +534,7 @@ TEST_F(TestCls2PCQueue, MultiAbort)
   for (auto& p : producers) {
     p = std::thread([this, &queue_name] {
       librados::ObjectWriteOperation op;
-  	  for (auto i = 0U; i < number_of_ops; ++i) {
+      for (auto i = 0U; i < number_of_ops; ++i) {
         cls_2pc_reservation::id_t res_id = cls_2pc_reservation::NO_ID;
         ASSERT_EQ(cls_2pc_queue_reserve(ioctx, queue_name, size_to_reserve, number_of_elements, res_id), 0);
         ASSERT_NE(res_id, 0);
@@ -434,7 +551,7 @@ TEST_F(TestCls2PCQueue, MultiAbort)
   ASSERT_EQ(reservations.size(), 0);
 }
 
-TEST_F(TestCls2PCQueue, ReserveCommit)
+TEST_P(TestCls2PCQueue, ReserveCommit)
 {
   const std::string queue_name = __PRETTY_FUNCTION__;
   const auto max_size = 1024*1024;
@@ -451,7 +568,7 @@ TEST_F(TestCls2PCQueue, ReserveCommit)
   for (auto& r : reservers) {
     r = std::thread([this, &queue_name] {
       librados::ObjectWriteOperation op;
-  	  for (auto i = 0U; i < number_of_ops; ++i) {
+      for (auto i = 0U; i < number_of_ops; ++i) {
         cls_2pc_reservation::id_t res_id = cls_2pc_reservation::NO_ID;
         ASSERT_EQ(cls_2pc_queue_reserve(ioctx, queue_name, size_to_reserve, number_of_elements, res_id), 0);
         ASSERT_NE(res_id, cls_2pc_reservation::NO_ID);
@@ -489,7 +606,7 @@ TEST_F(TestCls2PCQueue, ReserveCommit)
   ASSERT_EQ(reservations.size(), 0);
 }
 
-TEST_F(TestCls2PCQueue, ReserveAbort)
+TEST_P(TestCls2PCQueue, ReserveAbort)
 {
   const std::string queue_name = __PRETTY_FUNCTION__;
   const auto max_size = 1024*1024;
@@ -506,7 +623,7 @@ TEST_F(TestCls2PCQueue, ReserveAbort)
   for (auto& r : reservers) {
     r = std::thread([this, &queue_name] {
       librados::ObjectWriteOperation op;
-  	  for (auto i = 0U; i < number_of_ops; ++i) {
+      for (auto i = 0U; i < number_of_ops; ++i) {
         cls_2pc_reservation::id_t res_id = cls_2pc_reservation::NO_ID;
         ASSERT_EQ(cls_2pc_queue_reserve(ioctx, queue_name, size_to_reserve, number_of_elements, res_id), 0);
         ASSERT_NE(res_id, cls_2pc_reservation::NO_ID);
@@ -536,7 +653,7 @@ TEST_F(TestCls2PCQueue, ReserveAbort)
   ASSERT_EQ(reservations.size(), 0);
 }
 
-TEST_F(TestCls2PCQueue, ManualCleanup)
+TEST_P(TestCls2PCQueue, ManualCleanup)
 {
   const std::string queue_name = __PRETTY_FUNCTION__;
   const auto max_size = 128*1024*1024;
@@ -549,14 +666,14 @@ TEST_F(TestCls2PCQueue, ManualCleanup)
   cls_2pc_queue_init(op, queue_name, max_size);
   ASSERT_EQ(0, ioctx.operate(queue_name, &op));
 
-  // anything older than 100ms is cosidered stale
+  // anything older than 100ms is considered stale
   ceph::coarse_real_time stale_time = ceph::coarse_real_clock::now() + std::chrono::milliseconds(100);
 
   std::vector<std::thread> reservers(max_workers);
   for (auto& r : reservers) {
     r = std::thread([this, &queue_name] {
       librados::ObjectWriteOperation op;
-  	  for (auto i = 0U; i < number_of_ops; ++i) {
+      for (auto i = 0U; i < number_of_ops; ++i) {
         cls_2pc_reservation::id_t res_id = cls_2pc_reservation::NO_ID;
         ASSERT_EQ(cls_2pc_queue_reserve(ioctx, queue_name, size_to_reserve, number_of_elements, res_id), 0);
         ASSERT_NE(res_id, cls_2pc_reservation::NO_ID);
@@ -610,7 +727,7 @@ TEST_F(TestCls2PCQueue, ManualCleanup)
   ASSERT_EQ(reservations.size(), 0);
 }
 
-TEST_F(TestCls2PCQueue, Cleanup)
+TEST_P(TestCls2PCQueue, Cleanup)
 {
   const std::string queue_name = __PRETTY_FUNCTION__;
   const auto max_size = 128*1024*1024;
@@ -623,14 +740,14 @@ TEST_F(TestCls2PCQueue, Cleanup)
   cls_2pc_queue_init(op, queue_name, max_size);
   ASSERT_EQ(0, ioctx.operate(queue_name, &op));
 
-  // anything older than 100ms is cosidered stale
+  // anything older than 100ms is considered stale
   ceph::coarse_real_time stale_time = ceph::coarse_real_clock::now() + std::chrono::milliseconds(100);
 
   std::vector<std::thread> reservers(max_workers);
   for (auto& r : reservers) {
     r = std::thread([this, &queue_name] {
       librados::ObjectWriteOperation op;
-  	  for (auto i = 0U; i < number_of_ops; ++i) {
+      for (auto i = 0U; i < number_of_ops; ++i) {
         cls_2pc_reservation::id_t res_id = cls_2pc_reservation::NO_ID;
         ASSERT_EQ(cls_2pc_queue_reserve(ioctx, queue_name, size_to_reserve, number_of_elements, res_id), 0);
         ASSERT_NE(res_id, cls_2pc_reservation::NO_ID);
@@ -665,7 +782,7 @@ TEST_F(TestCls2PCQueue, Cleanup)
   }
 }
 
-TEST_F(TestCls2PCQueue, MultiProducer)
+TEST_P(TestCls2PCQueue, MultiProducer)
 {
   const std::string queue_name = __PRETTY_FUNCTION__;
   const auto max_size = 128*1024*1024;
@@ -677,13 +794,13 @@ TEST_F(TestCls2PCQueue, MultiProducer)
   cls_2pc_queue_init(op, queue_name, max_size);
   ASSERT_EQ(0, ioctx.operate(queue_name, &op));
 
-  auto producer_count = max_producer_count;
+  std::atomic<int>  producer_count = max_producer_count;
 
   std::vector<std::thread> producers(max_producer_count);
   for (auto& p : producers) {
     p = std::thread([this, &queue_name, &producer_count] {
-      librados::ObjectWriteOperation op;
-  	  for (auto i = 0U; i < number_of_ops; ++i) {
+      for (auto i = 0U; i < number_of_ops; ++i) {
+        librados::ObjectWriteOperation op;
         const std::string element_prefix("op-" +to_string(i) + "-element-");
         std::vector<bufferlist> data(number_of_elements);
         auto total_size = 0UL;
@@ -706,18 +823,27 @@ TEST_F(TestCls2PCQueue, MultiProducer)
 
   auto consume_count = 0U;
   std::thread consumer([this, &queue_name, &consume_count, &producer_count] {
-          librados::ObjectWriteOperation op;
           const auto max_elements = 42;
           const std::string marker;
-          bool truncated = false;
+          bool truncated = true;
           std::string end_marker;
           std::vector<cls_queue_entry> entries;
           while (producer_count > 0 || truncated) {
             const auto ret = cls_2pc_queue_list_entries(ioctx, queue_name, marker, max_elements, entries, &truncated, end_marker);
-            ASSERT_EQ(0, ret);
-            consume_count += entries.size();
-            cls_2pc_queue_remove_entries(op, end_marker); 
-            ASSERT_EQ(0, ioctx.operate(queue_name, &op));
+            if (ret != 0) {
+              // transient error, retry
+              std::this_thread::sleep_for(std::chrono::milliseconds(10));
+              continue;
+            }
+            if (entries.empty()) {
+              // queue is empty, let it fill
+              std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            } else {
+              consume_count += entries.size();
+              librados::ObjectWriteOperation op;
+              cls_2pc_queue_remove_entries(op, end_marker, max_elements);
+              ASSERT_EQ(0, ioctx.operate(queue_name, &op));
+            }
           }
        });
 
@@ -726,7 +852,7 @@ TEST_F(TestCls2PCQueue, MultiProducer)
   ASSERT_EQ(consume_count, number_of_ops*number_of_elements*max_producer_count);
 }
 
-TEST_F(TestCls2PCQueue, AsyncConsumer)
+TEST_P(TestCls2PCQueue, AsyncConsumer)
 {
   const std::string queue_name = __PRETTY_FUNCTION__;
   constexpr auto max_size = 128*1024*1024;
@@ -736,7 +862,6 @@ TEST_F(TestCls2PCQueue, AsyncConsumer)
   wop.create(true);
   cls_2pc_queue_init(wop, queue_name, max_size);
   ASSERT_EQ(0, ioctx.operate(queue_name, &wop));
-
 
   for (auto i = 0U; i < number_of_ops; ++i) {
     const std::string element_prefix("op-" +to_string(i) + "-element-");
@@ -759,31 +884,31 @@ TEST_F(TestCls2PCQueue, AsyncConsumer)
   constexpr auto max_elements = 42;
   std::string marker;
   std::string end_marker;
-  librados::ObjectReadOperation rop;
   auto consume_count = 0U;
   std::vector<cls_queue_entry> entries;
- 	bool truncated = true;
+  bool truncated = true;
   while (truncated) {
-		bufferlist bl;
-		int rc;
+    librados::ObjectReadOperation rop;
+    bufferlist bl;
+    int rc;
     cls_2pc_queue_list_entries(rop, marker, max_elements, &bl, &rc);
     ASSERT_EQ(0, ioctx.operate(queue_name, &rop, nullptr));
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(cls_2pc_queue_list_entries_result(bl, entries, &truncated, end_marker), 0);
     consume_count += entries.size();
-    cls_2pc_queue_remove_entries(wop, end_marker); 
-		marker = end_marker;
+    cls_2pc_queue_remove_entries(wop, end_marker, max_elements);
+    marker = end_marker;
   }
 
   ASSERT_EQ(consume_count, number_of_ops*number_of_elements);
-	// execute all delete operations in a batch
+  // execute all delete operations in a batch
   ASSERT_EQ(0, ioctx.operate(queue_name, &wop));
   // make sure that queue is empty
   ASSERT_EQ(cls_2pc_queue_list_entries(ioctx, queue_name, marker, max_elements, entries, &truncated, end_marker), 0);
   ASSERT_EQ(entries.size(), 0);
 }
 
-TEST_F(TestCls2PCQueue, MultiProducerConsumer)
+TEST_P(TestCls2PCQueue, MultiProducerConsumer)
 {
   const std::string queue_name = __PRETTY_FUNCTION__;
   const auto max_size = 1024*1024;
@@ -795,15 +920,15 @@ TEST_F(TestCls2PCQueue, MultiProducerConsumer)
   cls_2pc_queue_init(op, queue_name, max_size);
   ASSERT_EQ(0, ioctx.operate(queue_name, &op));
 
-  auto producer_count = max_workers;
+  std::atomic<int> producer_count = max_workers;
 
-  auto retry_happened = false;
+  std::atomic<bool> retry_happened = false;
 
   std::vector<std::thread> producers(max_workers);
   for (auto& p : producers) {
     p = std::thread([this, &queue_name, &producer_count, &retry_happened] {
-      librados::ObjectWriteOperation op;
-  	  for (auto i = 0U; i < number_of_ops; ++i) {
+      for (auto i = 0U; i < number_of_ops; ++i) {
+        librados::ObjectWriteOperation op;
         const std::string element_prefix("op-" +to_string(i) + "-element-");
         std::vector<bufferlist> data(number_of_elements);
         auto total_size = 0UL;
@@ -834,34 +959,65 @@ TEST_F(TestCls2PCQueue, MultiProducerConsumer)
   }
 
   const auto max_elements = 128;
-  std::vector<std::thread> consumers(max_workers/2);
-  for (auto& c : consumers) {
-    c = std::thread([this, &queue_name, &producer_count] {
-          librados::ObjectWriteOperation op;
+  std::vector<std::thread> readers(max_workers/2);
+  for (auto& c : readers) {
+    c = std::thread([this, &queue_name, &producer_count, &retry_happened] {
           const std::string marker;
-          bool truncated = false;
+          bool truncated = true;
           std::string end_marker;
           std::vector<cls_queue_entry> entries;
           while (producer_count > 0 || truncated) {
+            if (!retry_happened) {
+              // queue was never full, let it fill
+              std::this_thread::sleep_for(std::chrono::milliseconds(100));
+              continue;
+            }
             const auto ret = cls_2pc_queue_list_entries(ioctx, queue_name, marker, max_elements, entries, &truncated, end_marker);
-            ASSERT_EQ(0, ret);
+            if (ret != 0) {
+              // transient error, retry
+              std::this_thread::sleep_for(std::chrono::milliseconds(10));
+              continue;
+            }
             if (entries.empty()) {
               // queue is empty, let it fill
               std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            } else {
-              cls_2pc_queue_remove_entries(op, end_marker); 
-              ASSERT_EQ(0, ioctx.operate(queue_name, &op));
             }
           }
        });
   }
+  
+  auto deleter = std::thread([this, &queue_name, &producer_count, &retry_happened] {
+      const std::string marker;
+      bool truncated = true;
+      std::string end_marker;
+      std::vector<cls_queue_entry> entries;
+      while (producer_count > 0 || truncated) {
+        if (!retry_happened) {
+          // queue was never full, let it fill
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+          continue;
+        }
+        const auto ret = cls_2pc_queue_list_entries(ioctx, queue_name, marker, max_elements, entries, &truncated, end_marker);
+        if (ret != 0) {
+          // transient error, retry
+          std::this_thread::sleep_for(std::chrono::milliseconds(10));
+          continue;
+        }
+        if (entries.empty()) {
+          // queue is empty, let it fill
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        } else {
+          librados::ObjectWriteOperation op;
+          cls_2pc_queue_remove_entries(op, end_marker, max_elements);
+          ASSERT_EQ(0, ioctx.operate(queue_name, &op));
+        }
+      }
+  });
 
   std::for_each(producers.begin(), producers.end(), [](auto& p) { p.join(); });
-  std::for_each(consumers.begin(), consumers.end(), [](auto& c) { c.join(); });
-  if (!retry_happened) {
-      std::cerr << "Queue was never full - all reservations were sucessfull." <<
-          "Please decrease the amount of consumer threads" << std::endl;
-  }
+  std::for_each(readers.begin(), readers.end(), [](auto& c) { c.join(); });
+  deleter.join();
+  ASSERT_TRUE(retry_happened);
   // make sure that queue is empty and no reservations remain
   cls_2pc_reservations reservations;
   ASSERT_EQ(0, cls_2pc_queue_list_reservations(ioctx, queue_name, reservations));
@@ -874,7 +1030,7 @@ TEST_F(TestCls2PCQueue, MultiProducerConsumer)
   ASSERT_EQ(entries.size(), 0);
 }
 
-TEST_F(TestCls2PCQueue, ReserveSpillover)
+TEST_P(TestCls2PCQueue, ReserveSpillover)
 {
   const std::string queue_name = __PRETTY_FUNCTION__;
   const auto max_size = 1024U*1024U;
@@ -900,7 +1056,7 @@ TEST_F(TestCls2PCQueue, ReserveSpillover)
   }
 }
 
-TEST_F(TestCls2PCQueue, CommitSpillover)
+TEST_P(TestCls2PCQueue, CommitSpillover)
 {
   const std::string queue_name = __PRETTY_FUNCTION__;
   const auto max_size = 1024U*1024U;
@@ -938,7 +1094,7 @@ TEST_F(TestCls2PCQueue, CommitSpillover)
   ASSERT_EQ(reservations.size(), 0);
 }
 
-TEST_F(TestCls2PCQueue, AbortSpillover)
+TEST_P(TestCls2PCQueue, AbortSpillover)
 {
   const std::string queue_name = __PRETTY_FUNCTION__;
   const auto max_size = 1024U*1024U;
@@ -966,3 +1122,9 @@ TEST_F(TestCls2PCQueue, AbortSpillover)
   ASSERT_EQ(reservations.size(), 0);
 }
 
+INSTANTIATE_TEST_SUITE_P(, TestCls2PCQueue,
+  ::testing::Values(PoolType::REPLICATED, PoolType::FAST_EC),
+  [](const ::testing::TestParamInfo<PoolType>& info) {
+  return pool_type_name(info.param);
+  }
+);

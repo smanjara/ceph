@@ -2,7 +2,8 @@ import { Pipe, PipeTransform } from '@angular/core';
 
 @Pipe({
   name: 'duration',
-  pure: false
+  pure: false,
+  standalone: false
 })
 export class DurationPipe implements PipeTransform {
   /**
@@ -10,7 +11,7 @@ export class DurationPipe implements PipeTransform {
    * source: https://stackoverflow.com/a/34270811
    *
    * @param  {number} seconds The number of seconds to be processed
-   * @return {string}         The phrase describing the the amount of time
+   * @return {string}         The phrase describing the amount of time
    */
   transform(seconds: number): string {
     if (seconds === null || seconds <= 0) {

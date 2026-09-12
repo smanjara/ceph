@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPHFS_MIRROR_INSTANCE_WATCHER_H
 #define CEPHFS_MIRROR_INSTANCE_WATCHER_H
@@ -10,6 +10,7 @@
 #include "include/Context.h"
 #include "include/rados/librados.hpp"
 #include "Watcher.h"
+#include "Types.h"
 
 class ContextWQ;
 
@@ -26,15 +27,15 @@ public:
     }
 
     virtual void acquire_directory(std::string_view dir_path) = 0;
-    virtual void release_directory(std::string_view dir_path) = 0;
+    virtual void release_directory(std::string_view dir_path, bool purging) = 0;
   };
 
   static InstanceWatcher *create(librados::IoCtx &ioctx,
-                                 Listener &listener, ContextWQ *work_queue) {
-    return new InstanceWatcher(ioctx, listener, work_queue);
+                                 Listener &listener, ErrorListener &elistener, ContextWQ *work_queue) {
+    return new InstanceWatcher(ioctx, listener, elistener, work_queue);
   }
 
-  InstanceWatcher(librados::IoCtx &ioctx, Listener &listener, ContextWQ *work_queue);
+  InstanceWatcher(librados::IoCtx &ioctx, Listener &listener, ErrorListener &elistener, ContextWQ *work_queue);
   ~InstanceWatcher();
 
   void init(Context *on_finish);
@@ -57,6 +58,7 @@ public:
 private:
   librados::IoCtx &m_ioctx;
   Listener &m_listener;
+  ErrorListener &m_elistener;
   ContextWQ *m_work_queue;
 
   ceph::mutex m_lock;

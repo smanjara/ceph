@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #pragma once
 
@@ -65,16 +65,106 @@ inline param_vec_t make_param_list(const std::map<std::string, std::string> *pp)
   return params;
 }
 
+/**
+ * ResolvedIP - Per-IP connection status tracking.
+ *
+ * Each resolved IP address has its own failure status. An IP is considered
+ * "down" if last_failure is non-zero and less than rgw_rest_conn_ip_fail_timeout_secs old.
+ * After the timeout, the IP becomes eligible for retry.
+ */
+struct ResolvedIP {
+  std::string connect_to;  // Pre-computed "host:port:ip:port" for CURLOPT_CONNECT_TO
+  mutable std::atomic<ceph::real_time> last_failure;
+
+  ResolvedIP() : last_failure(ceph::real_clock::zero()) {}
+
+  explicit ResolvedIP(std::string _connect_to)
+    : connect_to(std::move(_connect_to)), last_failure(ceph::real_clock::zero()) {}
+
+  // Move & assignment operations (required because std::atomic is not movable)
+  ResolvedIP(ResolvedIP&& o) noexcept
+    : connect_to(std::move(o.connect_to)), last_failure(o.last_failure.load()) {}
+
+  ResolvedIP& operator=(ResolvedIP&& o) noexcept {
+    connect_to = std::move(o.connect_to);
+    last_failure.store(o.last_failure.load());
+    return *this;
+  }
+
+  // Delete copy (std::atomic is not copyable)
+  ResolvedIP(const ResolvedIP&) = delete;
+  ResolvedIP& operator=(const ResolvedIP&) = delete;
+
+  void mark_down() const { last_failure.store(ceph::real_clock::now()); }
+  void mark_up() const { last_failure.store(ceph::real_clock::zero()); }
+};
+
+/**
+ * ResolvedEndpoint - A zone endpoint URL with its resolved IP addresses.
+ *
+ * Tracks per-IP connection status. An endpoint is considered "down" only when
+ * ALL of its IPs are marked as failed (within the retry timeout window).
+ */
+struct ResolvedEndpoint {
+  std::string url;                // e.g., "https://s3.abc.com:8443"
+  std::string scheme;             // e.g., "https"
+  std::string host;               // e.g., "s3.abc.com"
+  int port = -1;                  // e.g., 8443
+  std::vector<ResolvedIP> resolved_ips;  // Per-IP connect_to strings with health status
+  mutable std::atomic<size_t> ip_rr_index{0};    // round-robin index for IPs
+  mutable std::atomic<ceph::real_time> last_failure_time; // most recent IP failure seen on this endpoint
+
+  ResolvedEndpoint() : last_failure_time(ceph::real_clock::zero()) {}
+
+  // Custom move constructor (required because of atomics in ResolvedIP)
+  ResolvedEndpoint(ResolvedEndpoint&& other) noexcept
+    : url(std::move(other.url)),
+      scheme(std::move(other.scheme)),
+      host(std::move(other.host)),
+      port(other.port),
+      resolved_ips(std::move(other.resolved_ips)),
+      ip_rr_index(other.ip_rr_index.load()),
+      last_failure_time(other.last_failure_time.load())
+  {}
+
+  // Custom move assignment
+  ResolvedEndpoint& operator=(ResolvedEndpoint&& other) noexcept {
+    url = std::move(other.url);
+    scheme = std::move(other.scheme);
+    host = std::move(other.host);
+    port = other.port;
+    resolved_ips = std::move(other.resolved_ips);
+    ip_rr_index.store(other.ip_rr_index.load());
+    last_failure_time.store(other.last_failure_time.load());
+    return *this;
+  }
+
+  // Delete copy operations
+  ResolvedEndpoint(const ResolvedEndpoint&) = delete;
+  ResolvedEndpoint& operator=(const ResolvedEndpoint&) = delete;
+
+  // Find IP status by connect_to string
+  ResolvedIP* find_ip_status(const std::string& connect_to_str) {
+    for (auto& ip : resolved_ips) {
+      if (ip.connect_to == connect_to_str) return &ip;
+    }
+    return nullptr;
+  }
+};
+
 class RGWRESTConn
 {
   CephContext *cct;
-  std::vector<std::string> endpoints;
+  std::atomic<int64_t> endpoint_rr_index = { 0 }; // Round-robin counter for resolved_endpoints
+  std::atomic<bool> in_endpoint_fallback = { false }; // Set while no endpoint has a usable IP
+  std::vector<ResolvedEndpoint> resolved_endpoints;
   RGWAccessKey key;
   std::string self_zone_group;
   std::string remote_id;
   std::optional<std::string> api_name;
   HostStyle host_style;
-  std::atomic<int64_t> counter = { 0 };
+
+  void resolve_endpoints(void);
 
 public:
 
@@ -97,8 +187,11 @@ public:
   RGWRESTConn& operator=(RGWRESTConn&& other);
   virtual ~RGWRESTConn() = default;
 
-  int get_url(std::string& endpoint);
-  std::string get_url();
+  int get_endpoint(RGWEndpoint& endpoint);
+  RGWEndpoint get_endpoint();
+  const std::vector<ResolvedEndpoint>& get_resolved_endpoints() const { return resolved_endpoints; }
+  ResolvedEndpoint* find_resolved_endpoint(const std::string& url);
+  void set_endpoint_unconnectable(const RGWEndpoint& endpoint);
   const std::string& get_self_zonegroup() {
     return self_zone_group;
   }
@@ -120,26 +213,36 @@ public:
   CephContext *get_ctx() {
     return cct;
   }
-  size_t get_endpoint_count() const { return endpoints.size(); }
+  size_t get_endpoint_count() const { return resolved_endpoints.size(); }
 
-  virtual void populate_params(param_vec_t& params, const rgw_user *uid, const std::string& zonegroup);
-
-  /* sync request */
-  int forward(const DoutPrefixProvider *dpp, const rgw_user& uid, req_info& info, obj_version *objv, size_t max_response, bufferlist *inbl, bufferlist *outbl, optional_yield y);
+  virtual void populate_params(param_vec_t& params, const rgw_owner* uid, const std::string& zonegroup);
 
   /* sync request */
-  int forward_iam_request(const DoutPrefixProvider *dpp, const RGWAccessKey& key, req_info& info, obj_version *objv, size_t max_response, bufferlist *inbl, bufferlist *outbl, optional_yield y);
+  auto forward(const DoutPrefixProvider *dpp, const rgw_owner& uid,
+               const req_info& info, size_t max_response,
+               bufferlist *inbl, bufferlist *outbl, optional_yield y)
+    -> tl::expected<int, int>;
 
+  /* sync request */
+  auto forward_iam(const DoutPrefixProvider *dpp, const req_info& info,
+                   size_t max_response, bufferlist *inbl,
+                   bufferlist *outbl, optional_yield y)
+    -> tl::expected<int, int>;
 
   /* async requests */
-  int put_obj_send_init(rgw::sal::Object* obj, const rgw_http_param_pair *extra_params, RGWRESTStreamS3PutObj **req);
-  int put_obj_async_init(const DoutPrefixProvider *dpp, const rgw_user& uid, rgw::sal::Object* obj,
+  int put_obj_send_init(const rgw_obj& obj, const rgw_http_param_pair *extra_params, RGWRESTStreamS3PutObj **req);
+  int put_obj_async_init(const DoutPrefixProvider *dpp, const rgw_owner& uid, const rgw_obj& obj,
                          std::map<std::string, bufferlist>& attrs, RGWRESTStreamS3PutObj **req);
-  int complete_request(RGWRESTStreamS3PutObj *req, std::string& etag,
+  int complete_request(const DoutPrefixProvider* dpp,
+                       RGWRESTStreamS3PutObj *req, std::string& etag,
                        ceph::real_time *mtime, optional_yield y);
 
+  /* pick an IP to 'connect-to' given the endpoint url */
+  void populate_connect_to(RGWEndpoint& endpoint, ResolvedEndpoint& res_ep);
+
   struct get_obj_params {
-    rgw_user uid;
+    const rgw_owner *uid{nullptr};
+    const rgw_user *perm_check_uid{nullptr};
     req_info *info{nullptr};
     const ceph::real_time *mod_ptr{nullptr};
     const ceph::real_time *unmod_ptr{nullptr};
@@ -154,6 +257,7 @@ public:
     bool get_op{false};
     bool rgwx_stat{false};
     bool sync_manifest{false};
+    bool sync_cloudtiered{false};
 
     bool skip_decrypt{true};
     RGWHTTPStreamRWRequest::ReceiveCB *cb{nullptr};
@@ -161,16 +265,21 @@ public:
     bool range_is_set{false};
     uint64_t range_start{0};
     uint64_t range_end{0};
+    rgw_zone_set_entry *dst_zone_trace{nullptr};
   };
 
-  int get_obj(const DoutPrefixProvider *dpp, const rgw::sal::Object* obj, const get_obj_params& params, bool send, RGWRESTStreamRWRequest **req);
+  int get_obj(const DoutPrefixProvider *dpp, const rgw_obj& obj, const get_obj_params& params, bool send, RGWRESTStreamRWRequest **req);
 
-  int get_obj(const DoutPrefixProvider *dpp, const rgw_user& uid, req_info *info /* optional */, const rgw::sal::Object* obj,
+  int get_obj(const DoutPrefixProvider *dpp, const rgw_owner* uid,
+              const rgw_user* perm_check_uid,
+              req_info *info /* optional */, const rgw_obj& obj,
               const ceph::real_time *mod_ptr, const ceph::real_time *unmod_ptr,
               uint32_t mod_zone_id, uint64_t mod_pg_ver,
               bool prepend_metadata, bool get_op, bool rgwx_stat, bool sync_manifest,
-              bool skip_decrypt, bool send, RGWHTTPStreamRWRequest::ReceiveCB *cb, RGWRESTStreamRWRequest **req);
-  int complete_request(RGWRESTStreamRWRequest *req,
+              bool skip_decrypt, rgw_zone_set_entry *dst_zone_trace, bool sync_cloudtiered,
+              bool send, RGWHTTPStreamRWRequest::ReceiveCB *cb, RGWRESTStreamRWRequest **req);
+  int complete_request(const DoutPrefixProvider* dpp,
+                       RGWRESTStreamRWRequest *req,
                        std::string *etag,
                        ceph::real_time *mtime,
                        uint64_t *psize,
@@ -213,12 +322,9 @@ private:
       params.push_back(param_pair_t(RGW_SYS_PARAM_PREFIX "zonegroup", zonegroup));
     }
   }
-  void populate_uid(param_vec_t& params, const rgw_user *uid) {
+  void populate_uid(param_vec_t& params, const rgw_owner* uid) {
     if (uid) {
-      std::string uid_str = uid->to_str();
-      if (!uid->empty()){
-        params.push_back(param_pair_t(RGW_SYS_PARAM_PREFIX "uid", uid_str));
-      }
+      params.emplace_back(RGW_SYS_PARAM_PREFIX "uid", to_string(*uid));
     }
   }
 };
@@ -233,7 +339,8 @@ public:
     RGWRESTConn(_cct, _remote_id, endpoints, _cred, _zone_group, _api_name, _host_style) {}
   ~S3RESTConn() override = default;
 
-  void populate_params(param_vec_t& params, const rgw_user *uid, const std::string& zonegroup) override {
+  void populate_params(param_vec_t& params, const rgw_owner* uid,
+                       const std::string& zonegroup) override {
     // do not populate any params in S3 REST Connection.
     return;
   }
@@ -338,9 +445,12 @@ public:
     return req.get_http_status();
   }
 
-  int wait(bufferlist *pbl, optional_yield y) {
-    int ret = req.wait(y);
+  int wait(const DoutPrefixProvider* dpp, bufferlist *pbl, optional_yield y) {
+    int ret = req.wait(dpp, y);
     if (ret < 0) {
+      if (ret == -ERR_INTERNAL_ERROR) {
+        conn->set_endpoint_unconnectable(req.get_endpoint());
+      }
       return ret;
     }
 
@@ -352,7 +462,7 @@ public:
   }
 
   template <class T>
-  int wait(T *dest, optional_yield y);
+  int wait(const DoutPrefixProvider* dpp, T *dest, optional_yield y);
 
   template <class T>
   int fetch(const DoutPrefixProvider *dpp, T *dest, optional_yield y);
@@ -389,10 +499,14 @@ int RGWRESTReadResource::fetch(const DoutPrefixProvider *dpp, T *dest, optional_
 }
 
 template <class T>
-int RGWRESTReadResource::wait(T *dest, optional_yield y)
+int RGWRESTReadResource::wait(const DoutPrefixProvider* dpp, T *dest,
+                              optional_yield y)
 {
-  int ret = req.wait(y);
+  int ret = req.wait(dpp, y);
   if (ret < 0) {
+    if (ret == -ERR_INTERNAL_ERROR) {
+      conn->set_endpoint_unconnectable(req.get_endpoint());
+    }
     return ret;
   }
 
@@ -460,9 +574,14 @@ public:
   }
 
   template <class E = int>
-  int wait(bufferlist *pbl, optional_yield y, E *err_result = nullptr) {
-    int ret = req.wait(y);
+  int wait(const DoutPrefixProvider* dpp, bufferlist *pbl,
+           optional_yield y, E *err_result = nullptr) {
+    int ret = req.wait(dpp, y);
     *pbl = bl;
+
+    if (ret == -ERR_INTERNAL_ERROR) {
+      conn->set_endpoint_unconnectable(req.get_endpoint());
+    }
 
     if (ret < 0 && err_result ) {
       ret = parse_decode_json(*err_result, bl);
@@ -472,13 +591,19 @@ public:
   }
 
   template <class T, class E = int>
-  int wait(T *dest, optional_yield y, E *err_result = nullptr);
+  int wait(const DoutPrefixProvider* dpp, T *dest,
+           optional_yield y, E *err_result = nullptr);
 };
 
 template <class T, class E>
-int RGWRESTSendResource::wait(T *dest, optional_yield y, E *err_result)
+int RGWRESTSendResource::wait(const DoutPrefixProvider* dpp, T *dest,
+                              optional_yield y, E *err_result)
 {
-  int ret = req.wait(y);
+  int ret = req.wait(dpp, y);
+  if (ret == -ERR_INTERNAL_ERROR) {
+    conn->set_endpoint_unconnectable(req.get_endpoint());
+  }
+
   if (ret >= 0) {
     ret = req.get_status();
   }

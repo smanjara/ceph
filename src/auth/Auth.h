@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -16,7 +17,19 @@
 #define CEPH_AUTHTYPES_H
 
 #include "Crypto.h"
+#include "common/CanHasPrint.h"
 #include "common/entity_name.h"
+#include "include/buffer.h"
+#include "include/ceph_fs.h" // for CEPH_AUTH_UNKNOWN
+#include "include/common_fwd.h"
+
+#include <cstdint>
+#include <iosfwd>
+#include <list>
+#include <map>
+#include <string>
+
+namespace ceph { class Formatter; }
 
 // The _MAX values are a bit wonky here because we are overloading the first
 // byte of the auth payload to identify both the type of authentication to be
@@ -36,41 +49,19 @@ struct EntityAuth {
   std::map<std::string, ceph::buffer::list> caps;
   CryptoKey pending_key; ///< new but uncommitted key
 
-  void encode(ceph::buffer::list& bl) const {
-    __u8 struct_v = 3;
-    using ceph::encode;
-    encode(struct_v, bl);
-    encode((uint64_t)CEPH_AUTH_UID_DEFAULT, bl);
-    encode(key, bl);
-    encode(caps, bl);
-    encode(pending_key, bl);
-  }
-  void decode(ceph::buffer::list::const_iterator& bl) {
-    using ceph::decode;
-    __u8 struct_v;
-    decode(struct_v, bl);
-    if (struct_v >= 2) {
-      uint64_t old_auid;
-      decode(old_auid, bl);
+  void print(std::ostream& out) const {
+    out << "auth(key=" << key;
+    if (!pending_key.empty()) {
+      out << " pending_key=" << pending_key;
     }
-    decode(key, bl);
-    decode(caps, bl);
-    if (struct_v >= 3) {
-      decode(pending_key, bl);
-    }
+    out << ")";
   }
+  void encode(ceph::buffer::list& bl) const;
+  void decode(ceph::buffer::list::const_iterator& bl);
+  void dump(ceph::Formatter *f) const;
+  static std::list<EntityAuth> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(EntityAuth)
-
-inline std::ostream& operator<<(std::ostream& out, const EntityAuth& a)
-{
-  out << "auth(key=" << a.key;
-  if (!a.pending_key.empty()) {
-    out << " pending_key=" << a.pending_key;
-  }
-  out << ")";
-  return out;
-}
 
 struct AuthCapsInfo {
   bool allow_all;
@@ -78,23 +69,10 @@ struct AuthCapsInfo {
 
   AuthCapsInfo() : allow_all(false) {}
 
-  void encode(ceph::buffer::list& bl) const {
-    using ceph::encode;
-    __u8 struct_v = 1;
-    encode(struct_v, bl);
-    __u8 a = (__u8)allow_all;
-    encode(a, bl);
-    encode(caps, bl);
-  }
-  void decode(ceph::buffer::list::const_iterator& bl) {
-    using ceph::decode;
-    __u8 struct_v;
-    decode(struct_v, bl);
-    __u8 a;
-    decode(a, bl);
-    allow_all = (bool)a;
-    decode(caps, bl);
-  }
+  void encode(ceph::buffer::list& bl) const;
+  void decode(ceph::buffer::list::const_iterator& bl);
+  void dump(ceph::Formatter *f) const;
+  static std::list<AuthCapsInfo> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(AuthCapsInfo)
 
@@ -106,7 +84,7 @@ WRITE_CLASS_ENCODER(AuthCapsInfo)
 struct AuthTicket {
   EntityName name;
   uint64_t global_id; /* global instance id */
-  utime_t created, renew_after, expires;
+  utime_t created, expires;
   AuthCapsInfo caps;
   __u32 flags;
 
@@ -116,37 +94,12 @@ struct AuthTicket {
     created = now;
     expires = now;
     expires += ttl;
-    renew_after = now;
-    renew_after += ttl / 2.0;
   }
 
-  void encode(ceph::buffer::list& bl) const {
-    using ceph::encode;
-    __u8 struct_v = 2;
-    encode(struct_v, bl);
-    encode(name, bl);
-    encode(global_id, bl);
-    encode((uint64_t)CEPH_AUTH_UID_DEFAULT, bl);
-    encode(created, bl);
-    encode(expires, bl);
-    encode(caps, bl);
-    encode(flags, bl);
-  }
-  void decode(ceph::buffer::list::const_iterator& bl) {
-    using ceph::decode;
-    __u8 struct_v;
-    decode(struct_v, bl);
-    decode(name, bl);
-    decode(global_id, bl);
-    if (struct_v >= 2) {
-      uint64_t old_auid;
-      decode(old_auid, bl);
-    }
-    decode(created, bl);
-    decode(expires, bl);
-    decode(caps, bl);
-    decode(flags, bl);
-  }
+  void encode(ceph::buffer::list& bl) const;
+  void decode(ceph::buffer::list::const_iterator& bl);
+  void dump(ceph::Formatter *f) const;
+  static std::list<AuthTicket> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(AuthTicket)
 
@@ -217,6 +170,9 @@ struct ExpiringCryptoKey {
   CryptoKey key;
   utime_t expiration;
 
+  void print(std::ostream& out) const {
+    out << key << " expires " << expiration;
+  }
   void encode(ceph::buffer::list& bl) const {
     using ceph::encode;
     __u8 struct_v = 1;
@@ -231,13 +187,10 @@ struct ExpiringCryptoKey {
     decode(key, bl);
     decode(expiration, bl);
   }
+  void dump(ceph::Formatter *f) const;
+  static std::list<ExpiringCryptoKey> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(ExpiringCryptoKey)
-
-inline std::ostream& operator<<(std::ostream& out, const ExpiringCryptoKey& c)
-{
-  return out << c.key << " expires " << c.expiration;
-}
 
 struct RotatingSecrets {
   std::map<uint64_t, ExpiringCryptoKey> secrets;
@@ -245,20 +198,8 @@ struct RotatingSecrets {
 
   RotatingSecrets() : max_ver(0) {}
 
-  void encode(ceph::buffer::list& bl) const {
-    using ceph::encode;
-    __u8 struct_v = 1;
-    encode(struct_v, bl);
-    encode(secrets, bl);
-    encode(max_ver, bl);
-  }
-  void decode(ceph::buffer::list::const_iterator& bl) {
-    using ceph::decode;
-    __u8 struct_v;
-    decode(struct_v, bl);
-    decode(secrets, bl);
-    decode(max_ver, bl);
-  }
+  void encode(ceph::buffer::list& bl) const;
+  void decode(ceph::buffer::list::const_iterator& bl);
   
   uint64_t add(ExpiringCryptoKey& key) {
     secrets[++max_ver] = key;
@@ -293,8 +234,19 @@ struct RotatingSecrets {
   bool empty() {
     return secrets.empty();
   }
+  void wipe() {
+    secrets.clear();
+  }
+  auto begin() const {
+    return secrets.begin();
+  }
+  auto end() const {
+    return secrets.end();
+  }
 
   void dump();
+  void dump(ceph::Formatter *f) const;
+  static std::list<RotatingSecrets> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(RotatingSecrets)
 
@@ -302,7 +254,7 @@ WRITE_CLASS_ENCODER(RotatingSecrets)
 
 class KeyStore {
 public:
-  virtual ~KeyStore() {}
+  virtual ~KeyStore() = default;
   virtual bool get_secret(const EntityName& name, CryptoKey& secret) const = 0;
   virtual bool get_service_secret(uint32_t service_id, uint64_t secret_id,
 				  CryptoKey& secret) const = 0;

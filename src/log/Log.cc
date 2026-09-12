@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "Log.h"
 
@@ -31,6 +31,7 @@
 
 #include <fmt/format.h>
 #include <fmt/ostream.h>
+#include <fmt/ranges.h>
 
 #define MAX_LOG_BUF 65536
 
@@ -39,12 +40,22 @@ namespace logging {
 
 static OnExitManager exit_callbacks;
 
+// Static hook for getting log prefix (set by tests).
+// NOTE: Not thread-safe. Intended for single-threaded unit test harnesses
+// and should be set once during startup.
+static Log::prefix_hook_t prefix_hook = nullptr;
+
 static void log_on_exit(void *p)
 {
   Log *l = *(Log **)p;
   if (l)
     l->flush();
   delete (Log **)p;// Delete allocated pointer (not Log object, the pointer only!)
+}
+
+void Log::set_prefix_hook(prefix_hook_t hook)
+{
+  prefix_hook = hook;
 }
 
 Log::Log(const SubsystemMap *s)
@@ -372,6 +383,7 @@ void Log::_flush_logbuf()
 
 void Log::_flush(EntryVector& t, bool crash)
 {
+  auto now = mono_clock::now();
   long len = 0;
   if (t.empty()) {
     assert(m_log_buf.empty());
@@ -407,7 +419,15 @@ void Log::_flush(EntryVector& t, bool crash)
         used += (std::size_t)snprintf(pos + used, allocated - used, "%6ld> ", -(--len));
       }
       used += (std::size_t)append_time(stamp, pos + used, allocated - used);
-      used += (std::size_t)snprintf(pos + used, allocated - used, " %lx %2d ", (unsigned long)thread, prio);
+      
+      // In tests, replace thread ID with custom prefix (e.g., "osd.X" or "harness")
+      const char* prefix = prefix_hook ? prefix_hook() : nullptr;
+      if (prefix) {
+        used += (std::size_t)snprintf(pos + used, allocated - used, " %s %2d ", prefix, prio);
+      } else {
+        used += (std::size_t)snprintf(pos + used, allocated - used, " %lx %2d ", (unsigned long)thread, prio);
+      }
+      
       memcpy(pos + used, str.data(), str.size());
       used += str.size();
       pos[used] = '\0';
@@ -443,9 +463,28 @@ void Log::_flush(EntryVector& t, bool crash)
       m_journald->log_entry(e);
     }
 
+    {
+      auto [it, _] = m_recent_thread_names.try_emplace(e.m_thread, now, DEFAULT_MAX_THREAD_NAMES);
+      auto& [t, names] = it->second;
+      if (names.size() == 0 || names.front() != e.m_thread_name.data()) {
+        names.push_front(e.m_thread_name.data());
+      }
+      t = now;
+    }
+
     m_recent.push_back(std::move(e));
   }
   t.clear();
+
+  for (auto it = m_recent_thread_names.begin(); it != m_recent_thread_names.end(); ) {
+    auto t = it->second.first;
+    auto since = now - t;
+    if (since > std::chrono::seconds(60*60*24)) {
+      it = m_recent_thread_names.erase(it);
+    } else {
+      ++it;
+    }
+  }
 
   _flush_logbuf();
 }
@@ -493,14 +532,10 @@ void Log::dump_recent()
   _flush(m_flush, false);
 
   _log_message("--- begin dump of recent events ---", true);
-  std::set<pthread_t> recent_pthread_ids;
   {
     EntryVector t;
     t.insert(t.end(), std::make_move_iterator(m_recent.begin()), std::make_move_iterator(m_recent.end()));
     m_recent.clear();
-    for (const auto& e : t) {
-      recent_pthread_ids.emplace(e.m_thread);
-    }
     _flush(t, true);
   }
 
@@ -515,14 +550,15 @@ void Log::dump_recent()
 			   m_stderr_log, m_stderr_crash), true);
 
   _log_message("--- pthread ID / name mapping for recent threads ---", true);
-  for (const auto pthread_id : recent_pthread_ids)
+  for (const auto& [tid, t_names] : m_recent_thread_names)
   {
-    char pthread_name[16] = {0}; //limited by 16B include terminating null byte.
-    ceph_pthread_getname(pthread_id, pthread_name, sizeof(pthread_name));
+    [[maybe_unused]] auto [t, names] = t_names;
     // we want the ID to be printed in the same format as we use for a log entry.
     // The reason is easier grepping.
-    _log_message(fmt::format("  {:x} / {}",
-			     tid_to_int(pthread_id), pthread_name), true);
+    auto msg = fmt::format("  {:x} / {}",
+      tid_to_int(tid),
+      fmt::join(names, ", "));
+    _log_message(msg, true);
   }
 
   _log_message(fmt::format("  max_recent {:9}", m_recent.capacity()), true);

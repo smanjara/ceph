@@ -5,6 +5,7 @@ import { environment } from '~/environments/environment';
 export class AppConstants {
   public static readonly organization = 'ceph';
   public static readonly projectName = 'Ceph Dashboard';
+  public static readonly defaultUser = 'dashboard';
   public static readonly license = 'Free software (LGPL 2.1).';
   public static readonly copyright = 'Copyright(c) ' + environment.year + ' Ceph contributors.';
   public static readonly cephLogo = 'assets/Ceph_Logo.svg';
@@ -32,13 +33,19 @@ export enum URLVerbs {
   /* Non-standard verbs */
   COPY = 'copy',
   CLONE = 'clone',
+  VIEW = 'view',
 
   /* Prometheus wording */
   RECREATE = 'recreate',
   EXPIRE = 'expire',
 
   /* Daemons */
-  RESTART = 'Restart'
+  RESTART = 'Restart',
+
+  /* Multi-cluster */
+  CONNECT = 'connect',
+  RECONNECT = 'reconnect',
+  GATEWAY_GROUP = 'Gateway group'
 }
 
 export enum ActionLabels {
@@ -77,7 +84,16 @@ export enum ActionLabels {
   START = 'Start',
   STOP = 'Stop',
   REDEPLOY = 'Redeploy',
-  RESTART = 'Restart'
+  RESTART = 'Restart',
+
+  /* Multi-cluster */
+  CONNECT = 'connect',
+  RECONNECT = 'reconnect',
+  VIEW = 'View',
+
+  /* Hosts */
+  MAINTENANCE = 'Maintenance',
+  DRAIN = 'Drain'
 }
 
 @Injectable({
@@ -97,6 +113,8 @@ export class ActionLabelsI18n {
   MOVE: string;
   NEXT: string;
   BACK: string;
+  PREVIOUS: string;
+  CREATING: string;
   CHANGE: string;
   COPY: string;
   CLONE: string;
@@ -120,6 +138,7 @@ export class ActionLabelsI18n {
   SET: string;
   SUBMIT: string;
   SHOW: string;
+  TIERING: string;
   TRASH: string;
   UNPROTECT: string;
   UNSET: string;
@@ -137,10 +156,34 @@ export class ActionLabelsI18n {
   REDEPLOY: string;
   RESTART: string;
   RESYNC: string;
-
+  EXPORT: string;
+  IMPORT: any;
+  MIGRATE: string;
+  START_UPGRADE: string;
+  ACTIVATE: string;
+  DEACTIVATE: string;
+  ATTACH: string;
+  CONNECT: string;
+  DISCONNECT: string;
+  RECONNECT: string;
+  AUTHORIZE: string;
+  ADD_STORAGE: string;
+  SETUP_MULTISITE_REPLICATION: string;
+  NFS_EXPORT: string;
+  VIEW: string;
+  EDIT_GATEWAYS_GROUP: string;
+  SAVE_CHANGES: string;
   constructor() {
     /* Create a new item */
     this.CREATE = $localize`Create`;
+
+    this.EXPORT = $localize`Export`;
+
+    this.IMPORT = $localize`Import`;
+
+    this.SETUP_MULTISITE_REPLICATION = $localize`Setup Multi-site Replication`;
+
+    this.MIGRATE = $localize`Migrate`;
 
     /* Destroy an existing item */
     this.DELETE = $localize`Delete`;
@@ -164,6 +207,8 @@ export class ActionLabelsI18n {
     /* Wizard wording */
     this.NEXT = $localize`Next`;
     this.BACK = $localize`Back`;
+    this.PREVIOUS = $localize`Previous`;
+    this.CREATING = $localize`Creating`;
 
     /* Non-standard actions */
     this.CLONE = $localize`Clone`;
@@ -184,12 +229,14 @@ export class ActionLabelsI18n {
     this.ROLLBACK = $localize`Rollback`;
     this.SCRUB = $localize`Scrub`;
     this.SHOW = $localize`Show`;
+    this.TIERING = $localize`Tiering`;
     this.TRASH = $localize`Move to Trash`;
     this.UNPROTECT = $localize`Unprotect`;
     this.CHANGE = $localize`Change`;
     this.FLAGS = $localize`Flags`;
     this.ENTER_MAINTENANCE = $localize`Enter Maintenance`;
     this.EXIT_MAINTENANCE = $localize`Exit Maintenance`;
+    this.AUTHORIZE = $localize`Authorize`;
 
     this.START_DRAIN = $localize`Start Drain`;
     this.STOP_DRAIN = $localize`Stop Drain`;
@@ -206,6 +253,22 @@ export class ActionLabelsI18n {
     this.REMOVE_SCHEDULING = $localize`Remove Scheduling`;
     this.PROMOTE = $localize`Promote`;
     this.DEMOTE = $localize`Demote`;
+
+    this.START_UPGRADE = $localize`Start Upgrade`;
+
+    this.ACTIVATE = $localize`Activate`;
+    this.DEACTIVATE = $localize`Deactivate`;
+
+    this.ATTACH = $localize`Attach`;
+    this.CONNECT = $localize`Connect`;
+    this.DISCONNECT = $localize`Disconnect`;
+    this.RECONNECT = $localize`Reconnect`;
+    this.ADD_STORAGE = $localize`Add Storage`;
+
+    this.NFS_EXPORT = $localize`Create NFS Share`;
+    this.VIEW = $localize`View`;
+    this.EDIT_GATEWAYS_GROUP = $localize`Edit gateways group`;
+    this.SAVE_CHANGES = $localize`Save changes`;
   }
 }
 
@@ -224,6 +287,8 @@ export class SucceededActionLabelsI18n {
   CANCELED: string;
   PREVIEWED: string;
   MOVED: string;
+  EXPORT: string;
+  IMPORT: string;
   COPIED: string;
   CLONED: string;
   DEEP_SCRUBBED: string;
@@ -303,3 +368,39 @@ export class SucceededActionLabelsI18n {
     this.RESTART = $localize`Restart`;
   }
 }
+
+@Injectable({
+  providedIn: 'root'
+})
+export class TimerServiceInterval {
+  TIMER_SERVICE_PERIOD: number;
+
+  constructor() {
+    this.TIMER_SERVICE_PERIOD = 5000;
+  }
+}
+
+export const SSL_PROTOCOLS = ['TLSv1.2', 'TLSv1.3'];
+
+export const SSL_CIPHERS = [
+  'ECDHE',
+  'ECDSA',
+  'AES128',
+  'GCM',
+  'SHA256',
+  'RSA',
+  'AES256',
+  'SHA384',
+  'CHACHA20',
+  'POLY1305',
+  'DHE'
+];
+
+export const USER = 'user';
+export const VERSION_PREFIX = 'ceph version';
+
+export const CEPHFS_MIRRORING_PAGE_HEADER = {
+  title: $localize`Filesystem Mirroring`,
+  subtitle: $localize`Manage snapshot-based replication for CephFS across clusters.`,
+  description: $localize`Configure mirroring between filesystems and monitor replication status.`
+};

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -13,8 +13,7 @@
  *
  */
 
-#ifndef RGW_TOKEN_H
-#define RGW_TOKEN_H
+#pragma once
 
 #include <stdint.h>
 #include <boost/algorithm/string.hpp>
@@ -169,5 +168,3 @@ namespace rgw {
   }
 
 } /* namespace rgw */
-
-#endif /* RGW_TOKEN_H */

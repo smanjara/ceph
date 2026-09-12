@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "value.h"
 
@@ -82,9 +82,45 @@ Value::do_prepare_mutate_payload(Transaction& t)
    return p_cursor->prepare_mutate_value_payload(get_context(t));
 }
 
-laddr_t Value::get_hint() const
+laddr_hint_t Value::init_hint(
+  extent_len_t block_size,
+  bool is_metadata) const
 {
-  return p_cursor->get_key_view(vb.get_header_magic()).get_hint();
+  if (is_metadata) {
+    return p_cursor->get_key_view(vb.get_header_magic())
+        .create_fresh_object_md_hint(block_size);
+  } else {
+    return p_cursor->get_key_view(vb.get_header_magic())
+        .create_fresh_object_data_hint(block_size);
+  }
+}
+
+laddr_hint_t Value::generate_temp_hint(
+  local_object_id_t object_id,
+  extent_len_t block_size,
+  bool is_metadata) const
+{
+  if (is_metadata) {
+    return p_cursor->get_key_view(vb.get_header_magic())
+        .create_temp_object_md_hint(object_id, block_size);
+  } else {
+    return p_cursor->get_key_view(vb.get_header_magic())
+        .create_temp_object_data_hint(object_id, block_size);
+  }
+}
+
+laddr_hint_t Value::generate_clone_hint(
+  local_object_id_t object_id,
+  extent_len_t block_size,
+  bool is_metadata) const
+{
+  if (is_metadata) {
+    return p_cursor->get_key_view(vb.get_header_magic())
+        .create_clone_object_md_hint(object_id, block_size);
+  } else {
+    return p_cursor->get_key_view(vb.get_header_magic())
+        .create_clone_object_data_hint(object_id, block_size);
+  }
 }
 
 std::unique_ptr<ValueDeltaRecorder>
@@ -138,7 +174,7 @@ void validate_tree_config(const tree_conf_t& conf)
 #define _STAGE_T(NodeType) node_to_stage_t<typename NodeType::node_stage_t>
 #define NXT_T(StageType)  staged<typename StageType::next_param_t>
 
-    laddr_t i_value{0};
+    laddr_t i_value = L_ADDR_MIN;
     auto insert_size_2 =
       _STAGE_T(InternalNode0)::insert_size(key, i_value);
     auto insert_size_0 =

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_IO_IMAGE_DISPATCHER_H
 #define CEPH_LIBRBD_IO_IMAGE_DISPATCHER_H
@@ -45,9 +45,6 @@ public:
 
   void unblock_writes() override;
   void wait_on_writes_unblocked(Context *on_unblocked) override;
-
-  void remap_to_physical(Extents& image_extents, ImageArea area) override;
-  ImageArea remap_to_logical(Extents& image_extents) override;
 
 protected:
   bool send_dispatch(

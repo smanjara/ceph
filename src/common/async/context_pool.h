@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -16,7 +17,7 @@
 #ifndef CEPH_COMMON_ASYNC_CONTEXT_POOL_H
 #define CEPH_COMMON_ASYNC_CONTEXT_POOL_H
 
-#include <cstddef>
+#include <concepts>
 #include <cstdint>
 #include <mutex>
 #include <optional>
@@ -46,8 +47,13 @@ class io_context_pool {
   }
 public:
   io_context_pool() noexcept {}
-  io_context_pool(std::int16_t threadcnt) noexcept {
+
+  io_context_pool(std::int64_t threadcnt) noexcept {
     start(threadcnt);
+  }
+  template<std::invocable<> Init>
+  io_context_pool(std::int64_t threadcnt, Init&& init) noexcept {
+    start(threadcnt, std::forward<Init>(init));
   }
   ~io_context_pool() {
     stop();
@@ -59,7 +65,22 @@ public:
       ioctx.restart();
       for (std::int16_t i = 0; i < threadcnt; ++i) {
 	threadvec.emplace_back(make_named_thread("io_context_pool",
-						 [this]() {
+						 [this] {
+						   ioctx.run();
+						 }));
+      }
+    }
+  }
+  template<std::invocable<> Init>
+  void start(std::int16_t threadcnt, Init&& init) noexcept {
+    auto l = std::scoped_lock(m);
+    if (threadvec.empty()) {
+      guard.emplace(boost::asio::make_work_guard(ioctx));
+      ioctx.restart();
+      for (std::int16_t i = 0; i < threadcnt; ++i) {
+	threadvec.emplace_back(make_named_thread("io_context_pool",
+						 [this, init] {
+						   init();
 						   ioctx.run();
 						 }));
       }
@@ -85,6 +106,7 @@ public:
   operator boost::asio::io_context&() {
     return ioctx;
   }
+  using executor_type = boost::asio::io_context::executor_type;
   boost::asio::io_context::executor_type get_executor() {
     return ioctx.get_executor();
   }

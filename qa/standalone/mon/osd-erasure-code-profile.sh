@@ -23,7 +23,7 @@ function run() {
 
     export CEPH_MON="127.0.0.1:7220" # git grep '\<7220\>' : there must be only one
     export CEPH_ARGS
-    CEPH_ARGS+="--fsid=$(uuidgen) --auth-supported=none "
+    CEPH_ARGS+="--fsid=$(uuidgen) --auth_cluster_required=none --auth_service_required=none --auth_client_required=none "
     CEPH_ARGS+="--mon-host=$CEPH_MON "
 
     local funcs=${@:-$(set | sed -n -e 's/^\(TEST_[0-9a-z_]*\) .*/\1/p')}
@@ -46,21 +46,22 @@ function TEST_set() {
     #
     ceph osd erasure-code-profile set $profile 2>&1 || return 1
     ceph osd erasure-code-profile get $profile | \
-        grep plugin=jerasure || return 1
+        grep plugin=isa || return 1
     ceph osd erasure-code-profile rm $profile
     #
     # key=value pairs override the default
     #
     ceph osd erasure-code-profile set $profile \
-        key=value plugin=isa || return 1
+        key=value plugin=jerasure || return 1
     ceph osd erasure-code-profile get $profile | \
-        grep -e key=value -e plugin=isa || return 1
+        grep -e key=value -e plugin=jerasure || return 1
     #
-    # --force is required to override an existing profile
+    # --force & --yes-i-really-mean-it are required to override
+    # an existing profile
     #
     ! ceph osd erasure-code-profile set $profile > $dir/out 2>&1 || return 1
     grep 'will not override' $dir/out || return 1
-    ceph osd erasure-code-profile set $profile key=other --force || return 1
+    ceph osd erasure-code-profile set $profile key=other --force --yes-i-really-mean-it || return 1
     ceph osd erasure-code-profile get $profile | \
         grep key=other || return 1
 
@@ -115,9 +116,9 @@ function TEST_get() {
 
     local default_profile=default
     ceph osd erasure-code-profile get $default_profile | \
-        grep plugin=jerasure || return 1
+        grep plugin=isa || return 1
     ceph --format xml osd erasure-code-profile get $default_profile | \
-        grep '<plugin>jerasure</plugin>' || return 1
+        grep '<plugin>isa</plugin>' || return 1
     ! ceph osd erasure-code-profile get WRONG > $dir/out 2>&1 || return 1
     grep -q "unknown erasure code profile 'WRONG'" $dir/out || return 1
 }

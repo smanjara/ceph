@@ -104,6 +104,14 @@ Global Options
 
    Use with cp to specify the namespace of the new object.
 
+.. option:: -f format, --format format
+
+    Specify the structured format for output data.
+    Format can be *plain*, *json* or *json-pretty*.
+
+.. option:: -o filename, --output filename
+
+    Specify the file path to which structured output should be written.
 
 Bench options
 =============
@@ -150,11 +158,11 @@ Load gen options
 
 .. option:: --min-op-len
 
-   Min io size of operations.
+   Min I/O size of operations.
 
 .. option:: --max-op-len
 
-   Max io size of operations.
+   Max I/O size of operations.
 
 .. option:: --max-ops
 
@@ -206,11 +214,11 @@ Generic options
 
 .. option:: --id ID
 
-   Set ID portion of my name.
+   Set ID portion of a client entity. e.g. admin for client.admin
 
 .. option:: -n TYPE.ID, --name TYPE.ID
 
-   Set cephx user name.
+   Set the full entity name. e.g. client.admin
 
 .. option:: --cluster NAME
 
@@ -275,9 +283,6 @@ Pool specific commands
 
 :command:`lssnap`
   List snapshots for given pool.
-
-:command:`clonedata` *srcname* *dstname* --object-locator *key*
-  Clone object byte data from *srcname* to *dstname*.  Both objects must be stored with the locator key *key* (usually either *srcname* or *dstname*).  Object attributes and omap keys are not copied or cloned.
 
 :command:`mksnap` *foo*
   Create pool snapshot named *foo*.

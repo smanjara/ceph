@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -13,11 +14,15 @@
  */
 
 #include "PaxosService.h"
+#include "Paxos.h"
 #include "common/Clock.h"
 #include "common/config.h"
+#include "common/debug.h"
 #include "include/stringify.h"
 #include "include/ceph_assert.h"
+#include "messages/PaxosServiceMessage.h"
 #include "mon/MonOpRequest.h"
+#include "mon/Monitor.h"
 
 using std::ostream;
 using std::string;
@@ -32,6 +37,12 @@ static ostream& _prefix(std::ostream *_dout, Monitor &mon, Paxos &paxos, string 
   return *_dout << "mon." << mon.name << "@" << mon.rank
 		<< "(" << mon.get_state_name()
 		<< ").paxosservice(" << service_name << " " << fc << ".." << lc << ") ";
+}
+
+void PaxosService::C_ReplyOp::_finish(int r) {
+  if (r >= 0) {
+    mon.send_reply(op, reply.detach());
+  }
 }
 
 bool PaxosService::dispatch(MonOpRequestRef op)
@@ -100,7 +111,6 @@ bool PaxosService::dispatch(MonOpRequestRef op)
 
   if (need_immediate_propose) {
     dout(10) << __func__ << " forced immediate propose" << dendl;
-    need_immediate_propose = false;
     propose_pending();
     return true;
   }
@@ -143,9 +153,16 @@ bool PaxosService::dispatch(MonOpRequestRef op)
 
 void PaxosService::refresh(bool *need_bootstrap)
 {
+  dout(10) << __func__ << dendl;
+
   // update cached versions
-  cached_first_committed = mon.store->get(get_service_name(), first_committed_name);
-  cached_last_committed = mon.store->get(get_service_name(), last_committed_name);
+  auto first_committed = mon.store->get(get_service_name(), first_committed_name);
+  auto last_committed = mon.store->get(get_service_name(), last_committed_name);
+  if (last_committed > cached_last_committed) {
+    finish_contexts(g_ceph_context, waiting_for_commit, 0);
+  }
+  cached_first_committed = first_committed;
+  cached_last_committed = last_committed;
 
   version_t new_format = get_value("format_version");
   if (new_format != format_version) {
@@ -154,9 +171,8 @@ void PaxosService::refresh(bool *need_bootstrap)
   }
   format_version = new_format;
 
-  dout(10) << __func__ << dendl;
 
-  update_from_paxos(need_bootstrap);
+  _update_from_paxos(need_bootstrap);
 }
 
 void PaxosService::post_refresh()
@@ -165,8 +181,9 @@ void PaxosService::post_refresh()
 
   post_paxos_update();
 
-  if (mon.is_peon() && !waiting_for_finished_proposal.empty()) {
+  if (mon.is_peon()) {
     finish_contexts(g_ceph_context, waiting_for_finished_proposal, -EAGAIN);
+    finish_contexts(g_ceph_context, waiting_for_commit, -EAGAIN);
   }
 }
 
@@ -215,7 +232,7 @@ void PaxosService::propose_pending()
   if (should_stash_full())
     encode_full(t);
 
-  encode_pending(t);
+  _encode_pending(t);
   have_pending = false;
 
   if (format_version > 0) {
@@ -224,6 +241,7 @@ void PaxosService::propose_pending()
 
   // apply to paxos
   proposing = true;
+  need_immediate_propose = false; /* reset whenever we propose */
   /**
    * Callback class used to mark us as active once a proposal finishes going
    * through Paxos.
@@ -265,6 +283,39 @@ bool PaxosService::should_stash_full()
 	  (get_last_committed() - latest_full > (version_t)g_conf()->paxos_stash_full_interval));
 }
 
+void PaxosService::put_version_full(MonitorDBStore::TransactionRef t,
+				    version_t ver, ceph::buffer::list& bl) {
+  std::string key = mon.store->combine_strings(full_prefix_name, ver);
+  t->put(get_service_name(), key, bl);
+}
+
+void PaxosService::put_version_latest_full(MonitorDBStore::TransactionRef t, version_t ver) {
+  std::string key = mon.store->combine_strings(full_prefix_name, full_latest_name);
+  t->put(get_service_name(), key, ver);
+}
+
+int PaxosService::get_version(version_t ver, ceph::buffer::list& bl) {
+  return mon.store->get(get_service_name(), ver, bl);
+}
+
+int PaxosService::get_version_full(version_t ver, ceph::buffer::list& bl) {
+  std::string key = mon.store->combine_strings(full_prefix_name, ver);
+  return mon.store->get(get_service_name(), key, bl);
+}
+
+version_t PaxosService::get_version_latest_full() {
+  std::string key = mon.store->combine_strings(full_prefix_name, full_latest_name);
+  return mon.store->get(get_service_name(), key);
+}
+
+int PaxosService::get_value(const std::string& key, ceph::buffer::list& bl) {
+  return mon.store->get(get_service_name(), key, bl);
+}
+
+version_t PaxosService::get_value(const std::string& key) {
+  return mon.store->get(get_service_name(), key);
+}
+
 void PaxosService::restart()
 {
   dout(10) << __func__ << dendl;
@@ -275,6 +326,7 @@ void PaxosService::restart()
   }
 
   finish_contexts(g_ceph_context, waiting_for_finished_proposal, -EAGAIN);
+  finish_contexts(g_ceph_context, waiting_for_commit, -EAGAIN);
 
   if (have_pending) {
     discard_pending();
@@ -290,6 +342,7 @@ void PaxosService::election_finished()
   dout(10) << __func__ << dendl;
 
   finish_contexts(g_ceph_context, waiting_for_finished_proposal, -EAGAIN);
+  finish_contexts(g_ceph_context, waiting_for_commit, -EAGAIN);
 
   // make sure we update our state
   _active();
@@ -329,7 +382,7 @@ void PaxosService::_active()
   if (mon.is_leader()) {
     dout(7) << __func__ << " creating new pending" << dendl;
     if (!have_pending) {
-      create_pending();
+      _create_pending();
       have_pending = true;
     }
 
@@ -367,6 +420,7 @@ void PaxosService::shutdown()
     proposal_timer = 0;
   }
 
+  finish_contexts(g_ceph_context, waiting_for_commit, -EAGAIN);
   finish_contexts(g_ceph_context, waiting_for_finished_proposal, -EAGAIN);
 
   on_shutdown();
@@ -381,8 +435,8 @@ void PaxosService::maybe_trim()
   version_t trim_to = get_trim_to();
   dout(20) << __func__ << " " << first_committed << "~" << trim_to << dendl;
 
-  if (trim_to < first_committed) {
-    dout(10) << __func__ << " trim_to " << trim_to << " < first_committed "
+  if (trim_to <= first_committed) {
+    dout(10) << __func__ << " trim_to " << trim_to << " <= first_committed "
 	     << first_committed << dendl;
     return;
   }
@@ -454,13 +508,106 @@ void PaxosService::trim(MonitorDBStore::TransactionRef t,
   }
 }
 
-void PaxosService::load_health()
+void PaxosService::_create_pending() {
+  dout(10) << __func__ << dendl;
+  health_checks.create_pending();
+  dout(30) << __func__ << ": health_checks pending: " << health_checks << dendl;
+  create_pending();
+}
+
+void PaxosService::_encode_pending(MonitorDBStore::TransactionRef t) {
+  dout(10) << __func__ << dendl;
+  using ceph::encode;
+  encode_pending(t);
+  dout(30) << __func__ << ": health_checks encoding: " << health_checks << dendl;
+  auto const& pending = health_checks.get_pending_map();
+  ceph::buffer::list bl;
+  encode(pending, bl);
+  t->put("health", service_name, bl);
+  mon.log_health(pending, health_checks.get_map(), t);
+}
+
+void PaxosService::_update_from_paxos(bool* need_bootstrap)
 {
+  dout(10) << __func__ << dendl;
   bufferlist bl;
   mon.store->get("health", service_name, bl);
   if (bl.length()) {
     auto p = bl.cbegin();
-    using ceph::decode;
-    decode(health_checks, p);
+    health_checks.decode(p);
+    dout(30) << __func__ << ":  health_checks decoded: " << health_checks << dendl;
   }
+  update_from_paxos(need_bootstrap);
+}
+
+bool PaxosService::is_active() const {
+  return
+    !is_proposing() &&
+    (paxos.is_active() || paxos.is_updating() || paxos.is_writing());
+}
+
+bool PaxosService::is_readable(version_t ver) const {
+  if (ver > get_last_committed() ||
+      !paxos.is_readable(0) ||
+      get_last_committed() == 0)
+    return false;
+  return true;
+}
+
+void PaxosService::wait_for_active(MonOpRequestRef op, Context *c) {
+  if (op)
+    op->mark_event(service_name + ":wait_for_active");
+
+  if (!is_proposing()) {
+    paxos.wait_for_active(op, c);
+    return;
+  }
+  wait_for_finished_proposal(op, c);
+}
+
+void PaxosService::wait_for_readable(MonOpRequestRef op, Context *c, version_t ver) {
+  /* This is somewhat of a hack. We only do check if a version is readable on
+   * PaxosService::dispatch(), but, nonetheless, we must make sure that if that
+   * is why we are not readable, then we must wait on PaxosService and not on
+   * Paxos; otherwise, we may assert on Paxos::wait_for_readable() if it
+   * happens to be readable at that specific point in time.
+   */
+  if (op)
+    op->mark_event(service_name + ":wait_for_readable");
+
+  if (is_proposing() ||
+      ver > get_last_committed() ||
+      get_last_committed() == 0)
+    wait_for_finished_proposal(op, c);
+  else {
+    if (op)
+      op->mark_event(service_name + ":wait_for_readable/paxos");
+
+    paxos.wait_for_readable(op, c);
+  }
+}
+
+void PaxosService::wait_for_writeable(MonOpRequestRef op, Context *c) {
+  if (op)
+    op->mark_event(service_name + ":wait_for_writeable");
+
+  if (is_proposing())
+    wait_for_finished_proposal(op, c);
+  else if (!is_writeable())
+    wait_for_active(op, c);
+  else
+    paxos.wait_for_writeable(op, c);
+}
+
+void PaxosService::cancel_events() {
+  paxos.cancel_events();
+}
+
+
+health_check_map_t& PaxosService::get_health_checks_pending_writeable() {
+  return health_checks.get_pending_map_writeable();
+}
+
+health_check_map_t const& PaxosService::get_health_checks() const {
+  return health_checks.get_map();
 }

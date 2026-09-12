@@ -8,10 +8,11 @@ import logging
 import threading
 import time
 import urllib
-from datetime import datetime, timedelta
-from distutils.util import strtobool
+from datetime import datetime, timedelta, timezone
 
 import cherrypy
+from ceph.utils import strtobool
+from cherrypy_mgr import CherryPyMgr
 from mgr_util import build_url
 
 from . import mgr
@@ -30,7 +31,7 @@ class RequestLoggingTool(cherrypy.Tool):
     def __init__(self):
         cherrypy.Tool.__init__(self, 'before_handler', self.request_begin,
                                priority=10)
-        self.logger = logging.getLogger('request')
+        self.logger = logging.getLogger(__name__)
 
     def _setup(self):
         cherrypy.Tool._setup(self)
@@ -180,7 +181,7 @@ class ViewCache(object):
             self.latency = 0
             self.exception = None
             self.lock = threading.Lock()
-            self.logger = logging.getLogger('viewcache')
+            self.logger = logging.getLogger(__name__)
 
         def reset(self):
             with self.lock:
@@ -271,7 +272,7 @@ class NotificationQueue(threading.Thread):
                 return
             cls._running = True
             cls._instance = NotificationQueue()
-        cls.logger = logging.getLogger('notification_queue')  # type: ignore
+        cls.logger = logging.getLogger(__name__)  # type: ignore
         cls.logger.debug("starting notification queue")  # type: ignore
         cls._instance.start()
 
@@ -413,7 +414,7 @@ class TaskManager(object):
 
     @classmethod
     def init(cls):
-        cls.logger = logging.getLogger('taskmgr')  # type: ignore
+        cls.logger = logging.getLogger(__name__)  # type: ignore
         NotificationQueue.register(cls._handle_finished_task, 'cd_task_finished')
 
     @classmethod
@@ -491,13 +492,13 @@ class TaskManager(object):
         return [{
             'name': t.name,
             'metadata': t.metadata,
-            'begin_time': "{}Z".format(datetime.fromtimestamp(t.begin_time).isoformat()),
+            'begin_time': datetime.fromtimestamp(t.begin_time, tz=timezone.utc).isoformat(),
             'progress': t.progress
         } for t in ex_t if t.begin_time], [{
             'name': t.name,
             'metadata': t.metadata,
-            'begin_time': "{}Z".format(datetime.fromtimestamp(t.begin_time).isoformat()),
-            'end_time': "{}Z".format(datetime.fromtimestamp(t.end_time).isoformat()),
+            'begin_time': datetime.fromtimestamp(t.begin_time, tz=timezone.utc).isoformat(),
+            'end_time': datetime.fromtimestamp(t.end_time, tz=timezone.utc).isoformat(),
             'duration': t.duration,
             'progress': t.progress,
             'success': not t.exception,
@@ -510,7 +511,7 @@ class TaskManager(object):
 # pylint: disable=protected-access
 class TaskExecutor(object):
     def __init__(self):
-        self.logger = logging.getLogger('taskexec')
+        self.logger = logging.getLogger(__name__)
         self.task = None
 
     def init(self, task):
@@ -573,7 +574,7 @@ class Task(object):
         self._end_time: Optional[float] = None
         self.duration = 0.0
         self.exception = None
-        self.logger = logging.getLogger('task')
+        self.logger = logging.getLogger(__name__)
         self.lock = threading.Lock()
 
     def __hash__(self):
@@ -838,3 +839,84 @@ def merge_list_of_dicts_by_key(target_list: list, source_list: list, key: str):
                 target_list[sdict[key]].update(sdict)
     target_list = [value for value in target_list.values()]
     return target_list
+
+
+def configure_cors(url: str = '', startup_config: Optional[Dict] = None):
+    """
+    Allow CORS requests if the cross_origin_url option is set.
+    """
+    if url:
+        cross_origin_url = url
+        mgr.set_module_option('cross_origin_url', cross_origin_url)
+    else:
+        cross_origin_url = mgr.get_localized_module_option('cross_origin_url', '')
+    if cross_origin_url:
+        if not hasattr(cherrypy.tools, 'CORS'):
+            cherrypy.tools.CORS = cherrypy.Tool('before_handler', cors_tool)
+
+        def _apply_cors(target_config):
+            if target_config is not None:
+                if '/' not in target_config or target_config['/'] is None:
+                    target_config['/'] = {}
+                target_config['/']['tools.CORS.on'] = True
+
+        _apply_cors(startup_config)
+
+        url_prefix = prepare_url_prefix(mgr.get_module_option('url_prefix', default=''))
+        config = CherryPyMgr.get_server_config(
+            name='ceph-dashboard',
+            mount_point=url_prefix
+        )
+        _apply_cors(config)
+
+
+def cors_tool():
+    '''
+    Handle both simple and complex CORS requests
+    Add CORS headers to each response. If the request is a CORS preflight
+    request swap out the default handler with a simple, single-purpose handler
+    that verifies the request and provides a valid CORS response.
+    '''
+    req_head = cherrypy.request.headers
+    resp_head = cherrypy.response.headers
+
+    # Always set response headers necessary for 'simple' CORS.
+    req_header_cross_origin_url = req_head.get('Access-Control-Allow-Origin')
+    cross_origin_urls = mgr.get_localized_module_option('cross_origin_url', '')
+    cross_origin_url_list = [url.strip() for url in cross_origin_urls.split(',')]
+    if req_header_cross_origin_url in cross_origin_url_list:
+        resp_head['Access-Control-Allow-Origin'] = req_header_cross_origin_url
+    resp_head['Access-Control-Expose-Headers'] = 'GET, POST, X-Total-Count'
+    resp_head['Access-Control-Allow-Credentials'] = 'true'
+
+    # Non-simple CORS preflight request; short-circuit the normal handler.
+    if cherrypy.request.method == 'OPTIONS':
+        req_header_origin_url = req_head.get('Origin')
+        if req_header_origin_url in cross_origin_url_list:
+            resp_head['Access-Control-Allow-Origin'] = req_header_origin_url
+        ac_method = req_head.get('Access-Control-Request-Method', None)
+
+        allowed_methods = ['GET', 'POST', 'PUT', 'DELETE']
+        allowed_headers = [
+            'Content-Type',
+            'Authorization',
+            'Accept',
+            'Access-Control-Allow-Origin'
+        ]
+
+        if ac_method and ac_method in allowed_methods:
+            resp_head['Access-Control-Allow-Methods'] = ', '.join(allowed_methods)
+            resp_head['Access-Control-Allow-Headers'] = ', '.join(allowed_headers)
+
+            resp_head['Connection'] = 'keep-alive'
+            resp_head['Access-Control-Max-Age'] = '3600'
+
+        # CORS requests should short-circuit the other tools.
+        cherrypy.response.body = ''.encode('utf8')
+        cherrypy.response.status = 200
+        cherrypy.serving.request.handler = None
+
+        # Needed to avoid the auth_tool check.
+        if cherrypy.request.config.get('tools.sessions.on', False):
+            cherrypy.session['token'] = True
+        return True

@@ -1,9 +1,30 @@
 from __future__ import print_function
 import argparse
 import os
-import pkg_resources
 import sys
 import logging
+
+
+# `iter_entry_points` from `pkg_resources` takes one argument whereas
+# `entry_points` from `importlib.metadata` does not.
+try:
+    from importlib.metadata import entry_points
+
+    def get_entry_points(group: str):  # type: ignore
+        eps = entry_points()
+        if hasattr(eps, 'select'):
+            # New importlib.metadata uses .select()
+            return eps.select(group=group)
+        else:
+            # Fallback to older EntryPoints that returns dicts
+            return eps.get(group, [])  # type: ignore
+
+except ImportError:
+    # Fallback to `pkg_resources` for older versions
+    from pkg_resources import iter_entry_points as entry_points  # type: ignore
+
+    def get_entry_points(group: str):  # type: ignore
+        return entry_points(group=group)  # type: ignore
 
 from ceph_volume.decorators import catches
 from ceph_volume import log, devices, configuration, conf, exceptions, terminal, inventory, drive_group, activate
@@ -121,9 +142,9 @@ Ceph Conf: {ceph_path}
         )
         parser.add_argument(
             '--log-level',
-            default='debug',
+            default='info',
             choices=['debug', 'info', 'warning', 'error', 'critical'],
-            help='Change the file log level (defaults to debug)',
+            help='Change the file log level (defaults to info)',
         )
         parser.add_argument(
             '--log-path',
@@ -147,7 +168,7 @@ Ceph Conf: {ceph_path}
             # we warn only here, because it is possible that the configuration
             # file is not needed, or that it will be loaded by some other means
             # (like reading from lvm tags)
-            logger.warning('ignoring inability to load ceph.conf', exc_info=1)
+            logger.warning('ignoring inability to load ceph.conf')
             terminal.yellow(error)
         # dispatch to sub-commands
         terminal.dispatch(self.mapper, subcommand_args)
@@ -170,9 +191,9 @@ def _load_library_extensions():
     """
     logger = logging.getLogger('ceph_volume.plugins')
     group = 'ceph_volume_handlers'
-    entry_points = pkg_resources.iter_entry_points(group=group)
+
     plugins = []
-    for ep in entry_points:
+    for ep in get_entry_points(group=group):
         try:
             logger.debug('loading %s' % ep.name)
             plugin = ep.load()

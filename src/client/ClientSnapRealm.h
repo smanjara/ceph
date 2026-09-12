@@ -1,8 +1,12 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_CLIENT_SNAPREALM_H
 #define CEPH_CLIENT_SNAPREALM_H
+
+#include <iostream>
+#include <set>
+#include <vector>
 
 #include "include/types.h"
 #include "common/snap_types.h"
@@ -23,6 +27,9 @@ struct SnapRealm {
 
   SnapRealm *pparent;
   std::set<SnapRealm*> pchildren;
+  utime_t last_modified;
+  uint64_t change_attr;
+  bool is_snapdir_visible = true;
 
 private:
   SnapContext cached_snap_context;  // my_snaps + parent snaps + past_parent_snaps
@@ -33,7 +40,7 @@ public:
 
   explicit SnapRealm(inodeno_t i) :
     ino(i), nref(0), created(0), seq(0),
-    pparent(NULL) { }
+    pparent(NULL), last_modified(utime_t()), change_attr(0) { }
 
   void build_snap_context();
   void invalidate_cache() {
@@ -54,6 +61,9 @@ inline std::ostream& operator<<(std::ostream& out, const SnapRealm& r) {
 	     << " parent=" << r.parent
 	     << " my_snaps=" << r.my_snaps
 	     << " cached_snapc=" << r.cached_snap_context
+	     << " last_modified=" << r.last_modified
+	     << " change_attr=" << r.change_attr
+             << " is_snapdir_visible=" << r.is_snapdir_visible
 	     << ")";
 }
 

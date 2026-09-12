@@ -1,6 +1,6 @@
 
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 /*
  * Ceph - scalable distributed file system
@@ -17,9 +17,7 @@
 
 #pragma once
 
-#include "rgw_service.h"
-
-#include "svc_bucket_types.h"
+#include "driver/rados/rgw_service.h" // FIXME: subclass dependency
 
 class RGWBucketSyncPolicyHandler;
 using RGWBucketSyncPolicyHandlerRef = std::shared_ptr<RGWBucketSyncPolicyHandler>;
@@ -30,8 +28,7 @@ class RGWSI_Bucket_Sync : public RGWServiceInstance
 public:
   RGWSI_Bucket_Sync(CephContext *cct) : RGWServiceInstance(cct) {}
 
-  virtual int get_policy_handler(RGWSI_Bucket_X_Ctx& ctx,
-                                 std::optional<rgw_zone_id> zone,
+  virtual int get_policy_handler(std::optional<rgw_zone_id> zone,
                                  std::optional<rgw_bucket> bucket,
                                  RGWBucketSyncPolicyHandlerRef *handler,
                                  optional_yield y,

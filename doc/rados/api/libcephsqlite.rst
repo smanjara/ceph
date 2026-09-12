@@ -104,7 +104,7 @@ Page Size
 ^^^^^^^^^
 
 SQLite allows configuring the page size prior to creating a new database. It is
-advisable to increase this config to 65536 (64K) when using RADOS backed
+advisable to increase this config to 65536 (64K) when using RADOS-backed
 databases to reduce the number of OSD reads/writes and thereby improve
 throughput and latency.
 
@@ -228,7 +228,7 @@ by a single exclusive lock.
 Export or Extract Database out of RADOS
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The database is striped on RADOS and can be extracted using the RADOS cli toolset.
+The database is striped on RADOS and can be extracted using the RADOS CLI toolset.
 
 .. code:: sh
 
@@ -395,7 +395,7 @@ You may easily manipulate that information using the `JSON1 extension`_:
     776
 
 That tells you the number of times SQLite has called the xSync method of the
-`SQLite IO Methods`_ of the VFS (for **all** open database connections in the
+`SQLite I/O Methods`_ of the VFS (for **all** open database connections in the
 process). You could analyze the performance stats before and after a number of
 queries to see the number of file system syncs required (this would just be
 proportional to the number of transactions). Alternatively, you may be more
@@ -451,4 +451,4 @@ This will save all the usual Ceph debugging to a file ``sqlite3.log`` for inspec
 .. _WAL Journal Mode: https://sqlite.org/wal.html
 .. _How to Corrupt Your SQLite Database: https://www.sqlite.org/howtocorrupt.html
 .. _JSON1 Extension: https://www.sqlite.org/json1.html
-.. _SQLite IO Methods: https://www.sqlite.org/c3ref/io_methods.html
+.. _SQLite I/O Methods: https://www.sqlite.org/c3ref/io_methods.html

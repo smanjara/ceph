@@ -8,11 +8,26 @@ import { map, mergeMap, toArray } from 'rxjs/operators';
 import { InventoryDevice } from '~/app/ceph/cluster/inventory/inventory-devices/inventory-device.model';
 import { InventoryHost } from '~/app/ceph/cluster/inventory/inventory-host.model';
 import { ApiClient } from '~/app/shared/api/api-client';
+import { OrchestratorService } from '~/app/shared/api/orchestrator.service';
 import { CdHelperClass } from '~/app/shared/classes/cd-helper.class';
+import { CdTableSelection } from '~/app/shared/models/cd-table-selection';
 import { Daemon } from '../models/daemon.interface';
 import { CdDevice } from '../models/devices';
 import { SmartDataResponseV1 } from '../models/smart';
 import { DeviceService } from '../services/device.service';
+import { Host } from '../models/host.interface';
+import { OrchestratorFeature } from '../models/orchestrator.enum';
+import { OrchestratorStatus } from '../models/orchestrator.interface';
+
+export interface HostModalRef {
+  [key: string]: unknown;
+}
+
+export interface HostFactsCapacitySource {
+  memory_total_kb?: number | string;
+  hdd_capacity_bytes?: number | string;
+  flash_capacity_bytes?: number | string;
+}
 
 @Injectable({
   providedIn: 'root'
@@ -23,15 +38,31 @@ export class HostService extends ApiClient {
 
   predefinedLabels = ['mon', 'mgr', 'osd', 'mds', 'rgw', 'nfs', 'iscsi', 'rbd', 'grafana'];
 
-  constructor(private http: HttpClient, private deviceService: DeviceService) {
+  constructor(
+    private http: HttpClient,
+    private deviceService: DeviceService,
+    private orchService: OrchestratorService
+  ) {
     super();
   }
 
-  list(facts: string): Observable<object[]> {
-    return this.http.get<object[]>(this.baseURL, {
-      headers: { Accept: 'application/vnd.ceph.api.v1.1+json' },
-      params: { facts: facts }
-    });
+  list(params: any, facts: string): Observable<object[]> {
+    params = params.set('facts', facts);
+    params = params.set('include_service_instances', false);
+    return this.http
+      .get<object[]>(this.baseURL, {
+        headers: { Accept: this.getVersionHeaderValue(1, 2) },
+        params: params,
+        observe: 'response'
+      })
+      .pipe(
+        map((response: any) => {
+          return response['body'].map((host: any) => {
+            host['headers'] = response.headers;
+            return host;
+          });
+        })
+      );
   }
 
   create(hostname: string, addr: string, labels: string[], status: string) {
@@ -150,5 +181,62 @@ export class HostService extends ApiClient {
         return observableOf(devices);
       })
     );
+  }
+
+  getAllHosts(): Observable<Host[]> {
+    return this.http.get<Host[]>(`${this.baseUIURL}/list`);
+  }
+
+  /**
+   * Returns total memory in bytes when memory_total_kb is available.
+   */
+  getTotalMemoryBytes(host?: HostFactsCapacitySource): number | undefined {
+    const memoryKb = Number(host?.memory_total_kb);
+    if (!Number.isFinite(memoryKb)) {
+      return undefined;
+    }
+    return memoryKb * 1024;
+  }
+
+  /**
+   * Returns raw capacity in bytes when both HDD and flash capacities are available.
+   */
+  getRawCapacityBytes(host?: HostFactsCapacitySource): number | undefined {
+    const hdd = Number(host?.hdd_capacity_bytes);
+    const flash = Number(host?.flash_capacity_bytes);
+    if (!Number.isFinite(hdd) || !Number.isFinite(flash)) {
+      return undefined;
+    }
+    return hdd + flash;
+  }
+
+  getDisable<TAction extends string>(
+    action: TAction,
+    selection: CdTableSelection,
+    orchStatus: OrchestratorStatus | undefined,
+    actionOrchFeatures: Record<TAction, OrchestratorFeature[]>,
+    nonOrchHostMessage: string,
+    requireSingleSelectionActions: TAction[]
+  ): boolean | string {
+    if (requireSingleSelectionActions.includes(action)) {
+      if (!selection?.hasSingleSelection) {
+        return true;
+      }
+      if (!_.every(selection.selected, 'sources.orchestrator')) {
+        return nonOrchHostMessage;
+      }
+    }
+
+    return this.orchService.getTableActionDisableDesc(
+      orchStatus as OrchestratorStatus,
+      actionOrchFeatures[action]
+    );
+  }
+
+  /**
+   * Returns whether host facts are available from the orchestrator.
+   */
+  checkHostsFactsAvailable(orchStatus: OrchestratorStatus) {
+    return !!orchStatus?.features?.get_facts?.available;
   }
 }

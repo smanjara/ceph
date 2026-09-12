@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPHFS_MIRROR_FS_MIRROR_H
 #define CEPHFS_MIRROR_FS_MIRROR_H
@@ -30,7 +30,7 @@ public:
   ~FSMirror();
 
   void init(Context *on_finish);
-  void shutdown(Context *on_finish);
+  void shutdown(Context *on_finish, bool purge_persisted_sync_stats=false);
 
   void add_peer(const Peer &peer);
   void remove_peer(const Peer &peer);
@@ -47,14 +47,35 @@ public:
 
   bool is_failed() {
     std::scoped_lock locker(m_lock);
-    return m_init_failed ||
-           m_instance_watcher->is_failed() ||
-           m_mirror_watcher->is_failed();
+    bool failed = m_init_failed;
+    if (m_instance_watcher) {
+      failed |= m_instance_watcher->is_failed();
+    }
+    if (m_mirror_watcher) {
+      failed |= m_mirror_watcher->is_failed();
+    }
+    return failed;
+  }
+
+  monotime get_failed_ts() {
+    return m_failed_ts.load(std::memory_order_relaxed);
+  }
+
+  void set_failed_ts() {
+    m_failed_ts.store(clock::now(), std::memory_order_relaxed);
   }
 
   bool is_blocklisted() {
     std::scoped_lock locker(m_lock);
     return is_blocklisted(locker);
+  }
+
+  monotime get_blocklisted_ts() {
+    return m_blocklisted_ts.load(std::memory_order_relaxed);
+  }
+
+  void set_blocklisted_ts() {
+    m_blocklisted_ts.store(clock::now(), std::memory_order_relaxed);
   }
 
   Peers get_peers() {
@@ -96,11 +117,27 @@ private:
       fs_mirror->handle_acquire_directory(dir_path);
     }
 
-    void release_directory(std::string_view dir_path) override {
-      fs_mirror->handle_release_directory(dir_path);
+    void release_directory(std::string_view dir_path, bool purging) override {
+      fs_mirror->handle_release_directory(dir_path, purging);
+    }
+
+  };
+
+  struct TimestampListener: public Watcher::ErrorListener {
+    FSMirror *fs_mirror;
+    TimestampListener(FSMirror *fs_mirror)
+      : fs_mirror(fs_mirror) {
+    }
+    void set_blocklisted_ts() {
+      fs_mirror->set_blocklisted_ts();
+    }
+    void set_failed_ts() {
+      fs_mirror->set_failed_ts();
     }
   };
 
+  std::atomic<monotime> m_blocklisted_ts;
+  std::atomic<monotime> m_failed_ts;
   CephContext *m_cct;
   Filesystem m_filesystem;
   uint64_t m_pool_id;
@@ -110,6 +147,7 @@ private:
 
   ceph::mutex m_lock = ceph::make_mutex("cephfs::mirror::fs_mirror");
   SnapListener m_snap_listener;
+  TimestampListener m_ts_listener;
   std::set<std::string, std::less<>> m_directories;
   Peers m_all_peers;
   std::map<Peer, std::unique_ptr<PeerReplayer>> m_peer_replayers;
@@ -122,6 +160,7 @@ private:
 
   int m_retval = 0;
   bool m_stopping = false;
+  bool m_purge_persisted_sync_stats_on_shutdown = false;
   bool m_init_failed = false;
   Context *m_on_init_finish = nullptr;
   Context *m_on_shutdown_finish = nullptr;
@@ -129,6 +168,8 @@ private:
   MirrorAdminSocketHook *m_asok_hook = nullptr;
 
   MountRef m_mount;
+
+  PerfCounters *m_perf_counters;
 
   int init_replayer(PeerReplayer *peer_replayer);
   void shutdown_replayer(PeerReplayer *peer_replayer);
@@ -149,7 +190,9 @@ private:
   void handle_shutdown_instance_watcher(int r);
 
   void handle_acquire_directory(std::string_view dir_path);
-  void handle_release_directory(std::string_view dir_path);
+  void handle_release_directory(std::string_view dir_path, bool purging);
+
+  void remove_persisted_sync_stats_by_prefix(std::string_view prefix);
 };
 
 } // namespace mirror

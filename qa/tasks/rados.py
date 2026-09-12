@@ -1,15 +1,52 @@
 """
 Rados modle-based integration tests
 """
+
 import contextlib
 import logging
+from typing import Any, Dict
+
 import gevent
+
 from teuthology import misc as teuthology
-
-
 from teuthology.orchestra import run
 
+from .watched_process import WatchedProcess
+
 log = logging.getLogger(__name__)
+
+
+class CephTestRados(WatchedProcess):
+    """
+    The WatchedProcess class for ceph_test_rados. This allows us to monitor
+    any ceph_test_rados processes for error, and to kill the remote processes when
+    the DaemonWatchdog barks.
+
+    It also raises the assert from the watchdog so that the failure reason shown in
+    the test result is the reason the watchdog barked.
+    """
+
+    def __init__(self, ctx: Dict[Any, Any], config: Dict[Any, Any], cluster: str, sub_processes: Dict[str, Any]):
+        super(CephTestRados, self).__init__()
+
+        self._ctx = ctx
+        self._config = config
+        self._cluster: str = cluster
+        self._sub_processes = sub_processes
+        self._name: str = f"ceph-test-rados-{self._cluster}"
+
+    @property
+    def id(self) -> str:
+        return self._name
+
+    def stop(self) -> None:
+        debug: str = f"Stopping {self._name}"
+        if self._exception:
+            debug += f" due to exception {self._exception}"
+        log.debug(debug)
+        for test_id, proc in self._sub_processes.items():
+            log.info("Stopping instance %s", test_id)
+            proc.stdin.close()
 
 @contextlib.contextmanager
 def task(ctx, config):
@@ -33,9 +70,11 @@ def task(ctx, config):
           fast_read: enable ec_pool's fast_read
           min_size: set the min_size of created pool
           pool_snaps: use pool snapshots instead of selfmanaged snapshots
-	  write_fadvise_dontneed: write behavior like with LIBRADOS_OP_FLAG_FADVISE_DONTNEED.
-	                          This mean data don't access in the near future.
-				  Let osd backend don't keep data in cache.
+          write_fadvise_dontneed: write behavior like with LIBRADOS_OP_FLAG_FADVISE_DONTNEED.
+                                  This mean data don't access in the near future.
+                                  Let osd backend don't keep data in cache.
+          pct_update_delay: delay before primary propogates pct on write pause,
+                            defaults to 5s if balance_reads is set
 
     For example::
 
@@ -65,7 +104,7 @@ def task(ctx, config):
               m: 1
               crush-failure-domain: osd
             pool_snaps: true
-	    write_fadvise_dontneed: true
+            write_fadvise_dontneed: true
             runs: 10
         - interactive:
 
@@ -130,13 +169,22 @@ def task(ctx, config):
     assert isinstance(config, dict), \
         "please list clients to run on"
 
+    log.info("config is {config}".format(config=str(config)))
+    overrides = ctx.config.get('overrides', {})
+    log.info("overrides is {overrides}".format(overrides=str(overrides)))
+    teuthology.deep_merge(config, overrides.get('rados', {}))
+    log.info("config is {config}".format(config=str(config)))
+
     object_size = int(config.get('object_size', 4000000))
     op_weights = config.get('op_weights', {})
     testdir = teuthology.get_testdir(ctx)
+    pct_update_delay = None
     args = [
         'adjust-ulimits',
         'ceph-coverage',
         '{tdir}/archive/coverage'.format(tdir=testdir),
+        'daemon-helper',
+        'kill', 
         'ceph_test_rados']
     if config.get('ec_pool', False):
         args.extend(['--no-omap'])
@@ -160,8 +208,11 @@ def task(ctx, config):
         args.extend(['--pool-snaps'])
     if config.get('balance_reads', False):
         args.extend(['--balance-reads'])
+        pct_update_delay = config.get('pct_update_delay', 5);
     if config.get('localize_reads', False):
         args.extend(['--localize-reads'])
+    if config.get('max_attr_len', None):
+        args.extend(['--max-attr-len', str(config.get('max_attr_len'))])
     args.extend([
         '--max-ops', str(config.get('ops', 10000)),
         '--objects', str(config.get('objects', 500)),
@@ -220,7 +271,7 @@ def task(ctx, config):
         args.extend([
             '--op', op, str(weight)
         ])
-                
+        
 
     def thread():
         """Thread spawned by gevent"""
@@ -231,8 +282,18 @@ def task(ctx, config):
             profile = config.get('erasure_code_profile', {})
             profile_name = profile.get('name', 'teuthologyprofile')
             manager.create_erasure_code_profile(profile_name, profile)
+            crush_prof = config.get('erasure_code_crush', {})
+            crush_name = None
+            if crush_prof:
+                crush_name = crush_prof.get('name', 'teuthologycrush')
+                manager.create_erasure_code_crush_rule(crush_name, crush_prof)
+
         else:
             profile_name = None
+            crush_name = None
+
+        cluster = config.get("cluster", "ceph")
+
         for i in range(int(config.get('runs', '1'))):
             log.info("starting run %s out of %s", str(i), config.get('runs', '1'))
             tests = {}
@@ -250,14 +311,19 @@ def task(ctx, config):
                 else:
                     pool = manager.create_pool_with_unique_name(
                         erasure_code_profile_name=profile_name,
+                        erasure_code_crush_rule_name=crush_name,
                         erasure_code_use_overwrites=
-                          config.get('erasure_code_use_overwrites', False)
+                            config.get('erasure_code_use_overwrites', False),
                     )
                     created_pools.append(pool)
                     if config.get('fast_read', False):
                         manager.raw_cluster_cmd(
                             'osd', 'pool', 'set', pool, 'fast_read', 'true')
-                    min_size = config.get('min_size', None);
+                    if pct_update_delay:
+                        manager.raw_cluster_cmd(
+                            'osd', 'pool', 'set', pool,
+                            'pct_update_delay', str(pct_update_delay))
+                    min_size = config.get('min_size', None)
                     if min_size is not None:
                         manager.raw_cluster_cmd(
                             'osd', 'pool', 'set', pool, 'min_size', str(min_size))
@@ -271,10 +337,30 @@ def task(ctx, config):
                     wait=False
                     )
                 tests[id_] = proc
+
+            watched_process: CephTestRados = CephTestRados(ctx, config, cluster, tests)
+            ctx.ceph[cluster].watched_processes.append(watched_process)
+            try:
+                run.wait(tests.values())
+            except Exception as e:
+                watched_process.set_exception(e)
+
             run.wait(tests.values())
 
+            # If test has failed then don't try to clean up
+            if watched_process.exception:
+                raise watched_process.exception
+
+            wait_for_all_active_clean_pgs = config.get("wait_for_all_active_clean_pgs", False)
+            # usually set when we do min_size testing.
+            if wait_for_all_active_clean_pgs:
+                # Make sure we finish the test first before deleting the pool.
+                # Mainly used for test_pool_min_size
+                manager.wait_for_clean()
+                manager.wait_for_all_osds_up(timeout=1800)
+
             for pool in created_pools:
-                manager.wait_snap_trimming_complete(pool);
+                manager.wait_snap_trimming_complete(pool)
                 manager.remove_pool(pool)
 
     running = gevent.spawn(thread)
