@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 #include "gtest/gtest.h"
 
 #include "rgw_compression.h"
@@ -130,7 +131,7 @@ TEST(Compress, LimitedChunkSize)
     cs_info.compression_type = plugin->get_type_name();
     cs_info.orig_size = s;
     cs_info.compressor_message = compressor.get_compressor_message();
-    cs_info.blocks = move(compressor.get_compression_blocks());
+    cs_info.blocks = std::move(compressor.get_compression_blocks());
 
     ut_get_sink_size d_sink;
     RGWGetObj_Decompress decompress(g_ceph_context, &cs_info, false, &d_sink);
@@ -169,7 +170,7 @@ TEST(Compress, BillionZeros)
   cs_info.compression_type = plugin->get_type_name();
   cs_info.orig_size = size*1000;
   cs_info.compressor_message = compressor.get_compressor_message();
-  cs_info.blocks = move(compressor.get_compression_blocks());
+  cs_info.blocks = std::move(compressor.get_compression_blocks());
 
   ut_get_sink d_sink;
   RGWGetObj_Decompress decompress(g_ceph_context, &cs_info, false, &d_sink);

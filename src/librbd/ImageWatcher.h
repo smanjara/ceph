@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_IMAGE_WATCHER_H
 #define CEPH_LIBRBD_IMAGE_WATCHER_H
@@ -241,8 +241,8 @@ private:
   void cancel_quiesce_requests();
 
   void notify_quiesce(const watch_notify::AsyncRequestId &async_request_id,
-                      size_t attempts, ProgressContext &prog_ctx,
-                      Context *on_finish);
+                      size_t attempt, size_t total_attempts,
+                      ProgressContext &prog_ctx, Context *on_finish);
 
   bool handle_operation_request(
     const watch_notify::AsyncRequestId& async_request_id,

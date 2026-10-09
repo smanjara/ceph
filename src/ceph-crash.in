@@ -1,8 +1,9 @@
 #!@Python3_EXECUTABLE@
 # -*- mode:python -*-
-# vim: ts=4 sw=4 smarttab expandtab
+# vim: ts=4 sw=4 expandtab
 
 import argparse
+import errno
 import grp
 import logging
 import os
@@ -56,16 +57,25 @@ def post_crash(path):
         stderr = stderr.decode()
         rc = pr.wait()
         f.close()
-        if rc != 0 or stderr != "":
-            log.warning('post %s as %s failed: %s' % (path, n, stderr))
-        if rc == 0:
+        if rc == 0 and stderr == "":
             break
+        if rc == errno.EACCES:
+            log.debug('post %s as %s failed: %s' % (path, n, stderr))
+        else:
+            log.warning('post %s as %s failed: %s' % (path, n, stderr))
+            break
+    else:
+        log.warning('post %s failed: unable to authenticate as %s: %s'
+                    % (path, ', '.join(auth_names), stderr))
     return rc
 
 
 def scrape_path(path):
     for p in os.listdir(path):
         crashpath = os.path.join(path, p)
+        if not os.access(crashpath, os.R_OK):
+            log.warning('unable to read crash path %s' % (crashpath))
+            continue
         metapath = os.path.join(crashpath, 'meta')
         donepath = os.path.join(crashpath, 'done')
         if os.path.isfile(metapath):

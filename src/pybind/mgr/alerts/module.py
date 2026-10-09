@@ -3,15 +3,19 @@
 A simple cluster health alerting module.
 """
 
-from mgr_module import CLIReadCommand, HandleCommandResult, MgrModule, Option
+from mgr_module import HandleCommandResult, MgrModule, Option
 from email.utils import formatdate, make_msgid
 from threading import Event
 from typing import Any, Optional, Dict, List, TYPE_CHECKING, Union
 import json
 import smtplib
+import ssl
+
+from .cli import AlertsCLICommand
 
 
 class Alerts(MgrModule):
+    CLICommand = AlertsCLICommand
     MODULE_OPTIONS = [
         Option(
             name='interval',
@@ -28,7 +32,7 @@ class Alerts(MgrModule):
         Option(
             name='smtp_destination',
             default='',
-            desc='Email address to send alerts to',
+            desc='Email address to send alerts to, use commas to separate multiple',
             runtime=True),
         Option(
             name='smtp_port',
@@ -111,7 +115,7 @@ class Alerts(MgrModule):
                     self.get_ceph_option(opt))
             self.log.debug(' native option %s = %s', opt, getattr(self, opt))
 
-    @CLIReadCommand('alerts send')
+    @AlertsCLICommand.Read('alerts send')
     def send(self) -> HandleCommandResult:
         """
         (re)send alerts immediately
@@ -236,14 +240,15 @@ class Alerts(MgrModule):
 
         # send
         try:
+            context = ssl.create_default_context()
             if self.smtp_ssl:
                 server: Union[smtplib.SMTP_SSL, smtplib.SMTP] = \
-                    smtplib.SMTP_SSL(self.smtp_host, self.smtp_port)
+                    smtplib.SMTP_SSL(self.smtp_host, self.smtp_port, context=context)
             else:
                 server = smtplib.SMTP(self.smtp_host, self.smtp_port)
             if self.smtp_password:
                 server.login(self.smtp_user, self.smtp_password)
-            server.sendmail(self.smtp_sender, self.smtp_destination, message)
+            server.sendmail(self.smtp_sender, self.smtp_destination.split(','), message)
             server.quit()
         except Exception as e:
             return {

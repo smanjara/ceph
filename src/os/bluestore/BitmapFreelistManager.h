@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_OS_BLUESTORE_BITMAPFREELISTMANAGER_H
 #define CEPH_OS_BLUESTORE_BITMAPFREELISTMANAGER_H
@@ -63,7 +63,6 @@ public:
   static void setup_merge_operator(KeyValueDB *db, std::string prefix);
 
   int create(uint64_t size, uint64_t granularity,
-	     uint64_t zone_size, uint64_t first_sequential_zone,
 	     KeyValueDB::Transaction txn) override;
 
   int init(KeyValueDB *kvdb, bool db_in_read_only,
@@ -95,6 +94,9 @@ public:
   }
   void get_meta(uint64_t target_size,
     std::vector<std::pair<std::string, std::string>>*) const override;
+
+  bool validate(uint64_t min_alloc_size) const override;
+  int expand(uint64_t new_size, KeyValueDB* db) override;
 };
 
 #endif

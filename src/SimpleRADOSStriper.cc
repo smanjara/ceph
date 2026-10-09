@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 /*
  * Ceph - scalable distributed file system
@@ -30,6 +30,7 @@
 #include <string.h>
 
 #include "include/ceph_assert.h"
+#include "include/container_ios.h"
 #include "include/rados/librados.hpp"
 
 #include "cls/lock/cls_lock_client.h"
@@ -40,6 +41,7 @@
 #include "common/config.h"
 #include "common/debug.h"
 #include "common/errno.h"
+#include "common/strtol.h" // for strict_strtoll()
 #include "common/version.h"
 
 #include "SimpleRADOSStriper.h"
@@ -131,7 +133,7 @@ int SimpleRADOSStriper::remove()
 
   auto ext = get_first_extent();
   if (int rc = ioctx.remove(ext.soid); rc < 0) {
-    d(5) << " remove failed: " << cpp_strerror(rc) << dendl;
+    d(1) << " remove failed: " << cpp_strerror(rc) << dendl;
     return rc;
   }
 
@@ -162,7 +164,8 @@ int SimpleRADOSStriper::wait_for_aios(bool block)
     auto& aiocp = aios.front();
     int rc;
     if (block) {
-      rc = aiocp->wait_for_complete();
+      aiocp->wait_for_complete();
+      rc = aiocp->get_return_value();
     } else {
       if (aiocp->is_complete()) {
         rc = aiocp->get_return_value();
@@ -171,7 +174,7 @@ int SimpleRADOSStriper::wait_for_aios(bool block)
       }
     }
     if (rc) {
-      d(5) << " aio failed: " << cpp_strerror(rc) << dendl;
+      d(1) << " aio failed: " << cpp_strerror(rc) << dendl;
       if (aios_failure == 0) {
         aios_failure = rc;
       }
@@ -257,7 +260,7 @@ int SimpleRADOSStriper::open()
   op.getxattr(XATTR_ALLOCATED, &bl_alloc, &prval_alloc);
   op.getxattr(XATTR_VERSION, &bl_version, &prval_version);
   if (int rc = ioctx.operate(ext.soid, &op, &pbl); rc < 0) {
-    d(5) << " getxattr failed: " << cpp_strerror(rc) << dendl;
+    d(1) << " getxattr failed: " << cpp_strerror(rc) << dendl;
     return rc;
   }
   exclusive_holder = bl_excl.to_str();
@@ -297,7 +300,7 @@ int SimpleRADOSStriper::shrink_alloc(uint64_t a)
     auto ext = get_next_extent(offset, len);
     auto aiocp = aiocompletionptr(librados::Rados::aio_create_completion());
     if (int rc = ioctx.aio_remove(ext.soid, aiocp.get()); rc < 0) {
-      d(5) << " aio_remove failed: " << cpp_strerror(rc) << dendl;
+      d(1) << " aio_remove failed: " << cpp_strerror(rc) << dendl;
       return rc;
     }
     removes.emplace_back(std::move(aiocp));
@@ -305,11 +308,18 @@ int SimpleRADOSStriper::shrink_alloc(uint64_t a)
     offset += ext.len;
   }
 
+  int aio_rc = 0;
   for (auto& aiocp : removes) {
-    if (int rc = aiocp->wait_for_complete(); rc < 0 && rc != -ENOENT) {
-      d(5) << " aio_remove failed: " << cpp_strerror(rc) << dendl;
-      return rc;
+    aiocp->wait_for_complete();
+    if (int rc = aiocp->get_return_value(); rc < 0 && rc != -ENOENT) {
+      d(1) << " aio_remove failed: " << cpp_strerror(rc) << dendl;
+      if (aio_rc == 0) {
+        aio_rc = rc;
+      }
     }
+  }
+  if (aio_rc != 0) {
+    return aio_rc;
   }
 
   auto ext = get_first_extent();
@@ -320,12 +330,13 @@ int SimpleRADOSStriper::shrink_alloc(uint64_t a)
   op.setxattr(XATTR_VERSION, uint2bl(version+1));
   d(15) << " updating version to " << (version+1) << dendl;
   if (int rc = ioctx.aio_operate(ext.soid, aiocp.get(), &op); rc < 0) {
-    d(5) << " update failed: " << cpp_strerror(rc) << dendl;
+    d(1) << " update failed: " << cpp_strerror(rc) << dendl;
     return rc;
   }
   /* we need to wait so we don't have dangling extents */
   d(10) << " waiting for allocated update" << dendl;
-  if (int rc = aiocp->wait_for_complete(); rc < 0) {
+  aiocp->wait_for_complete();
+  if (int rc = aiocp->get_return_value(); rc < 0) {
     d(1) << " update failure: " << cpp_strerror(rc) << dendl;
     return rc;
   }
@@ -396,7 +407,7 @@ int SimpleRADOSStriper::set_metadata(uint64_t new_size, bool update_size)
   auto op = librados::ObjectWriteOperation();
   if (new_size > allocated) {
     uint64_t mask = (1<<object_size)-1;
-    new_allocated = min_growth + ((size + mask) & ~mask); /* round up base 2 */
+    new_allocated = min_growth + ((new_size + mask) & ~mask); /* round up base 2 */
     op.setxattr(XATTR_ALLOCATED, uint2bl(new_allocated));
     do_op = true;
     if (logger) logger->inc(P_UPDATE_ALLOCATED);
@@ -422,7 +433,8 @@ int SimpleRADOSStriper::set_metadata(uint64_t new_size, bool update_size)
     if (allocated != new_allocated) {
       /* we need to wait so we don't have dangling extents */
       d(10) << "waiting for allocated update" << dendl;
-      if (int rc = aiocp->wait_for_complete(); rc < 0) {
+      aiocp->wait_for_complete();
+      if (int rc = aiocp->get_return_value(); rc < 0) {
         d(1) << " update failure: " << cpp_strerror(rc) << dendl;
         return rc;
       }
@@ -505,7 +517,8 @@ ssize_t SimpleRADOSStriper::read(void* data, size_t len, uint64_t off)
 
   r = 0;
   for (auto& [bl, aiocp] : reads) {
-    if (int rc = aiocp->wait_for_complete(); rc < 0) {
+    aiocp->wait_for_complete();
+    if (int rc = aiocp->get_return_value(); rc < 0) {
       d(1) << " read failure: " << cpp_strerror(rc) << dendl;
       return rc;
     }
@@ -726,7 +739,7 @@ int SimpleRADOSStriper::lock(uint64_t timeoutms)
   }
 
   if (int rc = open(); rc < 0) {
-    d(5) << " open failed: " << cpp_strerror(rc) << dendl;
+    d(1) << " open failed: " << cpp_strerror(rc) << dendl;
     return rc;
   }
 

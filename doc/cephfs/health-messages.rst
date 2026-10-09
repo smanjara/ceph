@@ -8,7 +8,7 @@ CephFS health messages
 Cluster health checks
 =====================
 
-The Ceph monitor daemons will generate health messages in response
+The Ceph Monitor daemons will generate health messages in response
 to certain states of the file system map structure (and the enclosed MDS maps).
 
 Message: mds rank(s) *ranks* have failed
@@ -22,23 +22,23 @@ its stored metadata, and cannot start again until it is repaired.
 
 Message: mds cluster is degraded
 Description: One or more MDS ranks are not currently up and running, clients
-may pause metadata IO until this situation is resolved.  This includes
+may pause metadata I/O until this situation is resolved.  This includes
 ranks being failed or damaged, and additionally includes ranks
 which are running on an MDS but have not yet made it to the *active*
 state (e.g. ranks currently in *replay* state).
 
 Message: mds *names* are laggy
 Description: The named MDS daemons have failed to send beacon messages
-to the monitor for at least ``mds_beacon_grace`` (default 15s), while
+to the Monitor for at least ``mds_beacon_grace`` (default 15s), while
 they are supposed to send beacon messages every ``mds_beacon_interval``
-(default 4s).  The daemons may have crashed.  The Ceph monitor will
+(default 4s).  The daemons may have crashed.  The Ceph Monitor will
 automatically replace laggy daemons with standbys if any are available.
 
 Message: insufficient standby daemons available
 Description: One or more file systems are configured to have a certain number
 of standby daemons available (including daemons in standby-replay) but the
 cluster does not have enough standby daemons. The standby daemons not in replay
-count towards any file system (i.e. they may overlap). This warning can
+count towards any file system (i.e. they may overlap). This warning can be
 configured by setting ``ceph fs set <fs> standby_count_wanted <count>``.  Use
 zero for ``count`` to disable.
 
@@ -48,7 +48,7 @@ Daemon-reported health checks
 
 MDS daemons can identify a variety of unwanted conditions, and
 indicate these to the operator in the output of ``ceph status``.
-These conditions have human readable messages, and additionally
+These conditions have human-readable messages, and additionally
 a unique code starting with ``MDS_``.
 
 .. highlight:: console
@@ -130,7 +130,9 @@ other daemons, please see :ref:`health-checks`.
     from properly cleaning up resources used by client requests.  This message
     appears if a client appears to have more than ``max_completed_requests``
     (default 100000) requests that are complete on the MDS side but haven't
-    yet been accounted for in the client's *oldest tid* value.
+    yet been accounted for in the client's *oldest tid* value. The last tid
+    used by the MDS to trim completed client requests (or flush) is included
+    as part of `session ls` (or `client ls`) command as a debug aid.
 
 ``MDS_DAMAGE``
 --------------
@@ -141,7 +143,7 @@ other daemons, please see :ref:`health-checks`.
     Corrupt or missing metadata was encountered when reading
     from the metadata pool.  This message indicates that the damage was
     sufficiently isolated for the MDS to continue operating, although
-    client accesses to the damaged subtree will return IO errors.  Use
+    client accesses to the damaged subtree will return I/O errors.  Use
     the ``damage ls`` admin socket command to get more detail on the damage.
     This message appears as soon as any damage is encountered.
 
@@ -238,3 +240,40 @@ other daemons, please see :ref:`health-checks`.
   Description
     All MDS ranks are unavailable resulting in the file system to be completely
     offline.
+
+``MDS_CLIENTS_LAGGY``
+----------------------------
+  Message
+    "Client *ID* is laggy; not evicted because some OSD(s) is/are laggy"
+
+  Description
+    If OSD(s) is laggy (due to certain conditions like network cut-off, etc)
+    then it might make clients laggy(session might get idle or cannot flush
+    dirty data for cap revokes). If ``defer_client_eviction_on_laggy_osds`` is
+    set to true (default true), client eviction will not take place and thus
+    this health warning will be generated.
+
+``MDS_CLIENTS_BROKEN_ROOTSQUASH``
+---------------------------------
+  Message
+    "X client(s) with broken root_squash implementation (MDS_CLIENTS_BROKEN_ROOTSQUASH)"
+
+  Description
+    A bug was discovered in root_squash which would potentially lose changes made by a
+    client restricted with root_squash caps. The fix required a change to the protocol
+    and a client upgrade is required.
+
+    This is a HEALTH_ERR warning because of the danger of inconsistency and lost
+    data. It is recommended to either upgrade your clients, discontinue using
+    root_squash in the interim, or silence the warning if desired.
+
+    To evict and permanently block broken clients from connecting to the
+    cluster, set the ``required_client_feature`` bit ``client_mds_auth_caps``.
+
+``MDS_ESTIMATED_REPLAY_TIME``
+-----------------------------
+  Message
+    HEALTH_WARN Replay: x% complete. Estimated time remaining *x* seconds
+
+  Description
+    When an MDS journal replay takes more than 30 seconds, this message indicates the estimated time to completion.

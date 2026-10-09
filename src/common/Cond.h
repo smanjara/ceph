@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -16,7 +17,7 @@
 #ifndef CEPH_COND_H
 #define CEPH_COND_H
 
-#include "common/Clock.h"
+#include "common/ceph_time.h" // for ceph::make_timespan()
 #include "common/ceph_mutex.h"
 #include "include/Context.h"
 
@@ -74,6 +75,7 @@ public:
  * until wait() returns.
  */
 class C_SaferCond : public Context {
+protected:
   ceph::mutex lock;  ///< Mutex to take
   ceph::condition_variable cond;     ///< Cond to signal
   bool done = false; ///< true after finish() has been called

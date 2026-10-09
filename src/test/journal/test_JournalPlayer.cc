@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "journal/JournalPlayer.h"
 #include "journal/Entry.h"
@@ -955,7 +955,7 @@ TYPED_TEST(TestJournalPlayer, LiveReplayRefetchRemoveEmpty) {
   ASSERT_EQ(expected_entries, entries);
 }
 
-TYPED_TEST(TestJournalPlayer, PrefechShutDown) {
+TYPED_TEST(TestJournalPlayer, PrefetchShutDown) {
   std::string oid = this->get_temp_oid();
 
   ASSERT_EQ(0, this->create(oid));

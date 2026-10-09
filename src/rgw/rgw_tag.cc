@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include <map>
 #include <string>
@@ -63,5 +63,16 @@ void RGWObjTags::dump(Formatter *f) const
     f->dump_string(tag.first.c_str(), tag.second);
   }
   f->close_section();
+}
+
+std::list<RGWObjTags> RGWObjTags::generate_test_instances()
+{
+  std::list<RGWObjTags> o;
+  RGWObjTags r;
+  r.add_tag("key1","val1");
+  r.add_tag("key2","val2");
+  o.push_back(std::move(r));
+  o.emplace_back();
+  return o;
 }
 

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 // Run a function in a forked child, with a timeout.
 
@@ -12,6 +12,9 @@
 #include <signal.h>
 #ifndef _WIN32
 #include <sys/wait.h>
+#endif
+#ifdef __linux__
+#include <sys/syscall.h>
 #endif
 #include <sys/types.h>
 
@@ -53,17 +56,23 @@ static inline int fork_function(
   // we are forker (first child)
 
   // close all fds
-  int maxfd = sysconf(_SC_OPEN_MAX);
-  if (maxfd == -1)
-    maxfd = 16384;
-  for (int fd = 0; fd <= maxfd; fd++) {
-    if (fd == STDIN_FILENO)
-      continue;
-    if (fd == STDOUT_FILENO)
-      continue;
-    if (fd == STDERR_FILENO)
-      continue;
-    ::close(fd);
+#if defined(__linux__) && defined(SYS_close_range)
+  if (::syscall(SYS_close_range, STDERR_FILENO + 1, ~0U, 0))
+#endif
+  {
+    // fall back to manually closing
+    int maxfd = sysconf(_SC_OPEN_MAX);
+    if (maxfd == -1)
+      maxfd = 16384;
+    for (int fd = 0; fd <= maxfd; fd++) {
+      if (fd == STDIN_FILENO)
+        continue;
+      if (fd == STDOUT_FILENO)
+        continue;
+      if (fd == STDERR_FILENO)
+        continue;
+      ::close(fd);
+    }
   }
 
   sigset_t mask, oldmask;

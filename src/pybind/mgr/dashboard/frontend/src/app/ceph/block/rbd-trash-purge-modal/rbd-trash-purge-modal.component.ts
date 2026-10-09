@@ -1,6 +1,6 @@
 import { Component, OnInit } from '@angular/core';
 
-import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap';
+import { BaseModal } from 'carbon-components-angular';
 
 import { Pool } from '~/app/ceph/pool/pool';
 import { PoolService } from '~/app/shared/api/pool.service';
@@ -16,9 +16,10 @@ import { TaskWrapperService } from '~/app/shared/services/task-wrapper.service';
 @Component({
   selector: 'cd-rbd-trash-purge-modal',
   templateUrl: './rbd-trash-purge-modal.component.html',
-  styleUrls: ['./rbd-trash-purge-modal.component.scss']
+  styleUrls: ['./rbd-trash-purge-modal.component.scss'],
+  standalone: false
 })
-export class RbdTrashPurgeModalComponent implements OnInit {
+export class RbdTrashPurgeModalComponent extends BaseModal implements OnInit {
   poolPermission: Permission;
   purgeForm: CdFormGroup;
   pools: any[];
@@ -26,12 +27,12 @@ export class RbdTrashPurgeModalComponent implements OnInit {
   constructor(
     private authStorageService: AuthStorageService,
     private rbdService: RbdService,
-    public activeModal: NgbActiveModal,
     public actionLabels: ActionLabelsI18n,
     private fb: CdFormBuilder,
     private poolService: PoolService,
     private taskWrapper: TaskWrapperService
   ) {
+    super();
     this.poolPermission = this.authStorageService.getPermissions().pool;
   }
 
@@ -67,7 +68,7 @@ export class RbdTrashPurgeModalComponent implements OnInit {
           this.purgeForm.setErrors({ cdSubmitButton: true });
         },
         complete: () => {
-          this.activeModal.close();
+          this.closeModal();
         }
       });
   }

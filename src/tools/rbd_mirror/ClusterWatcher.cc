@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "ClusterWatcher.h"
 #include "include/stringify.h"
@@ -185,10 +185,10 @@ void ClusterWatcher::read_pool_peers(PoolPeers *pool_peers)
 }
 
 int ClusterWatcher::read_site_name(std::string* site_name) {
-  dout(10) << dendl;
-
   librbd::RBD rbd;
-  return rbd.mirror_site_name_get(*m_cluster, site_name);
+  int r = rbd.mirror_site_name_get(*m_cluster, site_name);
+  dout(10) << "site_name=" << *site_name << ", r=" << r << dendl;
+  return r;
 }
 
 int ClusterWatcher::resolve_peer_site_config_keys(int64_t pool_id,
@@ -205,9 +205,8 @@ int ClusterWatcher::resolve_peer_site_config_keys(int64_t pool_id,
         "/" + peer->uuid + "\""
     "}";
 
-  bufferlist in_bl;
   bufferlist out_bl;
-  int r = m_cluster->mon_command(cmd, in_bl, &out_bl, nullptr);
+  int r = m_cluster->mon_command(std::move(cmd), {}, &out_bl, nullptr);
   if (r == -ENOENT || out_bl.length() == 0) {
     return 0;
   } else if (r < 0) {

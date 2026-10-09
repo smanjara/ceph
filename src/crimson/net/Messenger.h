@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -57,6 +58,8 @@ public:
 
   virtual void set_auth_server(crimson::auth::AuthServer *) = 0;
 
+  virtual seastar::future<> mark_down(const entity_addr_t &addr) = 0;
+
   using bind_ertr = crimson::errorator<
     crimson::ct_error::address_in_use, // The address (range) is already bound
     crimson::ct_error::address_not_available
@@ -108,7 +111,8 @@ public:
   static MessengerRef
   create(const entity_name_t& name,
          const std::string& lname,
-         const uint64_t nonce);
+         uint64_t nonce,
+         bool dispatch_only_on_this_shard);
 
 #ifdef UNIT_TESTS_BUILT
   virtual void set_interceptor(Interceptor *) = 0;

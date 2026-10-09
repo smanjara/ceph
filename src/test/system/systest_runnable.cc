@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -97,8 +98,10 @@ start()
     #else
     std::string err_msg;
     ret = preforker.prefork(err_msg);
-    if (ret < 0)
-      preforker.exit(ret);
+    if (ret < 0) {
+      printf("prefork failed: %s\n", err_msg.c_str());
+      return ret;
+    }
 
     if (preforker.is_child()) {
       m_started = true;

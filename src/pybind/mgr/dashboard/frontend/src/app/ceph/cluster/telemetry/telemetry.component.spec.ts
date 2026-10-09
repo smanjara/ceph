@@ -5,12 +5,11 @@ import { Router } from '@angular/router';
 import { RouterTestingModule } from '@angular/router/testing';
 
 import _ from 'lodash';
-import { ToastrModule } from 'ngx-toastr';
+
 import { of as observableOf } from 'rxjs';
 
 import { MgrModuleService } from '~/app/shared/api/mgr-module.service';
-import { DownloadButtonComponent } from '~/app/shared/components/download-button/download-button.component';
-import { LoadingPanelComponent } from '~/app/shared/components/loading-panel/loading-panel.component';
+import { LoadingStatus } from '~/app/shared/forms/cd-form';
 import { SharedModule } from '~/app/shared/shared.module';
 import { configureTestBed } from '~/testing/unit-test-helper';
 import { TelemetryComponent } from './telemetry.component';
@@ -46,19 +45,10 @@ describe('TelemetryComponent', () => {
     'url'
   ];
 
-  configureTestBed(
-    {
-      declarations: [TelemetryComponent],
-      imports: [
-        HttpClientTestingModule,
-        ReactiveFormsModule,
-        RouterTestingModule,
-        SharedModule,
-        ToastrModule.forRoot()
-      ]
-    },
-    [LoadingPanelComponent, DownloadButtonComponent]
-  );
+  configureTestBed({
+    declarations: [TelemetryComponent],
+    imports: [HttpClientTestingModule, ReactiveFormsModule, RouterTestingModule, SharedModule]
+  });
 
   describe('configForm', () => {
     beforeEach(() => {
@@ -164,6 +154,37 @@ describe('TelemetryComponent', () => {
 
     it('should create', () => {
       expect(component).toBeTruthy();
+    });
+
+    describe('licenseAgrmt validation', () => {
+      beforeEach(() => {
+        component.report = { report: { report_id: 42, channels_available: [] } };
+        component.reportId = 42;
+        component['createPreviewForm']();
+        component.loading = LoadingStatus.Ready;
+        component.step = 2;
+        fixture.detectChanges();
+      });
+
+      it('should render the "This field is required." message when unchecked and dirty', () => {
+        component.previewForm.get('licenseAgrmt').setValue(false);
+        component.previewForm.get('licenseAgrmt').markAsDirty();
+        fixture.detectChanges();
+
+        const errorEl = fixture.nativeElement.querySelector('span.invalid-feedback') as HTMLElement;
+
+        expect(errorEl).toBeTruthy();
+        expect(errorEl.textContent.trim()).toBe('This field is required.');
+      });
+
+      it('should not render the "This field is required." message when checked', () => {
+        component.previewForm.get('licenseAgrmt').setValue(true);
+        component.previewForm.get('licenseAgrmt').markAsDirty();
+        fixture.detectChanges();
+
+        const errorEl = fixture.nativeElement.querySelector('span.invalid-feedback');
+        expect(errorEl).toBeFalsy();
+      });
     });
 
     it('should only replace the ranges and values of a JSON object', () => {
@@ -299,7 +320,8 @@ describe('TelemetryComponent', () => {
       });
     });
 
-    it('should submit', () => {
+    it('should submit when telemetry is not yet enabled', () => {
+      component.moduleEnabled = false;
       component.onSubmit();
       const req1 = httpTesting.expectOne('api/telemetry');
       expect(req1.request.method).toBe('PUT');
@@ -316,6 +338,21 @@ describe('TelemetryComponent', () => {
         config: {}
       });
       req2.flush({});
+      expect(router.url).toBe('/');
+    });
+
+    it('should only update config when telemetry is already enabled', () => {
+      component.moduleEnabled = true;
+      component.onSubmit();
+      httpTesting.expectNone('api/telemetry');
+      const req = httpTesting.expectOne({
+        url: 'api/mgr/module/telemetry',
+        method: 'PUT'
+      });
+      expect(req.request.body).toEqual({
+        config: {}
+      });
+      req.flush({});
       expect(router.url).toBe('/');
     });
   });

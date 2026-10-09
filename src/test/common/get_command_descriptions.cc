@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -46,10 +47,9 @@ static void usage(ostream &out)
 static void json_print(const std::vector<MonCommand> &mon_commands)
 {
   bufferlist rdata;
-  Formatter *f = Formatter::create("json");
-  Monitor::format_command_descriptions(mon_commands, f,
+  auto f = Formatter::create_unique("json");
+  Monitor::format_command_descriptions(mon_commands, f.get(),
                                        CEPH_FEATURES_ALL, &rdata);
-  delete f;
   string data(rdata.c_str(), rdata.length());
   cout << data << std::endl;
 }

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "test/librbd/test_mock_fixture.h"
 #include "include/rbd/librbd.hpp"
@@ -92,6 +92,7 @@ struct DiffRequest<MockTestImageCtx> {
   static DiffRequest* s_instance;
   static DiffRequest* create(MockTestImageCtx *image_ctx,
                              uint64_t snap_id_start, uint64_t snap_id_end,
+                             uint64_t start_object_no, uint64_t end_object_no,
                              BitVector<2>* object_diff_state,
                              Context* on_finish) {
     ceph_assert(s_instance != nullptr);

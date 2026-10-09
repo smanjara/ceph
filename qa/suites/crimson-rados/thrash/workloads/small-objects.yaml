@@ -9,13 +9,13 @@ tasks:
     max_in_flight: 64
     objects: 1024
     size: 16384
+    max_attr_len: 8192
     op_weights:
       read: 100
       write: 100
       delete: 50
-      snap_create: 0
-      snap_remove: 0
-      # TODO: CEPH_OSD_OP_ROLLBACK
+      snap_create: 50
+      snap_remove: 50
       rollback: 0
       # TODO: CEPH_OSD_OP_COPY_FROM
       copy_from: 0

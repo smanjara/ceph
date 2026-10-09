@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab expandtab
+// vim: ts=8 sw=2 sts=2 expandtab expandtab
 
 #include "thread_pool.h"
 
@@ -7,6 +7,7 @@
 #include <pthread.h>
 
 #include "include/ceph_assert.h"
+#include "include/intarith.h" // for round_up_to()
 #include "crimson/common/config_proxy.h"
 
 using crimson::common::local_conf;
@@ -17,7 +18,7 @@ ThreadPool::ThreadPool(size_t n_threads,
                        size_t queue_sz,
                        const std::optional<seastar::resource::cpuset>& cpus)
   : n_threads(n_threads),
-    queue_size{round_up_to(queue_sz, seastar::smp::count)},
+    queue_size{round_up_to(queue_sz, seastar::this_smp_shard_count())},
     pending_queues(n_threads)
 {
   auto queue_max_wait = std::chrono::seconds(local_conf()->threadpool_empty_queue_max_wait);
@@ -27,7 +28,7 @@ ThreadPool::ThreadPool(size_t n_threads,
         pin(*cpus);
       }
       block_sighup();
-      (void) pthread_setname_np(pthread_self(), "alien-store-tp");
+      (void) ceph_pthread_setname("alien-store-tp");
       loop(queue_max_wait, i);
     });
   }
@@ -81,7 +82,7 @@ void ThreadPool::loop(std::chrono::milliseconds queue_max_wait, size_t shard)
 
 seastar::future<> ThreadPool::start()
 {
-  auto slots_per_shard = queue_size / seastar::smp::count;
+  auto slots_per_shard = queue_size / seastar::this_smp_shard_count();
   return submit_queue.start(slots_per_shard);
 }
 

@@ -176,7 +176,7 @@ void JSONObj::init(JSONObj *p, Value v, string n)
   if (v.type() == str_type) {
     val.set(v.get_str(), true);
   } else {
-    val.set(json_spirit::write_string(v), false);
+    val.set(json_spirit::write_string(v, raw_utf8), false);
   }
   attr_map.insert(pair<string,data_val>(name, val));
 }
@@ -249,7 +249,7 @@ bool JSONParser::parse(const char *buf_, int len)
       if (data.type() == str_type) {
         val.set(data.get_str(), true);
       } else {
-        const std::string& s = json_spirit::write_string(data);
+        const std::string& s = json_spirit::write_string(data, raw_utf8);
         if (s.size() == (uint64_t)len) { /* Check if entire string is read */
           val.set(s, false);
         } else {
@@ -991,5 +991,31 @@ bool JSONFormattable::handle_close_section() {
   enc_stack.pop_back();
   cur_enc = enc_stack.back();
   return false; /* continue processing */
+}
+
+void JSONFormattable::encode(ceph::buffer::list& bl) const {
+  ENCODE_START(2, 1, bl);
+  encode((uint8_t)type, bl);
+  encode(value.str, bl);
+  encode(arr, bl);
+  encode(obj, bl);
+  encode(value.quoted, bl);
+  ENCODE_FINISH(bl);
+}
+
+void JSONFormattable::decode(ceph::buffer::list::const_iterator& bl) {
+  DECODE_START(2, bl);
+  uint8_t t;
+  decode(t, bl);
+  type = (Type)t;
+  decode(value.str, bl);
+  decode(arr, bl);
+  decode(obj, bl);
+  if (struct_v >= 2) {
+    decode(value.quoted, bl);
+  } else {
+    value.quoted = true;
+  }
+  DECODE_FINISH(bl);
 }
 

@@ -7,7 +7,7 @@ function run() {
 
     export CEPH_MON="127.0.0.1:7147" # git grep '\<7147\>' : there must be only one
     export CEPH_ARGS
-    CEPH_ARGS+="--fsid=$(uuidgen) --auth-supported=none "
+    CEPH_ARGS+="--fsid=$(uuidgen) --auth_cluster_required=none --auth_service_required=none --auth_client_required=none "
     CEPH_ARGS+="--mon-host=$CEPH_MON --mon_min_osdmap_epochs=50 --paxos_service_trim_min=10"
 
     local funcs=${@:-$(set | sed -n -e 's/^\(TEST_[0-9a-z_]*\) .*/\1/p')}
@@ -103,7 +103,7 @@ function TEST_import_after_merge_and_gap() {
 
     ceph osd pool set foo pg_num 1
     sleep 5
-    while ceph daemon osd.0 perf dump | jq '.osd.numpg' | grep 2 ; do sleep 1 ; done
+    while CEPH_ARGS='' ceph --admin-daemon $(get_asok_path osd.0) perf dump | jq '.osd.numpg' | grep 2 ; do sleep 1 ; done
     wait_for_clean || return 1
 
     #
@@ -176,7 +176,7 @@ function TEST_import_after_split() {
 
     ceph osd pool set foo pg_num 2
     sleep 5
-    while ceph daemon osd.0 perf dump | jq '.osd.numpg' | grep 1 ; do sleep 1 ; done
+    while CEPH_ARGS='' ceph --admin-daemon $(get_asok_path osd.0) perf dump | jq '.osd.numpg' | grep 1 ; do sleep 1 ; done
     wait_for_clean || return 1
 
     kill_daemons $dir TERM osd.0 || return 1

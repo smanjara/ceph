@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -18,18 +19,23 @@
 #include <atomic>
 #include <map>
 #include <set>
+#include <string>
+#include <vector>
 
 #include <fmt/format.h>
 #include <fmt/ostream.h>
 
-#include "include/types.h"
+#include "include/utime.h"
+#include "include/types.h" // for version_t
 #include "PaxosService.h"
 
 #include "common/config_fwd.h"
+#include "common/debug.h"
 #include "common/LogEntry.h"
 #include "include/str_map.h"
 
 class MLog;
+struct Subscription;
 
 static const std::string LOG_META_CHANNEL = "$channel";
 
@@ -44,7 +50,7 @@ class LogMonitor : public PaxosService,
                    public md_config_obs_t {
 private:
   std::multimap<utime_t,LogEntry> pending_log;
-  unordered_set<LogEntryKey> pending_keys;
+  std::unordered_set<LogEntryKey> pending_keys;
 
   LogSummary summary;
 
@@ -57,11 +63,10 @@ private:
   struct log_channel_info {
 
     std::map<std::string,std::string> log_to_syslog;
-    std::map<std::string,std::string> syslog_level;
     std::map<std::string,std::string> syslog_facility;
     std::map<std::string,std::string> log_file;
     std::map<std::string,std::string> expanded_log_file;
-    std::map<std::string,std::string> log_file_level;
+    std::map<std::string,std::string> log_level;
     std::map<std::string,std::string> log_to_graylog;
     std::map<std::string,std::string> log_to_graylog_host;
     std::map<std::string,std::string> log_to_graylog_port;
@@ -84,9 +89,8 @@ private:
      */
     void expand_channel_meta() {
       expand_channel_meta(log_to_syslog);
-      expand_channel_meta(syslog_level);
       expand_channel_meta(syslog_facility);
-      expand_channel_meta(log_file_level);
+      expand_channel_meta(log_level);
     }
     void expand_channel_meta(std::map<std::string,std::string> &m);
     std::string expand_channel_meta(const std::string &input,
@@ -99,15 +103,10 @@ private:
                              &CLOG_CONFIG_DEFAULT_KEY);
     }
 
-    std::string get_level(const std::string &channel) {
-      return get_str_map_key(syslog_level, channel,
-                             &CLOG_CONFIG_DEFAULT_KEY);
-    }
-
     std::string get_log_file(const std::string &channel);
 
-    std::string get_log_file_level(const std::string &channel) {
-      return get_str_map_key(log_file_level, channel,
+    std::string get_log_level(const std::string &channel) {
+      return get_str_map_key(log_level, channel,
                              &CLOG_CONFIG_DEFAULT_KEY);
     }
 
@@ -189,21 +188,7 @@ private:
     g_conf().remove_observer(this);
   }
 
-  const char **get_tracked_conf_keys() const override {
-    static const char* KEYS[] = {
-      "mon_cluster_log_to_syslog",
-      "mon_cluster_log_to_syslog_level",
-      "mon_cluster_log_to_syslog_facility",
-      "mon_cluster_log_file",
-      "mon_cluster_log_file_level",
-      "mon_cluster_log_to_graylog",
-      "mon_cluster_log_to_graylog_host",
-      "mon_cluster_log_to_graylog_port",
-      "mon_cluster_log_to_journald",
-      NULL
-    };
-    return KEYS;
-  }
+  std::vector<std::string> get_tracked_keys() const noexcept override;
   void handle_conf_change(const ConfigProxy& conf,
                           const std::set<std::string> &changed) override;
 };

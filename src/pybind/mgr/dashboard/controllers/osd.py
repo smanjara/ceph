@@ -5,12 +5,14 @@ import logging
 import time
 from typing import Any, Dict, List, Optional, Union
 
+import cherrypy
 from ceph.deployment.drive_group import DriveGroupSpec, DriveGroupValidationError  # type: ignore
 from mgr_util import get_most_recent_rate
 
 from .. import mgr
 from ..exceptions import DashboardException
 from ..security import Scope
+from ..services._paginate import ListPaginator
 from ..services.ceph_service import CephService, SendCommandError
 from ..services.exception import handle_orchestrator_error, handle_send_command_error
 from ..services.orchestrator import OrchClient, OrchFeature
@@ -22,7 +24,7 @@ from . import APIDoc, APIRouter, CreatePermission, DeletePermission, Endpoint, \
 from ._version import APIVersion
 from .orchestrator import raise_if_no_orchestrator
 
-logger = logging.getLogger('controllers.osd')
+logger = logging.getLogger(__name__)
 
 SAFE_TO_DESTROY_SCHEMA = {
     "safe_to_destroy": ([str], "Is OSD safe to destroy?"),
@@ -121,8 +123,30 @@ def osd_task(name, metadata, wait_for=2.0):
 @APIRouter('/osd', Scope.OSD)
 @APIDoc('OSD management API', 'OSD')
 class Osd(RESTController):
-    def list(self):
-        osds = self.get_osd_map()
+    @RESTController.MethodMap(version=APIVersion(1, 1))
+    def list(self, offset: int = 0, limit: int = 10,
+             search: str = '', sort: str = ''):
+        all_osds = self.get_osd_map()
+
+        paginator = ListPaginator(int(offset), int(limit), sort, search,
+                                  input_list=all_osds.values(),
+                                  searchable_params=['id'],
+                                  sortable_params=['id'],
+                                  default_sort='+id')
+
+        cherrypy.response.headers['X-Total-Count'] = paginator.get_count()
+
+        paginated_osds_list = list(paginator.list())
+        # creating a dictionary to have faster lookups
+        paginated_osds_by_id = {osd['id']: osd for osd in paginated_osds_list}
+        try:
+            osds = {
+                key: paginated_osds_by_id[int(key)]
+                for key in all_osds.keys()
+                if int(key) in paginated_osds_by_id
+            }
+        except ValueError as e:
+            raise DashboardException(e, component='osd', http_status_code=400)
 
         # Extending by osd stats information
         for stat in mgr.get('osd_stats')['osd_stats']:
@@ -163,16 +187,25 @@ class Osd(RESTController):
             osd['stats_history'][prop] = rates
             # Gauge stats
         for stat in ['osd.numpg', 'osd.stat_bytes', 'osd.stat_bytes_used']:
-            osd['stats'][stat.split('.')[1]] = mgr.get_latest('osd', osd_spec, stat)
+            osd["stats"][stat.split(".")[1]] = mgr.get_unlabeled_counter_latest(
+                "osd", osd_spec, stat
+            )
 
     @RESTController.Collection('GET', version=APIVersion.EXPERIMENTAL)
     @ReadPermission
     def settings(self):
-        result = CephService.send_command('mon', 'osd dump')
-        return {
-            'nearfull_ratio': result['nearfull_ratio'],
-            'full_ratio': result['full_ratio']
+        data = {
+            'nearfull_ratio': -1,
+            'full_ratio': -1
         }
+        try:
+            result = CephService.send_command('mon', 'osd dump')
+            data['nearfull_ratio'] = result['nearfull_ratio']
+            data['full_ratio'] = result['full_ratio']
+        except TypeError:
+            logger.error(
+                'Error setting nearfull_ratio and full_ratio:', exc_info=True)
+        return data
 
     def _get_operational_status(self, osd_id: int, removing_osd_ids: Optional[List[int]]):
         if removing_osd_ids is None:
@@ -185,7 +218,7 @@ class Osd(RESTController):
     def get_removing_osds() -> Optional[List[int]]:
         orch = OrchClient.instance()
         if orch.available(features=[OrchFeature.OSD_GET_REMOVE_STATUS]):
-            return [osd.osd_id for osd in orch.osds.removing_status()]
+            return [osd['osd_id'] for osd in orch.osds.removing_status()]
         return None
 
     @staticmethod
@@ -307,7 +340,7 @@ class Osd(RESTController):
         while True:
             removal_osds = orch.osds.removing_status()
             logger.info('Current removing OSDs %s', removal_osds)
-            pending = [osd for osd in removal_osds if osd.osd_id == int(svc_id)]
+            pending = [osd for osd in removal_osds if osd['osd_id'] == int(svc_id)]
             if not pending:
                 break
             logger.info('Wait until osd.%s is removed...', svc_id)

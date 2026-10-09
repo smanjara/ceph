@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_CACHE_PARENT_WRITE_LOG
 #define CEPH_LIBRBD_CACHE_PARENT_WRITE_LOG
@@ -298,7 +298,7 @@ protected:
   mutable ceph::mutex m_log_retire_lock;
   /* Hold a read lock on m_entry_reader_lock to add readers to log entry
    * bufs. Hold a write lock to prevent readers from being added (e.g. when
-   * removing log entrys from the map). No lock required to remove readers. */
+   * removing log entries from the map). No lock required to remove readers. */
   mutable RWLock m_entry_reader_lock;
   /* Hold m_log_append_lock while appending or retiring log entries. */
   mutable ceph::mutex m_log_append_lock;

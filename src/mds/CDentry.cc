@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -17,13 +18,19 @@
 #include "CDentry.h"
 #include "CInode.h"
 #include "CDir.h"
-
+#include "SnapClient.h"
+#include "SnapRealm.h"
+#include "BatchOp.h"
 #include "MDSRank.h"
 #include "MDCache.h"
 #include "Locker.h"
 #include "LogSegment.h"
 
 #include "messages/MLock.h"
+
+#include "common/debug.h"
+#include "common/strescape.h" // for binstrprint()
+#include "include/filepath.h"
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_mds
@@ -32,13 +39,45 @@
 
 using namespace std;
 
-ostream& CDentry::print_db_line_prefix(ostream& out)
+CDentry::CDentry(std::string_view n, __u32 h,
+		 mempool::mds_co::string alternate_name,
+		 snapid_t f, snapid_t l) :
+  hash(h),
+  first(f), last(l),
+  item_dirty(this),
+  lock(this, &lock_type),
+  versionlock(this, &versionlock_type),
+  name(n),
+  alternate_name(std::move(alternate_name))
+{}
+
+CDentry::CDentry(std::string_view n, __u32 h,
+		 mempool::mds_co::string alternate_name,
+		 inodeno_t ino, unsigned char dt,
+		 snapid_t f, snapid_t l) :
+  hash(h),
+  first(f), last(l),
+  item_dirty(this),
+  lock(this, &lock_type),
+  versionlock(this, &versionlock_type),
+  name(n),
+  alternate_name(std::move(alternate_name))
+{
+  linkage.remote_ino = ino;
+  linkage.remote_d_type = dt;
+}
+
+CDentry::~CDentry() {
+  ceph_assert(batch_ops.empty());
+}
+
+ostream& CDentry::print_db_line_prefix(ostream& out) const
 {
   return out << ceph_clock_now() << " mds." << dir->mdcache->mds->get_nodeid() << ".cache.den(" << dir->ino() << " " << name << ") ";
 }
 
-LockType CDentry::lock_type(CEPH_LOCK_DN);
-LockType CDentry::versionlock_type(CEPH_LOCK_DVERSION);
+const LockType CDentry::lock_type(CEPH_LOCK_DN);
+const LockType CDentry::versionlock_type(CEPH_LOCK_DVERSION);
 
 
 // CDentry
@@ -46,7 +85,7 @@ LockType CDentry::versionlock_type(CEPH_LOCK_DVERSION);
 ostream& operator<<(ostream& out, const CDentry& dn)
 {
   filepath path;
-  dn.make_path(path);
+  dn.make_trimmed_path(path);
   
   out << "[dentry " << path;
   
@@ -134,7 +173,7 @@ bool operator<(const CDentry& l, const CDentry& r)
 }
 
 
-void CDentry::print(ostream& out)
+void CDentry::print(ostream& out) const
 {
   out << *this;
 }
@@ -174,7 +213,7 @@ version_t CDentry::pre_dirty(version_t min)
 }
 
 
-void CDentry::_mark_dirty(LogSegment *ls)
+void CDentry::_mark_dirty(LogSegmentRef const& ls)
 {
   // state+pin
   if (!state_test(STATE_DIRTY)) {
@@ -188,7 +227,7 @@ void CDentry::_mark_dirty(LogSegment *ls)
     ls->dirty_dentries.push_back(&item_dirty);
 }
 
-void CDentry::mark_dirty(version_t pv, LogSegment *ls) 
+void CDentry::mark_dirty(version_t pv, LogSegmentRef const& ls) 
 {
   dout(10) << __func__ << " " << *this << dendl;
 
@@ -241,10 +280,11 @@ void CDentry::clear_auth()
   }
 }
 
-void CDentry::make_path_string(string& s, bool projected) const
+void CDentry::make_path_string(string& s, bool projected,
+			       int path_comp_count) const
 {
   if (dir) {
-    dir->inode->make_path_string(s, projected);
+    dir->inode->make_path_string(s, projected, NULL, path_comp_count);
   } else {
     s = "???";
   }
@@ -252,13 +292,62 @@ void CDentry::make_path_string(string& s, bool projected) const
   s.append(name.data(), name.length());
 }
 
-void CDentry::make_path(filepath& fp, bool projected) const
+/* path_comp_count = path component count. default value is 10 which implies
+ * generate entire path.
+ *
+ * XXX Generating more than 10 components of a path for printing in logs will
+ * consume too much time when the path is too long (imagine a path with 2000
+ * components) since the path would've to be generated indidividually for each
+ * log entry.
+ *
+ * Besides consuming too much time, such long paths in logs are not only not
+ * useful but also it makes reading logs harder. Therefore, shorten the path
+ * when used for logging.
+ */
+void CDentry::make_trimmed_path_string(string& s, bool projected,
+				       int path_comp_count) const
 {
-  ceph_assert(dir);
-  dir->inode->make_path(fp, projected);
-  fp.push_dentry(get_name());
+  make_path_string(s, projected, path_comp_count);
 }
 
+/* path_comp_count = path component count. default value is -1 which implies
+ * generate entire path.
+ */
+void CDentry::make_path(filepath& fp, bool projected,
+		        int path_comp_count) const
+{
+  fp.set_trimmed();
+
+  if (path_comp_count == -1) {
+    ceph_assert(dir);
+    dir->inode->make_path(fp, projected, path_comp_count);
+    fp.push_dentry(get_name());
+  } else if (path_comp_count >= 1) {
+    --path_comp_count;
+
+    ceph_assert(dir);
+    dir->inode->make_path(fp, projected, path_comp_count);
+    fp.push_dentry(get_name());
+  }
+}
+
+/* path_comp_count = path component count. default value is 10 which implies
+ * generate entire path.
+ *
+ * XXX Generating more than 10 components of a path for printing in logs will
+ * consume too much time when the path is too long (imagine a path with 2000
+ * components) since the path would've to be generated indidividually for each
+ * log entry.
+ *
+ * Besides consuming too much time, such long paths in logs are not only not
+ * useful but also it makes reading logs harder. Therefore, shorten the path
+ * when used for logging.
+ */
+void CDentry::make_trimmed_path(filepath& fp, bool projected,
+				int path_comp_count) const
+{
+  make_path(fp, projected, path_comp_count);
+}
 /*
  * we only add ourselves to remote_parents when the linkage is
  * active (no longer projected).  if the passed dnl is projected,
@@ -499,22 +588,30 @@ void CDentry::decode_lock_state(int type, const bufferlist& bl)
 }
 
 
-ClientLease *CDentry::add_client_lease(client_t c, Session *session) 
+MEMPOOL_DEFINE_OBJECT_FACTORY(ClientLease, mds_client_lease, mds_co);
+
+client_t ClientLease::get_client() const
 {
-  ClientLease *l;
-  if (client_lease_map.count(c))
-    l = client_lease_map[c];
-  else {
-    dout(20) << __func__ << " client." << c << " on " << lock << dendl;
-    if (client_lease_map.empty()) {
+  return session->get_client();
+}
+
+ClientLease *CDentry::add_client_lease(Session *session)
+{
+  client_t client = session->get_client();
+  ClientLease* l = nullptr;
+  auto it = client_leases.lower_bound(client);
+  if (it == client_leases.end() || it->get_client() != client) {
+    l = new ClientLease(this, session);
+    dout(20) << __func__ << " client." << client << " on " << lock << dendl;
+    if (client_leases.empty()) {
       get(PIN_CLIENTLEASE);
       lock.get_client_lease();
     }
-    l = client_lease_map[c] = new ClientLease(c, this);
+    client_leases.insert_before(it, *l);
     l->seq = ++session->lease_seq;
-  
+  } else {
+    l = &(*it);
   }
-  
   return l;
 }
 
@@ -523,15 +620,14 @@ void CDentry::remove_client_lease(ClientLease *l, Locker *locker)
   ceph_assert(l->parent == this);
 
   bool gather = false;
+  dout(20) << __func__ << " client." << l->get_client() << " on " << lock << dendl;
 
-  dout(20) << __func__ << " client." << l->client << " on " << lock << dendl;
-
-  client_lease_map.erase(l->client);
   l->item_lease.remove_myself();
   l->item_session_lease.remove_myself();
+  client_leases.erase(client_leases.iterator_to(*l));
   delete l;
 
-  if (client_lease_map.empty()) {
+  if (client_leases.empty()) {
     gather = !lock.is_stable();
     lock.put_client_lease();
     put(PIN_CLIENTLEASE);
@@ -543,8 +639,8 @@ void CDentry::remove_client_lease(ClientLease *l, Locker *locker)
 
 void CDentry::remove_client_leases(Locker *locker)
 {
-  while (!client_lease_map.empty())
-    remove_client_lease(client_lease_map.begin()->second, locker);
+  while (!client_leases.empty())
+    remove_client_lease(&(*client_leases.begin()), locker);
 }
 
 void CDentry::_put()
@@ -567,6 +663,7 @@ void CDentry::encode_remote(inodeno_t& ino, unsigned char d_type,
 
   // marker, name, ino
   ENCODE_START(2, 1, bl);
+  // WARNING: always put new fields at the end of bl
   encode(ino, bl);
   encode(d_type, bl);
   encode(alternate_name, bl);
@@ -598,6 +695,15 @@ void CDentry::dump(Formatter *f) const
   make_path(path);
 
   f->dump_string("path", path.get_path());
+  if (auto s =  get_alternate_name(); !s.empty()) {
+    bufferlist bl, b64;
+    bl.append(s);
+    bl.encode_base64(b64);
+    auto encoded = std::string_view(b64.c_str(), b64.length());
+    f->dump_string("alternate_name", encoded);
+  } else {
+    f->dump_string("alternate_name", "");
+  }
   f->dump_unsigned("path_ino", path.get_ino().val);
   f->dump_unsigned("snap_first", first);
   f->dump_unsigned("snap_last", last);
@@ -693,6 +799,29 @@ bool CDentry::scrub(snapid_t next_seq)
         /* TODO: maybe trim? */
       }
     }
+  }
+  return false;
+}
+
+bool CDentry::check_corruption(bool load)
+{
+  auto&& snapclient = dir->mdcache->mds->snapclient;
+  auto next_snap = snapclient->get_last_seq()+1;
+  if (first > last || (snapclient->is_synced() && first > next_snap)) {
+    if (load) {
+      dout(1) << "loaded already corrupt dentry: " << *this << dendl;
+      corrupt_first_loaded = true;
+    } else {
+      derr << "newly corrupt dentry to be committed: " << *this << " with next_snap: " << next_snap << dendl;
+    }
+    if (g_conf().get_val<bool>("mds_go_bad_corrupt_dentry")) {
+      dir->go_bad_dentry(last, get_name());
+    }
+    if (!load && g_conf().get_val<bool>("mds_abort_on_newly_corrupt_dentry")) {
+      dir->mdcache->mds->clog->error() << "MDS abort because newly corrupt dentry to be committed: " << *this;
+      dir->mdcache->mds->abort("detected newly corrupt dentry"); /* avoid writing out newly corrupted dn */
+    }
+    return true;
   }
   return false;
 }

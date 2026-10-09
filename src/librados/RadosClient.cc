@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -32,6 +33,7 @@
 #include "include/buffer.h"
 #include "include/stringify.h"
 #include "include/util.h"
+#include "log/Log.h"
 
 #include "msg/Messenger.h"
 
@@ -54,6 +56,7 @@ using std::ostringstream;
 using std::string;
 using std::map;
 using std::vector;
+using namespace std::literals;
 
 namespace bc = boost::container;
 namespace bs = boost::system;
@@ -257,7 +260,8 @@ int librados::RadosClient::connect()
 
   ldout(cct, 1) << "starting objecter" << dendl;
 
-  objecter = new (std::nothrow) Objecter(cct, messenger, &monclient, poolctx);
+  objecter = new (std::nothrow) Objecter(cct, messenger, &monclient, poolctx,
+					 objecter_admin_socket_name);
   if (!objecter)
     goto out;
   objecter->set_balanced_budget();
@@ -631,16 +635,22 @@ int librados::RadosClient::get_pool_stats(std::list<string>& pools,
   return 0;
 }
 
-bool librados::RadosClient::get_pool_is_selfmanaged_snaps_mode(
+int librados::RadosClient::pool_is_in_selfmanaged_snaps_mode(
   const std::string& pool)
 {
-  bool ret = false;
-  objecter->with_osdmap([&](const OSDMap& osdmap) {
+  int r = wait_for_osdmap();
+  if (r < 0) {
+    return r;
+  }
+
+  return objecter->with_osdmap([&pool](const OSDMap& osdmap) {
       int64_t poolid = osdmap.lookup_pg_pool_name(pool);
-      if (poolid >= 0)
-	ret = osdmap.get_pg_pool(poolid)->is_unmanaged_snaps_mode();
+      if (poolid < 0) {
+        return -ENOENT;
+      }
+      return static_cast<int>(
+        osdmap.get_pg_pool(poolid)->is_unmanaged_snaps_mode());
     });
-  return ret;
 }
 
 int librados::RadosClient::get_fs_stats(ceph_statfs& stats)
@@ -795,8 +805,7 @@ int librados::RadosClient::blocklist_add(const string& client_address,
 
   std::vector<std::string> cmds;
   cmds.push_back(cmd.str());
-  bufferlist inbl;
-  int r = mon_command(cmds, inbl, NULL, NULL);
+  int r = mon_command(std::move(cmds), {}, NULL, NULL);
   if (r == -EINVAL) {
     // try legacy blacklist command
     std::stringstream cmd;
@@ -810,7 +819,7 @@ int librados::RadosClient::blocklist_add(const string& client_address,
     cmd << "}";
     cmds.clear();
     cmds.push_back(cmd.str());
-    r = mon_command(cmds, inbl, NULL, NULL);
+    r = mon_command(std::move(cmds), {}, NULL, NULL);
   }
   if (r < 0) {
     return r;
@@ -821,22 +830,22 @@ int librados::RadosClient::blocklist_add(const string& client_address,
   return r;
 }
 
-int librados::RadosClient::mon_command(const vector<string>& cmd,
-				       const bufferlist &inbl,
+int librados::RadosClient::mon_command(vector<string>&& cmd,
+				       bufferlist &&inbl,
 				       bufferlist *outbl, string *outs)
 {
   C_SaferCond ctx;
-  mon_command_async(cmd, inbl, outbl, outs, &ctx);
+  mon_command_async(std::move(cmd), std::move(inbl), outbl, outs, &ctx);
   return ctx.wait();
 }
 
-void librados::RadosClient::mon_command_async(const vector<string>& cmd,
-                                              const bufferlist &inbl,
+void librados::RadosClient::mon_command_async(vector<string>&& cmd,
+                                              bufferlist &&inbl,
                                               bufferlist *outbl, string *outs,
                                               Context *on_finish)
 {
   std::lock_guard l{lock};
-  monclient.start_mon_command(cmd, inbl,
+  monclient.start_mon_command(std::move(cmd), std::move(inbl),
 			      [outs, outbl,
 			       on_finish = std::unique_ptr<Context>(on_finish)]
 			      (bs::error_code e,
@@ -852,14 +861,14 @@ void librados::RadosClient::mon_command_async(const vector<string>& cmd,
 			      });
 }
 
-int librados::RadosClient::mgr_command(const vector<string>& cmd,
-				       const bufferlist &inbl,
+int librados::RadosClient::mgr_command(vector<string>&& cmd,
+				       bufferlist &&inbl,
 				       bufferlist *outbl, string *outs)
 {
   std::lock_guard l(lock);
 
   C_SaferCond cond;
-  int r = mgrclient.start_command(cmd, inbl, outbl, outs, &cond);
+  int r = mgrclient.start_command(std::move(cmd), std::move(inbl), outbl, outs, &cond);
   if (r < 0)
     return r;
 
@@ -875,15 +884,15 @@ int librados::RadosClient::mgr_command(const vector<string>& cmd,
 }
 
 int librados::RadosClient::mgr_command(
-  const string& name,
-  const vector<string>& cmd,
-  const bufferlist &inbl,
+  string&& name,
+  vector<string>&& cmd,
+  bufferlist &&inbl,
   bufferlist *outbl, string *outs)
 {
   std::lock_guard l(lock);
 
   C_SaferCond cond;
-  int r = mgrclient.start_tell_command(name, cmd, inbl, outbl, outs, &cond);
+  int r = mgrclient.start_tell_command(std::move(name), std::move(cmd), std::move(inbl), outbl, outs, &cond);
   if (r < 0)
     return r;
 
@@ -899,12 +908,12 @@ int librados::RadosClient::mgr_command(
 }
 
 
-int librados::RadosClient::mon_command(int rank, const vector<string>& cmd,
-				       const bufferlist &inbl,
+int librados::RadosClient::mon_command(int rank, vector<string>&& cmd,
+				       bufferlist &&inbl,
 				       bufferlist *outbl, string *outs)
 {
   bs::error_code ec;
-  auto&& [s, bl] = monclient.start_mon_command(rank, cmd, inbl,
+  auto&& [s, bl] = monclient.start_mon_command(rank, std::move(cmd), std::move(inbl),
 					       ca::use_blocked[ec]);
   if (outs)
     *outs = std::move(s);
@@ -914,12 +923,12 @@ int librados::RadosClient::mon_command(int rank, const vector<string>& cmd,
   return ceph::from_error_code(ec);
 }
 
-int librados::RadosClient::mon_command(string name, const vector<string>& cmd,
-				       const bufferlist &inbl,
+int librados::RadosClient::mon_command(std::string&& name, vector<string>&& cmd,
+				       bufferlist &&inbl,
 				       bufferlist *outbl, string *outs)
 {
   bs::error_code ec;
-  auto&& [s, bl] = monclient.start_mon_command(name, cmd, inbl,
+  auto&& [s, bl] = monclient.start_mon_command(std::move(name), std::move(cmd), std::move(inbl),
 					       ca::use_blocked[ec]);
   if (outs)
     *outs = std::move(s);
@@ -929,8 +938,8 @@ int librados::RadosClient::mon_command(string name, const vector<string>& cmd,
   return ceph::from_error_code(ec);
 }
 
-int librados::RadosClient::osd_command(int osd, vector<string>& cmd,
-				       const bufferlist& inbl,
+int librados::RadosClient::osd_command(int osd, vector<string>&& cmd,
+				       bufferlist&& inbl,
 				       bufferlist *poutbl, string *prs)
 {
   ceph_tid_t tid;
@@ -950,13 +959,13 @@ int librados::RadosClient::osd_command(int osd, vector<string>& cmd,
   return ceph::from_error_code(ec);
 }
 
-int librados::RadosClient::pg_command(pg_t pgid, vector<string>& cmd,
-				      const bufferlist& inbl,
+int librados::RadosClient::pg_command(pg_t pgid, vector<string>&& cmd,
+				      bufferlist&& inbl,
 				      bufferlist *poutbl, string *prs)
 {
   ceph_tid_t tid;
   bs::error_code ec;
-  auto [s, bl] = objecter->pg_command(pgid, std::move(cmd), inbl, &tid,
+  auto [s, bl] = objecter->pg_command(pgid, std::move(cmd), std::move(inbl), &tid,
 				      ca::use_blocked[ec]);
   if (poutbl)
     *poutbl = std::move(bl);
@@ -1123,9 +1132,9 @@ int librados::RadosClient::get_inconsistent_pgs(int64_t pool_id,
     "\"states\": [\"inconsistent\"],"
     "\"format\": \"json\"}"
   };
-  bufferlist inbl, outbl;
+  bufferlist outbl;
   string outstring;
-  if (auto ret = mgr_command(cmd, inbl, &outbl, &outstring); ret) {
+  if (auto ret = mgr_command(std::move(cmd), {}, &outbl, &outstring); ret) {
     return ret;
   }
   if (!outbl.length()) {
@@ -1162,14 +1171,13 @@ int librados::RadosClient::get_inconsistent_pgs(int64_t pool_id,
   return 0;
 }
 
-const char** librados::RadosClient::get_tracked_conf_keys() const
+std::vector<std::string> librados::RadosClient::get_tracked_keys()
+    const noexcept
 {
-  static const char *config_keys[] = {
-    "librados_thread_count",
-    "rados_mon_op_timeout",
-    nullptr
+  return {
+    "librados_thread_count"s,
+    "rados_mon_op_timeout"s
   };
-  return config_keys;
 }
 
 void librados::RadosClient::handle_conf_change(const ConfigProxy& conf,

@@ -2,10 +2,9 @@ import { HttpClientTestingModule } from '@angular/common/http/testing';
 import { Component, Input } from '@angular/core';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 
-import { TreeModule } from '@circlon/angular-tree-component';
 import { NgbNavModule } from '@ng-bootstrap/ng-bootstrap';
 import _ from 'lodash';
-import { ToastrModule } from 'ngx-toastr';
+
 import { of } from 'rxjs';
 
 import { CephfsService } from '~/app/shared/api/cephfs.service';
@@ -72,20 +71,14 @@ describe('CephfsTabsComponent', () => {
     component.softRefresh();
   };
 
-  @Component({ selector: 'cd-cephfs-chart', template: '' })
+  @Component({ selector: 'cd-cephfs-chart', template: '', standalone: false })
   class CephfsChartStubComponent {
     @Input()
     mdsCounter: any;
   }
 
   configureTestBed({
-    imports: [
-      SharedModule,
-      NgbNavModule,
-      HttpClientTestingModule,
-      TreeModule,
-      ToastrModule.forRoot()
-    ],
+    imports: [SharedModule, NgbNavModule, HttpClientTestingModule],
     declarations: [
       CephfsTabsComponent,
       CephfsChartStubComponent,

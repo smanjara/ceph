@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "OSDMapMapping.h"
 #include "OSDMap.h"
@@ -7,6 +7,7 @@
 #define dout_subsys ceph_subsys_mon
 
 #include "common/debug.h"
+#include "crush/crush.h" // for CRUSH_ITEM_NONE
 
 using std::vector;
 
@@ -158,7 +159,6 @@ void ParallelPGMapper::WQ::_process(Item *i, ThreadPool::TPHandle &h)
   else
     i->job->process(i->pool, i->begin, i->end);
   i->job->finish_one();
-  delete i;
 }
 
 void ParallelPGMapper::queue(

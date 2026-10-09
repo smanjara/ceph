@@ -15,7 +15,10 @@ import { RbdPool } from './rbd.model';
   providedIn: 'root'
 })
 export class RbdService extends ApiClient {
-  constructor(private http: HttpClient, private rbdConfigurationService: RbdConfigurationService) {
+  constructor(
+    private http: HttpClient,
+    private rbdConfigurationService: RbdConfigurationService
+  ) {
     super();
   }
 
@@ -89,9 +92,14 @@ export class RbdService extends ApiClient {
     return this.http.get<number>('api/block/image/clone_format_version');
   }
 
-  createSnapshot(imageSpec: ImageSpec, @cdEncodeNot snapshotName: string) {
+  createSnapshot(
+    imageSpec: ImageSpec,
+    @cdEncodeNot snapshotName: string,
+    mirrorImageSnapshot: boolean
+  ) {
     const request = {
-      snapshot_name: snapshotName
+      snapshot_name: snapshotName,
+      mirrorImageSnapshot: mirrorImageSnapshot
     };
     return this.http.post(`api/block/image/${imageSpec.toStringEncoded()}/snap`, request, {
       observe: 'response'

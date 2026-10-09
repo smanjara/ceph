@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "test/librbd/test_mock_fixture.h"
 #include "test/librbd/test_support.h"
@@ -274,7 +274,7 @@ TEST_F(TestMockParentCacheObjectDispatch, test_initialization_fail_at_register) 
   delete mock_parent_image_cache;
 }
 
-TEST_F(TestMockParentCacheObjectDispatch, test_disble_interface) {
+TEST_F(TestMockParentCacheObjectDispatch, test_disable_interface) {
   librbd::ImageCtx* ictx;
   ASSERT_EQ(0, open_image(m_image_name, &ictx));
   MockParentImageCacheImageCtx mock_image_ctx(*ictx);

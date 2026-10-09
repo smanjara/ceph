@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <seastar/core/sleep.hh>
 
@@ -35,6 +35,10 @@ public:
       return true;
     return false;
   }
+
+  void set_interrupt() {
+    interrupt = true;
+  }
 private:
   bool interrupt = false;
 };
@@ -64,9 +68,10 @@ TEST_F(seastar_test_suite_t, basic)
 	  return seastar::now();
 	}, errorator<ct_error::enoent>::all_same_way([] {
 	  ceph_assert(interruptible::interrupt_cond<TestInterruptCondition>.interrupt_cond);
+	  return seastar::now();
 	  })
 	);
-      }, [](std::exception_ptr) {}, false).get0();
+      }, [](std::exception_ptr) {}, false).get();
 
     interruptor::with_interruption(
       [] {
@@ -78,7 +83,7 @@ TEST_F(seastar_test_suite_t, basic)
       }, [](std::exception_ptr) {
 	ceph_assert(!interruptible::interrupt_cond<TestInterruptCondition>.interrupt_cond);
 	return seastar::now();
-      }, true).get0();
+      }, true).get();
 
 
   });
@@ -146,6 +151,7 @@ TEST_F(seastar_test_suite_t, loops)
 		return seastar::now();
 	      }, errorator<ct_error::enoent>::all_same_way([] {
 		ceph_assert(interruptible::interrupt_cond<TestInterruptCondition>.interrupt_cond);
+		return seastar::now();
 	      }));
 	    });
 	  });
@@ -167,6 +173,7 @@ TEST_F(seastar_test_suite_t, loops)
 		return seastar::now();
 	      }, errorator<ct_error::enoent>::all_same_way([] {
 		ceph_assert(interruptible::interrupt_cond<TestInterruptCondition>.interrupt_cond);
+		return seastar::now();
 	      }));
 	    });
 	  });
@@ -174,7 +181,7 @@ TEST_F(seastar_test_suite_t, loops)
 	  ceph_assert(interruptible::interrupt_cond<TestInterruptCondition>.interrupt_cond);
 	  return seastar::now();
 	});
-      }, [](std::exception_ptr) {}, false).get0();
+      }, [](std::exception_ptr) {}, false).get();
   });
 }
 
@@ -205,7 +212,7 @@ TEST_F(seastar_test_suite_t, errorated)
 	return base_iertr::now();
       }
     );
-    ret.unsafe_get0();
+    ret.unsafe_get();
   });
 }
 
@@ -218,7 +225,7 @@ TEST_F(seastar_test_suite_t, errorated_value)
 	  1
 	);
       });
-    EXPECT_EQ(ret.unsafe_get0(), 1);
+    EXPECT_EQ(ret.unsafe_get(), 1);
   });
 }
 
@@ -233,7 +240,7 @@ TEST_F(seastar_test_suite_t, expand_errorated_value)
 	  return base2_iertr::make_ready_future<>();
 	});
       });
-    ret.unsafe_get0();
+    ret.unsafe_get();
   });
 }
 
@@ -257,12 +264,111 @@ TEST_F(seastar_test_suite_t, interruptible_async)
       ceph_assert(interruptible::interrupt_cond<
 	TestInterruptCondition>.ref_count == 1);
       return fut;
-    }, [](std::exception_ptr) {}, false).get0();
+    }, [](std::exception_ptr) {}, false).get();
+  });
+
+}
+
+TEST_F(seastar_test_suite_t, interruptible_yield)
+{
+  using interruptor =
+    interruptible::interruptor<TestInterruptCondition>;
+
+  run_async([] {
+    bool interrupted = false;
+    auto fut = interruptor::with_interruption([] {
+      return interruptor::async([] {
+        interruptible::interrupt_cond<
+	  TestInterruptCondition>.interrupt_cond->set_interrupt();
+        interruptor::yield();
+        // the execution should be interrupted, the run should
+        // never reach here.
+        ceph_abort();
+      });
+    }, [&interrupted](std::exception_ptr) {
+      std::cout << "interrupted" << std::endl;
+      interrupted = true;
+    }, false);
+    fut.wait();
+    ceph_assert(interrupted);
+
+    interrupted = false;
+    fut = interruptor::with_interruption([] {
+      return interruptor::async([] {
+        interruptible::interrupt_cond<
+	  TestInterruptCondition>.interrupt_cond->set_interrupt();
+        interruptor::green_get(seastar::yield());
+        // the execution should be interrupted, the run should
+        // never reach here.
+        ceph_abort();
+      });
+    }, [&interrupted](std::exception_ptr) {
+      std::cout << "interrupted" << std::endl;
+      interrupted = true;
+    }, false);
+    fut.wait();
+    ceph_assert(interrupted);
+
+    interrupted = false;
+    fut = interruptor::with_interruption([] {
+      return interruptor::async([] {
+        interruptible::interrupt_cond<
+	  TestInterruptCondition>.interrupt_cond->set_interrupt();
+        interruptor::make_interruptible(seastar::yield()).get();
+        // the execution should be interrupted, the run should
+        // never reach here.
+        ceph_abort();
+      });
+    }, [&interrupted](std::exception_ptr) {
+      std::cout << "interrupted" << std::endl;
+      interrupted = true;
+    }, false);
+    fut.wait();
+    ceph_assert(interrupted);
   });
 }
 
-#if 0
-// This seems to cause a hang in the gcc-9 linker on bionic
+TEST_F(seastar_test_suite_t, DISABLED_nested_interruptors)
+{
+  run_async([] {
+    base_ertr::future<> ret = with_intr(
+      []() {
+	return base_iertr::now().safe_then_interruptible([]() {
+          return with_intr(
+            []() {
+              return base_iertr::now();
+            }
+          );
+        });
+      }
+    );
+    ret.unsafe_get();
+  });
+}
+
+TEST_F(seastar_test_suite_t, interruptible_repeat_eagain)
+{
+  using interruptor =
+    interruptible::interruptor<TestInterruptCondition>;
+  run_async([] {
+    interruptor::with_interruption([] {
+      return seastar::do_with(
+	0,
+	[](auto &i) {
+	return interruptor::repeat_eagain([&i]() -> base_iertr::future<> {
+	  if (++i < 5) {
+	    return crimson::ct_error::eagain::make();
+	  }
+	  return base_iertr::now();
+	}).si_then([&i] {
+	  std::cout << i << std::endl;
+	  ceph_assert(i == 5);
+	});
+      });
+    }, [](std::exception_ptr) {}, false).unsafe_get();
+  });
+}
+
 TEST_F(seastar_test_suite_t, handle_error)
 {
   run_async([] {
@@ -272,12 +378,11 @@ TEST_F(seastar_test_suite_t, handle_error)
 	  1
 	).handle_error_interruptible(
 	  base_iertr::pass_further{},
-	  ct_error::assert_all{"crash on eio"}
+	  ct_error::assert_all("crash on eio")
 	).si_then([](auto) {
 	  return base_iertr::now();
 	});
       });
-    ret.unsafe_get0();
+    ret.unsafe_get();
   });
 }
-#endif

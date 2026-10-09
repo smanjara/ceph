@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -28,8 +28,6 @@ static inline int64_t rgw_rounded_kb(int64_t bytes)
 class JSONObj;
 
 struct RGWQuotaInfo {
-  template<class T> friend class RGWQuotaCache;
-public:
   int64_t max_size;
   int64_t max_objects;
   bool enabled;
@@ -75,7 +73,7 @@ public:
   }
 
   void dump(Formatter *f) const;
-
+  static std::list<RGWQuotaInfo> generate_test_instances();
   void decode_json(JSONObj *obj);
 
 };

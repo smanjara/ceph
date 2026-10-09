@@ -4,7 +4,7 @@ import { BrowserAnimationsModule } from '@angular/platform-browser/animations';
 import { RouterTestingModule } from '@angular/router/testing';
 
 import { NgbNavModule } from '@ng-bootstrap/ng-bootstrap';
-import { ToastrModule } from 'ngx-toastr';
+
 import { of } from 'rxjs';
 
 import { NfsService } from '~/app/shared/api/nfs.service';
@@ -16,7 +16,9 @@ import { TaskListService } from '~/app/shared/services/task-list.service';
 import { SharedModule } from '~/app/shared/shared.module';
 import { configureTestBed, expectItemTasks, PermissionHelper } from '~/testing/unit-test-helper';
 import { NfsDetailsComponent } from '../nfs-details/nfs-details.component';
-import { NfsListComponent } from './nfs-list.component';
+import { NfsListComponent, RgwExportType } from './nfs-list.component';
+import { RGW_USER_EXPORT_PATH, SUPPORTED_FSAL } from '../models/nfs.fsal';
+import { CdTableSelection } from '~/app/shared/models/cd-table-selection';
 
 describe('NfsListComponent', () => {
   let component: NfsListComponent;
@@ -36,8 +38,7 @@ describe('NfsListComponent', () => {
       HttpClientTestingModule,
       RouterTestingModule,
       SharedModule,
-      NgbNavModule,
-      ToastrModule.forRoot()
+      NgbNavModule
     ],
     providers: [TaskListService]
   });
@@ -45,6 +46,7 @@ describe('NfsListComponent', () => {
   beforeEach(() => {
     fixture = TestBed.createComponent(NfsListComponent);
     component = fixture.componentInstance;
+    component.fsal = SUPPORTED_FSAL.CEPH;
     summaryService = TestBed.inject(SummaryService);
     nfsService = TestBed.inject(NfsService);
     httpTesting = TestBed.inject(HttpTestingController);
@@ -52,6 +54,53 @@ describe('NfsListComponent', () => {
 
   it('should create', () => {
     expect(component).toBeTruthy();
+  });
+
+  describe('edit action routerLink', () => {
+    let editRouterLink: () => string | [string, { rgw_export_type: RgwExportType }];
+
+    beforeEach(() => {
+      editRouterLink = component.tableActions.find((action) => action.permission === 'update')
+        .routerLink as () => string | [string, { rgw_export_type: RgwExportType }];
+    });
+
+    it('should return a plain string for CephFS edit (no route params)', () => {
+      component.fsal = SUPPORTED_FSAL.CEPH;
+      component.selection = new CdTableSelection([
+        { cluster_id: 'mycluster', export_id: '42', path: '/volumes/g1/sv1' }
+      ]);
+
+      const link = editRouterLink();
+
+      expect(typeof link).toBe('string');
+      expect(link).toBe('/cephfs/nfs/edit/mycluster/42');
+    });
+
+    it('should return array with rgw_export_type for RGW bucket edit', () => {
+      component.fsal = SUPPORTED_FSAL.RGW;
+      component.selection = new CdTableSelection([
+        { cluster_id: 'rgw-cluster', export_id: '7', path: '/my-bucket' }
+      ]);
+
+      const link = editRouterLink();
+
+      expect(Array.isArray(link)).toBe(true);
+      expect(link[0]).toBe('/rgw/nfs/edit/rgw-cluster/7');
+      expect(link[1]).toEqual({ rgw_export_type: RgwExportType.BUCKET });
+    });
+
+    it('should return array with rgw_export_type user for RGW user-level edit', () => {
+      component.fsal = SUPPORTED_FSAL.RGW;
+      component.selection = new CdTableSelection([
+        { cluster_id: 'rgw-cluster', export_id: '8', path: RGW_USER_EXPORT_PATH }
+      ]);
+
+      const link = editRouterLink();
+
+      expect(Array.isArray(link)).toBe(true);
+      expect(link[0]).toBe('/rgw/nfs/edit/rgw-cluster/8');
+      expect(link[1]).toEqual({ rgw_export_type: RgwExportType.USER });
+    });
   });
 
   describe('after ngOnInit', () => {
@@ -62,12 +111,6 @@ describe('NfsListComponent', () => {
 
     afterEach(() => {
       httpTesting.verify();
-    });
-
-    it('should load exports on init', () => {
-      refresh(new Summary());
-      httpTesting.expectOne('api/nfs-ganesha/export');
-      expect(nfsService.list).toHaveBeenCalled();
     });
 
     it('should not load images on init because no data', () => {
@@ -89,7 +132,9 @@ describe('NfsListComponent', () => {
       const model = {
         export_id: export_id,
         path: 'path_' + export_id,
-        fsal: 'fsal_' + export_id,
+        fsal: {
+          name: 'CEPH'
+        },
         cluster_id: 'cluster_' + export_id
       };
       exports.push(model);
@@ -102,7 +147,9 @@ describe('NfsListComponent', () => {
         case 'nfs/create':
           task.metadata = {
             path: 'path_' + export_id,
-            fsal: 'fsal_' + export_id,
+            fsal: {
+              name: 'CEPH'
+            },
             cluster_id: 'cluster_' + export_id
           };
           break;
@@ -160,35 +207,75 @@ describe('NfsListComponent', () => {
     expect(tableActions).toEqual({
       'create,update,delete': {
         actions: ['Create', 'Edit', 'Delete'],
-        primary: { multiple: 'Create', executing: 'Edit', single: 'Edit', no: 'Create' }
+        primary: {
+          multiple: 'Create',
+          executing: 'Create',
+          single: 'Create',
+          no: 'Create'
+        }
       },
       'create,update': {
         actions: ['Create', 'Edit'],
-        primary: { multiple: 'Create', executing: 'Edit', single: 'Edit', no: 'Create' }
+        primary: {
+          multiple: 'Create',
+          executing: 'Create',
+          single: 'Create',
+          no: 'Create'
+        }
       },
       'create,delete': {
         actions: ['Create', 'Delete'],
-        primary: { multiple: 'Create', executing: 'Delete', single: 'Delete', no: 'Create' }
+        primary: {
+          multiple: 'Create',
+          executing: 'Create',
+          single: 'Create',
+          no: 'Create'
+        }
       },
       create: {
         actions: ['Create'],
-        primary: { multiple: 'Create', executing: 'Create', single: 'Create', no: 'Create' }
+        primary: {
+          multiple: 'Create',
+          executing: 'Create',
+          single: 'Create',
+          no: 'Create'
+        }
       },
       'update,delete': {
         actions: ['Edit', 'Delete'],
-        primary: { multiple: 'Edit', executing: 'Edit', single: 'Edit', no: 'Edit' }
+        primary: {
+          multiple: '',
+          executing: '',
+          single: '',
+          no: ''
+        }
       },
       update: {
         actions: ['Edit'],
-        primary: { multiple: 'Edit', executing: 'Edit', single: 'Edit', no: 'Edit' }
+        primary: {
+          multiple: 'Edit',
+          executing: 'Edit',
+          single: 'Edit',
+          no: 'Edit'
+        }
       },
       delete: {
         actions: ['Delete'],
-        primary: { multiple: 'Delete', executing: 'Delete', single: 'Delete', no: 'Delete' }
+        primary: {
+          multiple: 'Delete',
+          executing: 'Delete',
+          single: 'Delete',
+          no: 'Delete'
+        }
       },
       'no-permissions': {
         actions: [],
-        primary: { multiple: '', executing: '', single: '', no: '' }
+        primary: {
+          multiple: '',
+          executing: '',
+          single: '',
+          no: ''
+        }
       }
     });
   });

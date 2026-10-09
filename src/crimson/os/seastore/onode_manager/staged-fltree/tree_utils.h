@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -327,9 +327,7 @@ class TreeBuilder {
       return eagain_iertr::make_ready_future<BtreeCursor>(cursor);
 #endif
     }).handle_error_interruptible(
-      [] (const crimson::ct_error::value_too_large& e) {
-        ceph_abort("impossible path");
-      },
+      crimson::ct_error::value_too_large::assert_failure{"impossible path"},
       crimson::ct_error::pass_further_all{}
     );
   }

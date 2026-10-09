@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef __CEPH_LOG_LOG_H
 #define __CEPH_LOG_LOG_H
@@ -7,6 +7,7 @@
 #include <boost/circular_buffer.hpp>
 
 #include <condition_variable>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -14,6 +15,7 @@
 #include <string_view>
 
 #include "common/Thread.h"
+#include "common/ceph_time.h"
 #include "common/likely.h"
 
 #include "log/Entry.h"
@@ -33,6 +35,7 @@ class Log : private Thread
 {
 public:
   using Thread::is_started;
+  using prefix_hook_t = const char* (*)();
 
   Log(const SubsystemMap *s);
   ~Log() override;
@@ -79,6 +82,14 @@ public:
   void inject_segv();
   void reset_segv();
 
+  /**
+   * Set a hook to get the log prefix (replaces thread ID in log output).
+   *
+   * @note Not thread-safe. Must be called once during startup before any
+   *       logging occurs. Designed for single-threaded unit test harnesses only.
+   */
+  static void set_prefix_hook(prefix_hook_t hook);
+
 protected:
   using EntryVector = std::vector<ConcreteEntry>;
 
@@ -86,9 +97,14 @@ protected:
 
 private:
   using EntryRing = boost::circular_buffer<ConcreteEntry>;
+  using mono_clock = ceph::coarse_mono_clock;
+  using mono_time = ceph::coarse_mono_time;
+
+  using RecentThreadNames = std::map<pthread_t, std::pair<mono_time, boost::circular_buffer<std::string> > >;
 
   static const std::size_t DEFAULT_MAX_NEW = 100;
   static const std::size_t DEFAULT_MAX_RECENT = 10000;
+  static constexpr std::size_t DEFAULT_MAX_THREAD_NAMES = 4;
 
   Log **m_indirect_this;
 
@@ -102,6 +118,7 @@ private:
   pthread_t m_queue_mutex_holder;
   pthread_t m_flush_mutex_holder;
 
+  RecentThreadNames m_recent_thread_names; // protected by m_flush_mutex
   EntryVector m_new;    ///< new entries
   EntryRing m_recent; ///< recent (less new) entries we've already written at low detail
   EntryVector m_flush; ///< entries to be flushed (here to optimize heap allocations)

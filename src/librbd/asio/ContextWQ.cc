@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "librbd/asio/ContextWQ.h"
 #include "include/Context.h"
@@ -16,7 +16,8 @@ namespace asio {
 
 ContextWQ::ContextWQ(CephContext* cct, boost::asio::io_context& io_context)
   : m_cct(cct), m_io_context(io_context),
-    m_strand(std::make_unique<boost::asio::io_context::strand>(io_context)),
+    m_strand(std::make_unique<boost::asio::strand<executor_type>>(
+      boost::asio::make_strand(io_context))),
     m_queued_ops(0) {
   ldout(m_cct, 20) << dendl;
 }

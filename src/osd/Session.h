@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -20,6 +21,7 @@
 #include "global/global_context.h"
 #include "include/spinlock.h"
 #include "OSDCap.h"
+#include "OpRequest.h"
 #include "Watch.h"
 #include "OSDMap.h"
 #include "PeeringState.h"
@@ -114,14 +116,7 @@ private:
   FRIEND_MAKE_REF(Backoff);
   Backoff(spg_t pgid, PGRef pg, ceph::ref_t<Session> s,
 	  uint64_t i,
-	  const hobject_t& b, const hobject_t& e)
-    : RefCountedObject(g_ceph_context),
-      pgid(pgid),
-      id(i),
-      pg(pg),
-      session(std::move(s)),
-      begin(b),
-      end(e) {}
+	  const hobject_t& b, const hobject_t& e);
 };
 
 
@@ -135,10 +130,10 @@ struct Session : public RefCountedObject {
 
   ceph::mutex session_dispatch_lock =
     ceph::make_mutex("Session::session_dispatch_lock");
-  boost::intrusive::list<OpRequest> waiting_on_map;
+  boost::intrusive::list<OpRequest, boost::intrusive::constant_time_size<false>> waiting_on_map;
 
-  ceph::spinlock sent_epoch_lock;
-  epoch_t last_sent_epoch = 0;
+  ceph::spinlock projected_epoch_lock;
+  epoch_t projected_epoch = 0;
 
   /// protects backoffs; orders inside Backoff::lock *and* PG::backoff_lock
   ceph::mutex backoff_lock = ceph::make_mutex("Session::backoff_lock");

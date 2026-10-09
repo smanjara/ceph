@@ -40,20 +40,29 @@ nightlies" because the Ceph core developers used to live and work in
 the same time zone and from their perspective the tests were run overnight.
 
 The results of nightly test runs are published at http://pulpito.ceph.com/
-under the user ``teuthology``. The developer nick appears in URL of the the
+under the user ``teuthology``. The developer nick appears in URL of the
 test results and in the first column of the Pulpito dashboard.  The results are
 also reported on the `ceph-qa mailing list <https://ceph.com/irc/>`_.
 
 Testing Priority
 ----------------
 
-In brief: in the ``teuthology-suite`` command option ``-p <N>``, set the value of ``<N>`` to a number lower than 1000. An explanation of why follows.
+In brief: in the ``teuthology-suite`` command option ``-p <N>``, set the value
+of ``<N>`` to a number less than 500. An explanation of why follows.
 
 The ``teuthology-suite`` command includes an option ``-p <N>``. This option specifies the priority of the jobs submitted to the queue. The lower the value of ``N``, the higher the priority.
 
-The default value of ``N`` is ``1000``. This is the same priority value given to the nightly tests (the nightlies). Often, the volume of testing done during the nightly tests is so great that the full number of nightly tests do not get run during the time allotted for their run.
+The default value of ``N`` is ``1000``. Most nightly tests automatically
+scheduled by ``teuthology@teuthology.front.sepia.ceph.com`` are run with ``N >=
+500``. Some critical nightly tests are given higher priority, such as smoke
+tests or QA runs for an imminent major releases.
 
-Set the value of ``N`` lower than ``1000``, or your tests will not have priority over the nightly tests. This means that they might never run.
+.. note:: Often the volume of testing done during the nightly tests is so great
+          that the full number of nightly tests do not get run during the time allotted
+          for their run.
+
+Set the value of ``N`` lower than ``500`` or your tests will not have priority
+over the nightly tests. This means that they might never run.
 
 Select your job's priority (the value of ``N``) in accordance with the following guidelines:
 
@@ -79,7 +88,7 @@ Select your job's priority (the value of ``N``) in accordance with the following
    * - **150 <= N < 200**
      - Use this priority for 100 jobs or fewer that test a particular feature
        or fix.  Results are available in about 24 hours.
-   * - **200 <= N < 1000**
+   * - **200 <= N < 500**
      - Use this priority for large test runs.  Results are available in about a
        week.
 
@@ -100,9 +109,6 @@ integration tests for all the Ceph components.
 
   * - **Component**
     - **Function**
-
-  * - `ceph-deploy <https://github.com/ceph/ceph/tree/master/qa/suites/ceph-deploy>`_
-    - install a Ceph cluster with ``ceph-deploy`` (`ceph-deploy man page`_)
 
   * - `dummy <https://github.com/ceph/ceph/tree/master/qa/suites/dummy>`_
     - get a machine, do nothing and return success (commonly used to verify
@@ -135,7 +141,7 @@ integration tests for all the Ceph components.
     - verify that teuthology can run integration tests, with and without OpenStack
 
   * - `upgrade <https://github.com/ceph/ceph/tree/master/qa/suites/upgrade>`_
-    - for various versions of Ceph, verify that upgrades can happen without disrupting an ongoing workload
+    - for various versions of Ceph, verify that upgrades can happen without disrupting an ongoing workload (`Upgrade Testing`_)
 
 teuthology-describe
 -------------------
@@ -291,12 +297,12 @@ yaml facets, followed by an expression in curly braces (``{}``) consisting of
 a list of yaml facets in order of concatenation. For instance the
 test description::
 
-  ceph-deploy/basic/{distros/centos_7.0.yaml tasks/ceph-deploy.yaml}
+  foo/basic/{distros/rocky_10.0.yaml tasks/ceph.yaml}
 
 signifies the concatenation of two files:
 
-* ceph-deploy/basic/distros/centos_7.0.yaml
-* ceph-deploy/basic/tasks/ceph-deploy.yaml
+* foo/basic/distros/rocky_10.0.yaml
+* foo/basic/tasks/ceph.yaml
 
 How tests are built from directories
 ------------------------------------
@@ -308,75 +314,69 @@ directory tree within the ``suites/`` subdirectory of the `ceph/qa sub-directory
 The set of all tests defined by a given subdirectory of ``suites/`` is
 called an "integration test suite", or a "teuthology suite".
 
-Combination of yaml facets is controlled by special files (``%`` and
-``+``) that are placed within the directory tree and can be thought of as
-operators.  The ``%`` file is the "convolution" operator and ``+``
-signifies concatenation.
+Combination of YAML facets is controlled by special files (``%``, ``+`` and ``$``)
+that are placed within the directory tree and can be thought of as
+operators.  The ``%`` file is the "convolution" operator, ``+`` signifies
+concatenation and ``$`` is the "random selection" operator.
 
-Convolution operator
-^^^^^^^^^^^^^^^^^^^^
+Convolution operator - ``%``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The convolution operator, implemented as a (typically empty) file called ``%``,
-tells teuthology to construct a test matrix from yaml facets found in
+tells teuthology to construct a test matrix from YAML facets found in
 subdirectories below the directory containing the operator.
 
-For example, the `ceph-deploy suite
-<https://github.com/ceph/ceph/tree/master/qa/suites/ceph-deploy/>`_ is
-defined by the ``suites/ceph-deploy/`` tree, which consists of the files and
-subdirectories in the following structure
+For example, a hypothetical ``foo`` suite is defined by the ``qa/suites/foo``
+tree, which consists of the files and subdirectories in the following structure
 
 .. code-block:: none
 
-  qa/suites/ceph-deploy
+  qa/suites/foo
   ├── %
   ├── distros
-  │   ├── centos_latest.yaml
-  │   └── ubuntu_latest.yaml
+  │   ├── rocky_10.0.yaml
+  │   └── ubuntu_24.04.yaml
   └── tasks
-      ├── ceph-admin-commands.yaml
-      └── rbd_import_export.yaml
+      └── ceph.yaml
 
 This is interpreted as a 2x1 matrix consisting of two tests:
 
-1. ceph-deploy/basic/{distros/centos_7.0.yaml tasks/ceph-deploy.yaml}
-2. ceph-deploy/basic/{distros/ubuntu_16.04.yaml tasks/ceph-deploy.yaml}
+1. ``foo/{distros/rocky_10.0.yaml tasks/ceph.yaml}``
+2. ``foo/{distros/ubuntu_24.04.yaml tasks/ceph.yaml}``
 
-i.e. the concatenation of centos_7.0.yaml and ceph-deploy.yaml and
-the concatenation of ubuntu_16.04.yaml and ceph-deploy.yaml, respectively.
-In human terms, this means that the task found in ``ceph-deploy.yaml`` is
-intended to run on both CentOS 7.0 and Ubuntu 16.04.
+i.e. the concatenation of ``rocky_10.0.yaml`` and ``ceph.yaml`` and the
+concatenation of ``ubuntu_24.04.yaml`` and ``ceph.yaml``, respectively. In
+human terms, this means that the task found in ``ceph.yaml`` is intended to run
+on both Rocky Linux 10.0 and Ubuntu 24.04 LTS.
 
-Without the file percent, the ``ceph-deploy`` tree would be interpreted as
+Without the file percent, the ``foo`` tree would be interpreted as
 three standalone tests:
 
-* ceph-deploy/basic/distros/centos_7.0.yaml
-* ceph-deploy/basic/distros/ubuntu_16.04.yaml
-* ceph-deploy/basic/tasks/ceph-deploy.yaml
+* foo/distros/rocky_10.0.yaml
+* foo/distros/ubuntu_24.04.yaml
+* foo/tasks/ceph.yaml
 
 (which would of course be wrong in this case).
 
-Referring to the `ceph/qa sub-directory`_, you will notice that the
-``centos_7.0.yaml`` and ``ubuntu_16.04.yaml`` files in the
-``suites/ceph-deploy/basic/distros/`` directory are implemented as symlinks.
-By using symlinks instead of copying, a single file can appear in multiple
-suites. This eases the maintenance of the test framework as a whole.
+You will notice that symlinks are sometimes used in QA suites. By using
+symlinks instead of copying, a single file can appear in multiple suites. This
+eases the maintenance of the test framework as a whole.
 
-All the tests generated from the ``suites/ceph-deploy/`` directory tree
-(also known as the "ceph-deploy suite") can be run with
+All the tests generated from the ``suites/foo/`` directory tree
+(which would be referred to as the "foo suite") can be run with
 
 .. prompt:: bash $
 
-   teuthology-suite --machine-type smithi --suite ceph-deploy
+   teuthology-suite --machine-type smithi --suite foo
 
-An individual test from the `ceph-deploy suite`_ can be run by adding the
-``--filter`` option
+An individual test would be run by adding the ``--filter`` option:
 
 .. prompt:: bash $
 
    teuthology-suite \
       --machine-type smithi \
-      --suite ceph-deploy/basic \
-      --filter 'ceph-deploy/basic/{distros/ubuntu_16.04.yaml tasks/ceph-deploy.yaml}'
+      --suite foo \
+      --filter 'foo/{distros/ubuntu_24.04.yaml tasks/ceph.yaml}'
 
 .. note:: To run a standalone test like the one in `Reading a standalone
    test`_, ``--suite`` alone is sufficient. If you want to run a single
@@ -412,8 +412,8 @@ tests will still preserve the correct numerator (subset of subsets).
 You can disable nested subsets using the ``--no-nested-subset`` argument to
 ``teuthology-suite``.
 
-Concatenation operator
-^^^^^^^^^^^^^^^^^^^^^^
+Concatenation operator - ``+``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 For even greater flexibility in sharing yaml files between suites, the
 special file plus (``+``) can be used to concatenate files within a
@@ -431,8 +431,7 @@ tree
   │   └── openstack.yaml
   └── workloads
       ├── rbd_api_tests_copy_on_read.yaml
-      ├── rbd_api_tests.yaml
-      └── rbd_fsx_rate_limit.yaml
+      └── rbd_api_tests.yaml
 
 This creates two tests:
 
@@ -476,6 +475,90 @@ A single test from the rbd/thrash suite can be run by adding the
       --machine-type smithi \
       --suite rbd/thrash \
       --filter 'rbd/thrash/{clusters/fixed-2.yaml clusters/openstack.yaml workloads/rbd_api_tests_copy_on_read.yaml}'
+
+.. _upgrade-testing:
+
+Upgrade Testing
+^^^^^^^^^^^^^^^
+
+Using the upgrade suite we are able to verify that upgrades from earlier releases can complete
+successfully without disrupting any ongoing workload.
+Each Release branch upgrade directory includes 2-x upgrade testing.
+Meaning, we are able to test the upgrade from 2 preceding releases to the current one.
+The upgrade sequence is done in `parallel <https://github.com/ceph/teuthology/blob/main/teuthology/task/parallel.py>`_
+with other given workloads.
+
+For instance, the upgrade test directory from the Quincy release branch is as follows:
+
+.. code-block:: none
+
+  .
+  ├── octopus-x
+  └── pacific-x
+
+It is possible to test upgrades from Octopus (2-x) or from Pacific (1-x) to Quincy (x).
+A simple upgrade test consists the following order:
+
+.. code-block:: none
+
+  ├── 0-start.yaml
+  ├── 1-tasks.yaml
+  ├── upgrade-sequence.yaml
+  └── workload
+
+After starting the cluster with the older release we begin running the given ``workload``
+and the ``upgrade-sequnce`` in parallel.
+
+.. code-block:: yaml
+
+  - print: "**** done start parallel"
+  - parallel:
+      - workload
+      - upgrade-sequence
+  - print: "**** done end parallel"
+
+While the ``workload`` directory consists regular yaml files just as in any other suite,
+the ``upgrade-sequnce`` is resposible for running the upgrade and awaitng its completion:
+
+.. code-block:: yaml
+
+  - print: "**** done start upgrade, wait"
+  ...
+    mon.a:
+      - ceph orch upgrade start --image quay.ceph.io/ceph-ci/ceph:$sha1
+      - while ceph orch upgrade status | jq '.in_progress' | grep true ; do ceph orch ps ; ceph versions ; sleep 30 ; done\
+  ...
+  - print: "**** done end upgrade, wait..."
+
+
+It is also possible to upgrade in stages while running workloads in between those:
+
+.. code-block:: none
+
+  ├── %
+  ├── 0-cluster
+  ├── 1-ceph-install
+  ├── 2-partial-upgrade
+  ├── 3-thrash
+  ├── 4-workload
+  ├── 5-finish-upgrade.yaml
+  ├── 6-quincy.yaml
+  └── 8-final-workload
+
+After starting a cluster we upgrade only 2/3 of the cluster (``2-partial-upgrade``).
+The next stage is running thrash tests and given workload tests. Later on, continuing to upgrade the
+rest of the cluster (``5-finish-upgrade.yaml``).
+The last stage is requiring the updated release (``ceph require-osd-release quincy``,
+``ceph osd set-require-min-compat-client quincy``) and running the ``final-workload``.
+
+Random Selection Operator - ``$``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The presence of a file named ``$`` provides a hint to teuthology to randomly
+include one of the YAML fragments in the test. Such a scenario is typically
+seen when we need to choose one of the flavors of the features/options to be
+tested randomly.
+
 
 Position Independent Linking
 ----------------------------
@@ -582,4 +665,3 @@ test will be first.
 .. _teuthology repository: https://github.com/ceph/teuthology
 .. _teuthology framework: https://github.com/ceph/teuthology
 .. _teuthology-describe usecases: https://gist.github.com/jdurgin/09711d5923b583f60afc
-.. _ceph-deploy man page: ../../../../man/8/ceph-deploy

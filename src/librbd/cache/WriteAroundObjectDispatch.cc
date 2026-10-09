@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "librbd/cache/WriteAroundObjectDispatch.h"
 #include "common/dout.h"
@@ -402,7 +402,7 @@ void WriteAroundObjectDispatch<I>::handle_in_flight_io_complete(
   }
 
   // complete flushes that were waiting on in-flight IO
-  // (and propogate any IO error to first flush)
+  // (and propagate any IO error to first flush)
   for (auto& it : finished_flushes) {
     ldout(cct, 20) << "completing flush: tid=" << it.first << ", "
                    << "r=" << pending_flush_error << dendl;
@@ -447,7 +447,7 @@ void WriteAroundObjectDispatch<I>::handle_in_flight_flush_complete(
   m_lock.unlock();
 
   // complete flushes that were waiting on in-flight IO
-  // (and propogate any IO errors)
+  // (and propagate any IO errors)
   for (auto& it : finished_flushes) {
     ldout(cct, 20) << "completing flush: tid=" << it.first << dendl;
     it.second->complete(pending_flush_error);

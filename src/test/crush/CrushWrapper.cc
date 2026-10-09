@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -20,11 +21,13 @@
  *
  */
 
+#include <cmath>
 #include <iostream>
 #include <gtest/gtest.h>
 
 #include "common/ceph_argparse.h"
 #include "common/common_init.h"
+#include "common/Formatter.h"
 #include "include/stringify.h"
 #include "include/Context.h"
 #include "osd/osd_types.h"
@@ -901,13 +904,12 @@ TEST_F(CrushWrapperTest, dump_rules) {
 
   // no rule by default
   {
-    Formatter *f = Formatter::create("json-pretty");
+    auto f = Formatter::create_unique("json-pretty");
     f->open_array_section("rules");
-    c->dump_rules(f);
+    c->dump_rules(f.get());
     f->close_section();
     stringstream ss;
     f->flush(ss);
-    delete f;
     EXPECT_EQ("[]\n", ss.str());
   }
 
@@ -917,20 +919,18 @@ TEST_F(CrushWrapperTest, dump_rules) {
   EXPECT_EQ(0, rule);
 
   {
-    Formatter *f = Formatter::create("xml");
-    c->dump_rules(f);
+    auto f = Formatter::create_unique("xml");
+    c->dump_rules(f.get());
     stringstream ss;
     f->flush(ss);
-    delete f;
     EXPECT_EQ((unsigned)0, ss.str().find("<rule><rule_id>0</rule_id><rule_name>NAME</rule_name>"));
   }
 
   {
-    Formatter *f = Formatter::create("xml");
-    c->dump_rule(rule, f);
+    auto f = Formatter::create_unique("xml");
+    c->dump_rule(rule, f.get());
     stringstream ss;
     f->flush(ss);
-    delete f;
     EXPECT_EQ((unsigned)0, ss.str().find("<rule><rule_id>0</rule_id><rule_name>NAME</rule_name>"));
     EXPECT_NE(string::npos,
 	      ss.str().find("<item_name>default</item_name></step>"));
@@ -940,6 +940,48 @@ TEST_F(CrushWrapperTest, dump_rules) {
   c->get_rule_weight_osd_map(0, &wm);
   ASSERT_TRUE(wm.size() == 1);
   ASSERT_TRUE(wm[0] == 1.0);
+}
+
+TEST_F(CrushWrapperTest, weight_osd_map_zero_weights) {
+  std::unique_ptr<CrushWrapper> c(new CrushWrapper);
+
+  const int ROOT_TYPE = 1;
+  c->set_type_name(ROOT_TYPE, "root");
+  const int OSD_TYPE = 0;
+  c->set_type_name(OSD_TYPE, "osd");
+
+  int rootno;
+  c->add_bucket(0, CRUSH_BUCKET_STRAW2, CRUSH_HASH_RJENKINS1,
+		ROOT_TYPE, 0, NULL, NULL, &rootno);
+  c->set_item_name(rootno, "default");
+
+  // all the OSDs under the root have a zero crush weight
+  for (int osd = 0; osd < 3; ++osd) {
+    map<string,string> loc;
+    loc["root"] = "default";
+    ASSERT_EQ(0, c->insert_item(cct, osd, 0.0, "osd." + stringify(osd), loc));
+  }
+
+  string name("NAME");
+  ASSERT_EQ(0, c->add_simple_rule(name, "default", "osd", "",
+				  "firstn", pg_pool_t::TYPE_REPLICATED));
+
+  // the normalized weights must stay at zero rather than become nan
+  map<int,float> wm;
+  ASSERT_EQ(0, c->get_take_weight_osd_map(rootno, &wm));
+  ASSERT_EQ(3u, wm.size());
+  for (auto& [osd, w] : wm) {
+    EXPECT_FALSE(std::isnan(w)) << "osd." << osd << " weight is nan";
+    EXPECT_EQ(0.0f, w);
+  }
+
+  wm.clear();
+  ASSERT_EQ(0, c->get_rule_weight_osd_map(0, &wm));
+  ASSERT_EQ(3u, wm.size());
+  for (auto& [osd, w] : wm) {
+    EXPECT_FALSE(std::isnan(w)) << "osd." << osd << " weight is nan";
+    EXPECT_EQ(0.0f, w);
+  }
 }
 
 TEST_F(CrushWrapperTest, distance) {

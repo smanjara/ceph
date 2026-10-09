@@ -4,8 +4,6 @@ import { ReactiveFormsModule } from '@angular/forms';
 import { ActivatedRoute } from '@angular/router';
 import { RouterTestingModule } from '@angular/router/testing';
 
-import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap';
-import { ToastrModule } from 'ngx-toastr';
 import { of } from 'rxjs';
 
 import { RbdMirroringService } from '~/app/shared/api/rbd-mirroring.service';
@@ -14,6 +12,7 @@ import { SharedModule } from '~/app/shared/shared.module';
 import { ActivatedRouteStub } from '~/testing/activated-route-stub';
 import { configureTestBed, FormHelper } from '~/testing/unit-test-helper';
 import { PoolEditModeModalComponent } from './pool-edit-mode-modal.component';
+import { ModalModule, SelectModule } from 'carbon-components-angular';
 
 describe('PoolEditModeModalComponent', () => {
   let component: PoolEditModeModalComponent;
@@ -30,10 +29,10 @@ describe('PoolEditModeModalComponent', () => {
       ReactiveFormsModule,
       RouterTestingModule,
       SharedModule,
-      ToastrModule.forRoot()
+      ModalModule,
+      SelectModule
     ],
     providers: [
-      NgbActiveModal,
       {
         provide: ActivatedRoute,
         useValue: new ActivatedRouteStub({ pool_name: 'somePool' })
@@ -62,7 +61,7 @@ describe('PoolEditModeModalComponent', () => {
 
   describe('update pool mode', () => {
     beforeEach(() => {
-      spyOn(component.activeModal, 'close').and.callThrough();
+      spyOn(component, 'closeModal').and.callThrough();
     });
 
     it('should call updatePool', () => {

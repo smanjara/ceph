@@ -41,19 +41,13 @@ CloudStack integrates with Ceph's block devices to provide CloudStack with a
 back end for CloudStack's Primary Storage. The instructions below detail the
 setup for CloudStack Primary Storage.
 
-.. note:: We recommend installing with Ubuntu 14.04 or later so that 
-   you can use package installation instead of having to compile 
-   libvirt from source.
-
 Installing and configuring QEMU for use with CloudStack doesn't require any
 special handling. Ensure that you have a running Ceph Storage Cluster. Install
-QEMU and configure it for use with Ceph; then, install ``libvirt`` version
-0.9.13 or higher (you may need to compile from source) and ensure it is running
-with Ceph.
+QEMU and configure it for use with Ceph; then, install ``libvirt`` and ensure
+it is running with Ceph.
 
-
-.. note:: Ubuntu 14.04 and CentOS 7.2 will have ``libvirt`` with RBD storage
-   pool support enabled by default.
+.. note:: All currently supported distributions ship ``libvirt`` with RBD
+   storage pool support enabled by default.
 
 .. index:: pools; CloudStack
 
@@ -117,7 +111,7 @@ To add a Ceph block device as Primary Storage, the steps include:
    
 #. Add cluster information (``cephx`` is supported).
 
-   - For **RADOS Monitor**, provide the IP address of a Ceph monitor node.
+   - For **RADOS Monitor**, provide the IP addresses or DNS names of Ceph monitors. Please note that support for comma-separated list of IP addresses or DNS names is only present in Cloudstack v4.18.0.0 or later.
    
    - For **RADOS Pool**, provide the name of an RBD pool.
    
@@ -143,7 +137,7 @@ created (e.g., ``cloudstack``).
 Limitations
 ===========
 
-- CloudStack will only bind to one monitor (You can however create a Round Robin DNS record over multiple monitors)
+- Until v4.17.1.0, CloudStack will only bind to one monitor at a time. You can however use multiple DNS A or AAAA records in a round-robin fashion to spread connections over multiple monitors.
 
 
 
@@ -151,7 +145,7 @@ Limitations
 .. _Placement Groups: ../../rados/operations/placement-groups
 .. _Install and Configure QEMU: ../qemu-rbd
 .. _Install and Configure libvirt: ../libvirt
-.. _KVM Hypervisor Host Installation: http://docs.cloudstack.apache.org/en/latest/installguide/hypervisor/kvm.html
-.. _Storage Tags: http://docs.cloudstack.apache.org/en/latest/adminguide/storage.html#storage-tags
-.. _Create a New Disk Offering: http://docs.cloudstack.apache.org/en/latest/adminguide/service_offerings.html#creating-a-new-disk-offering
+.. _KVM Hypervisor Host Installation: https://docs.cloudstack.apache.org/en/latest/installguide/hypervisor/kvm.html
+.. _Storage Tags: https://docs.cloudstack.apache.org/en/latest/adminguide/storage.html#storage-tags
+.. _Create a New Disk Offering: https://docs.cloudstack.apache.org/en/latest/adminguide/service_offerings.html#creating-a-new-disk-offering
 .. _User Management: ../../rados/operations/user-management

@@ -10,11 +10,15 @@ from typing import (
 
 import pytest
 
-from mgr_module import CLICommand
+from mgr_module import CLICommandBase
 import object_format
 
 
 T = TypeVar("T", bound="Parent")
+
+
+DecoDemoCLICommand = CLICommandBase.make_registry_subtype(
+    "DecoDemoCLICommand")
 
 
 class Simpler:
@@ -115,11 +119,17 @@ def test_format_yaml(obj: Any, compatible: bool, yaml_val: str):
 
 
 class Retty:
-    def __init__(self, v) -> None:
+    def __init__(self, v, status="") -> None:
         self.value = v
+        self.status = status
 
     def mgr_return_value(self) -> int:
         return self.value
+
+    def mgr_status_value(self) -> str:
+        if self.status:
+            return self.status
+        return "NOPE"
 
 
 @pytest.mark.parametrize(
@@ -137,6 +147,24 @@ def test_return_value(obj: Any, ret: int):
     # a ReturnValueAdapter instance meets the ReturnValueProvider protocol.
     assert object_format._is_return_value_provider(rva)
     assert rva.mgr_return_value() == ret
+
+
+@pytest.mark.parametrize(
+    "obj, ret",
+    [
+        ({}, ""),
+        ({"fish": "sticks"}, ""),
+        (-55, ""),
+        (Retty(0), "NOPE"),
+        (Retty(-55, "cake"), "cake"),
+        (Retty(-50, "pie"), "pie"),
+    ],
+)
+def test_return_status(obj: Any, ret: str):
+    rva = object_format.StatusValueAdapter(obj)
+    # a StatusValueAdapter instance meets the StatusValueProvider protocol.
+    assert object_format._is_status_value_provider(rva)
+    assert rva.mgr_status_value() == ret
 
 
 def test_valid_formats():
@@ -235,10 +263,10 @@ class FancyDemoAdapter(PhonyMultiYAMLFormatAdapter):
         return f"{size} box{es} of {name}"
 
 
-class DecoDemo:
+class DecoDemo(object):
     """Class to stand in for a mgr module, used to test CLICommand integration."""
 
-    @CLICommand("alpha one", perm="rw")
+    @DecoDemoCLICommand("alpha one", perm="rw")
     @object_format.Responder()
     def alpha_one(self, name: str = "default") -> Dict[str, str]:
         return {
@@ -247,7 +275,7 @@ class DecoDemo:
             "weight": 300,
         }
 
-    @CLICommand("beta two", perm="r")
+    @DecoDemoCLICommand("beta two", perm="r")
     @object_format.Responder()
     def beta_two(
         self, name: str = "default", format: Optional[str] = None
@@ -258,19 +286,19 @@ class DecoDemo:
             "weight": 72,
         }
 
-    @CLICommand("gamma three", perm="rw")
+    @DecoDemoCLICommand("gamma three", perm="rw")
     @object_format.Responder(FancyDemoAdapter)
     def gamma_three(self, size: int = 0) -> Dict[str, Any]:
         return {"name": "funnystuff", "size": size}
 
-    @CLICommand("z_err", perm="rw")
+    @DecoDemoCLICommand("z_err", perm="rw")
     @object_format.ErrorResponseHandler()
     def z_err(self, name: str = "default") -> Tuple[int, str, str]:
         if "z" in name:
             raise object_format.ErrorResponse(f"{name} bad")
         return 0, name, ""
 
-    @CLICommand("empty one", perm="rw")
+    @DecoDemoCLICommand("empty one", perm="rw")
     @object_format.EmptyResponder()
     def empty_one(self, name: str = "default", retval: Optional[int] = None) -> None:
         # in real code, this would be making some sort of state change
@@ -281,7 +309,7 @@ class DecoDemo:
             raise object_format.ErrorResponse(name, return_value=retval)
         return
 
-    @CLICommand("empty bad", perm="rw")
+    @DecoDemoCLICommand("empty bad", perm="rw")
     @object_format.EmptyResponder()
     def empty_bad(self, name: str = "default") -> int:
         # in real code, this would be making some sort of state change
@@ -479,9 +507,10 @@ class DecoDemo:
         ),
     ],
 )
+
 def test_cli_with_decorators(prefix, can_format, args, response):
     dd = DecoDemo()
-    cmd = CLICommand.COMMANDS[prefix]
+    cmd = DecoDemoCLICommand.COMMANDS[prefix]
     assert cmd.call(dd, args, None) == response
     # slighly hacky way to check that the CLI "knows" about a --format option
     # checking the extra_args feature of the Decorators that provide them (Responder)
@@ -579,4 +608,4 @@ def test_error_response():
 def test_empty_responder_return_check():
     dd = DecoDemo()
     with pytest.raises(ValueError):
-        CLICommand.COMMANDS["empty bad"].call(dd, {}, None)
+        DecoDemoCLICommand.COMMANDS["empty bad"].call(dd, {}, None)

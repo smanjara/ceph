@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -17,30 +18,56 @@
 
 #include <string>
 #include <string_view>
-#include <set>
 
 #include "include/counter.h"
 #include "include/types.h"
 #include "include/buffer_fwd.h"
 #include "include/lru.h"
 #include "include/elist.h"
-#include "include/filepath.h"
+#include <boost/intrusive/set.hpp>
 
-#include "BatchOp.h"
 #include "MDSCacheObject.h"
-#include "MDSContext.h"
-#include "Mutation.h"
 #include "SimpleLock.h"
 #include "LocalLockC.h"
-#include "ScrubHeader.h"
+#include "LogSegmentRef.h"
 
+class filepath;
+class BatchOp;
 class CInode;
 class CDir;
 class Locker;
 class CDentry;
 class LogSegment;
+class MDSContext;
 
 class Session;
+
+struct ClientLease : public boost::intrusive::set_base_hook<>
+{
+  MEMPOOL_CLASS_HELPERS();
+
+  ClientLease(CDentry *p, Session *s) :
+    parent(p), session(s),
+    item_session_lease(this),
+    item_lease(this) { }
+  ClientLease() = delete;
+  client_t get_client() const;
+
+  CDentry *parent;
+  Session *session;
+
+  ceph_seq_t seq = 0;
+  utime_t ttl;
+  xlist<ClientLease*>::item item_session_lease; // per-session list
+  xlist<ClientLease*>::item item_lease;         // global list
+};
+struct client_is_key
+{
+  typedef client_t type;
+  const type operator() (const ClientLease& l) const {
+    return l.get_client();
+  }
+};
 
 // define an ordering
 bool operator<(const CDentry& l, const CDentry& r);
@@ -75,7 +102,6 @@ public:
       remote_d_type = d_type;
       inode = 0;
     }
-    void link_remote(CInode *in);
   };
 
 
@@ -87,54 +113,28 @@ public:
   static const int STATE_EVALUATINGSTRAY = (1<<4);
   static const int STATE_PURGINGPINNED =  (1<<5);
   static const int STATE_BOTTOMLRU =    (1<<6);
-  static const int STATE_UNLINKING =    (1<<7);
   // stray dentry needs notification of releasing reference
   static const int STATE_STRAY =	STATE_NOTIFYREF;
   static const int MASK_STATE_IMPORT_KEPT = STATE_BOTTOMLRU;
 
   // -- pins --
-  static const int PIN_INODEPIN =         1;  // linked inode is pinned
-  static const int PIN_FRAGMENTING =     -2;  // containing dir is refragmenting
-  static const int PIN_PURGING =          3;
-  static const int PIN_SCRUBPARENT =      4;
-  static const int PIN_WAITUNLINKSTATE  = 5;
+  static const int PIN_INODEPIN =     1;  // linked inode is pinned
+  static const int PIN_FRAGMENTING = -2;  // containing dir is refragmenting
+  static const int PIN_PURGING =      3;
+  static const int PIN_SCRUBPARENT =  4;
 
   static const unsigned EXPORT_NONCE = 1;
 
-  const static uint64_t WAIT_UNLINK_STATE  = (1<<0);
-  const static uint64_t WAIT_UNLINK_FINISH = (1<<1);
-  uint32_t replica_unlinking_ref = 0;
 
   CDentry(std::string_view n, __u32 h,
           mempool::mds_co::string alternate_name,
-	  snapid_t f, snapid_t l) :
-    hash(h),
-    first(f), last(l),
-    item_dirty(this),
-    lock(this, &lock_type),
-    versionlock(this, &versionlock_type),
-    name(n),
-    alternate_name(std::move(alternate_name))
-  {}
+	  snapid_t f, snapid_t l);
   CDentry(std::string_view n, __u32 h,
           mempool::mds_co::string alternate_name,
           inodeno_t ino, unsigned char dt,
-	  snapid_t f, snapid_t l) :
-    hash(h),
-    first(f), last(l),
-    item_dirty(this),
-    lock(this, &lock_type),
-    versionlock(this, &versionlock_type),
-    name(n),
-    alternate_name(std::move(alternate_name))
-  {
-    linkage.remote_ino = ino;
-    linkage.remote_d_type = dt;
-  }
+          snapid_t f, snapid_t l);
 
-  ~CDentry() override {
-    ceph_assert(batch_ops.empty());
-  }
+  ~CDentry() override;
 
   std::string_view pin_name(int p) const override {
     switch (p) {
@@ -142,7 +142,6 @@ public:
     case PIN_FRAGMENTING: return "fragmenting";
     case PIN_PURGING: return "purging";
     case PIN_SCRUBPARENT: return "scrubparent";
-    case PIN_WAITUNLINKSTATE: return "waitunlinkstate";
     default: return generic_pin_name(p);
     }
   }
@@ -159,6 +158,8 @@ public:
   dentry_key_t key() {
     return dentry_key_t(last, name.c_str(), hash);
   }
+
+  bool check_corruption(bool load);
 
   const CDir *get_dir() const { return dir; }
   CDir *get_dir() { return dir; }
@@ -212,7 +213,7 @@ public:
 
   bool use_projected(client_t client, const MutationRef& mut) const {
     return lock.can_read_projected(client) || 
-      lock.get_xlock_by() == mut;
+      lock.is_xlocked_by(mut);
   }
   linkage_t *get_linkage(client_t client, const MutationRef& mut) {
     return use_projected(client, mut) ? get_projected_linkage() : get_linkage();
@@ -242,11 +243,17 @@ public:
   
   // copy cons
   CDentry(const CDentry& m);
-  const CDentry& operator= (const CDentry& right);
+  CDentry& operator=(const CDentry& right) = delete;
 
   // misc
-  void make_path_string(std::string& s, bool projected=false) const;
-  void make_path(filepath& fp, bool projected=false) const;
+  void make_trimmed_path_string(std::string& s, bool projected,
+				int path_comp_count=10) const;
+  void make_path_string(std::string& s, bool projected=false,
+		        int path_comp_count=-1) const;
+  void make_path(filepath& fp, bool projected=false,
+		 int path_comp_count=-1) const;
+  void make_trimmed_path(filepath& fp, bool projected=false,
+			 int path_comp_count=10) const;
 
   // -- version --
   version_t get_version() const { return version; }
@@ -257,8 +264,8 @@ public:
   mds_authority_t authority() const override;
 
   version_t pre_dirty(version_t min=0);
-  void _mark_dirty(LogSegment *ls);
-  void mark_dirty(version_t pv, LogSegment *ls);
+  void _mark_dirty(LogSegmentRef const& ls);
+  void mark_dirty(version_t pv, LogSegmentRef const& ls);
   void mark_clean();
 
   void mark_new();
@@ -296,7 +303,7 @@ public:
   void abort_export() {
     put(PIN_TEMPEXPORTING);
   }
-  void decode_import(ceph::buffer::list::const_iterator& blp, LogSegment *ls) {
+  void decode_import(ceph::buffer::list::const_iterator& blp, LogSegmentRef const& ls) {
     DECODE_START(1, blp);
     decode(first, blp);
     __u32 nstate;
@@ -330,32 +337,30 @@ public:
   // replicas (on clients)
 
   bool is_any_leases() const {
-    return !client_lease_map.empty();
+    return !client_leases.empty();
   }
   const ClientLease *get_client_lease(client_t c) const {
-    if (client_lease_map.count(c))
-      return client_lease_map.find(c)->second;
-    return 0;
+    auto it = client_leases.find(c);
+    if (it != client_leases.end())
+      return &(*it);
+    return nullptr;
   }
   ClientLease *get_client_lease(client_t c) {
-    if (client_lease_map.count(c))
-      return client_lease_map.find(c)->second;
-    return 0;
+    auto it = client_leases.find(c);
+    if (it != client_leases.end())
+      return &(*it);
+    return nullptr;
   }
   bool have_client_lease(client_t c) const {
-    const ClientLease *l = get_client_lease(c);
-    if (l) 
-      return true;
-    else
-      return false;
+    return client_leases.count(c);
   }
 
-  ClientLease *add_client_lease(client_t c, Session *session);
+  ClientLease *add_client_lease(Session *session);
   void remove_client_lease(ClientLease *r, Locker *locker);  // returns remaining mask (if any), and kicks locker eval_gathers
   void remove_client_leases(Locker *locker);
 
-  std::ostream& print_db_line_prefix(std::ostream& out) override;
-  void print(std::ostream& out) override;
+  std::ostream& print_db_line_prefix(std::ostream& out) const override;
+  void print(std::ostream& out) const override;
   void dump(ceph::Formatter *f) const;
 
   static void encode_remote(inodeno_t& ino, unsigned char d_type,
@@ -367,19 +372,25 @@ public:
 
   __u32 hash;
   snapid_t first, last;
+  bool corrupt_first_loaded = false; /* for Postgres corruption detection */
 
   elist<CDentry*>::item item_dirty, item_dir_dirty;
   elist<CDentry*>::item item_stray;
 
   // lock
-  static LockType lock_type;
-  static LockType versionlock_type;
+  static const LockType lock_type;
+  static const LockType versionlock_type;
 
   SimpleLock lock; // FIXME referenced containers not in mempool
   LocalLockC versionlock; // FIXME referenced containers not in mempool
 
-  mempool::mds_co::map<client_t,ClientLease*> client_lease_map;
+  typedef boost::intrusive::set<
+    ClientLease, boost::intrusive::key_of_value<client_is_key>> ClientLeaseMap;
+  ClientLeaseMap client_leases;
+
   std::map<int, std::unique_ptr<BatchOp>> batch_ops;
+
+  ceph_tid_t reintegration_reqid = 0;
 
 
 protected:

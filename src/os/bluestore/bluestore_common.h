@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,6 +16,7 @@
 #ifndef CEPH_OSD_BLUESTORE_COMMON_H
 #define CEPH_OSD_BLUESTORE_COMMON_H
 
+#include "include/byteorder.h" // for ceph_le64
 #include "include/intarith.h"
 #include "include/ceph_assert.h"
 #include "kv/KeyValueDB.h"
@@ -61,5 +63,18 @@ struct Int64ArrayMergeOperator : public KeyValueDB::MergeOperator {
     return "int64_array";
   }
 };
+
+// write a label in the first block.  always use this size.  note that
+// bluefs makes a matching assumption about the location of its
+// superblock (always the second block of the device).
+static constexpr uint64_t BDEV_FIRST_LABEL_POSITION = 0;
+static constexpr uint64_t BDEV_LABEL_BLOCK_SIZE = 4096;
+
+// reserved for standalone DB volume:
+// label (4k) + bluefs super (4k), which means we start at 8k.
+static constexpr uint64_t BLUEFS_SUPER_POSITION = 4096;
+static constexpr uint64_t BLUEFS_SUPER_BLOCK_SIZE = 4096;
+static constexpr uint64_t SUPER_RESERVED = BDEV_LABEL_BLOCK_SIZE + BLUEFS_SUPER_BLOCK_SIZE;
+
 
 #endif

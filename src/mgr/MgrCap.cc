@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -155,15 +156,9 @@ void MgrCapGrant::expand_profile(std::ostream *err) const {
     return;
   }
 
-  if (profile == "osd") {
-    // this is a documented profile (so we need to accept it as valid), but it
-    // currently doesn't do anything
-    return;
-  }
-
-  if (profile == "mds") {
-    // this is a documented profile (so we need to accept it as valid), but it
-    // currently doesn't do anything
+  if (profile == "osd" || profile == "mds" || profile == "rgw") {
+    // these are documented profiles (so we need to accept them as valid), but
+    // they grant nothing here
     return;
   }
 
@@ -385,26 +380,28 @@ void MgrCap::dump(ceph::Formatter *f) const {
   f->dump_string("text", text);
 }
 
-void MgrCap::generate_test_instances(std::list<MgrCap*>& ls) {
-  ls.push_back(new MgrCap);
-  ls.push_back(new MgrCap);
-  ls.back()->parse("allow *");
-  ls.push_back(new MgrCap);
-  ls.back()->parse("allow rwx");
-  ls.push_back(new MgrCap);
-  ls.back()->parse("allow service foo x");
-  ls.push_back(new MgrCap);
-  ls.back()->parse("allow command bar x");
-  ls.push_back(new MgrCap);
-  ls.back()->parse("allow service foo r, allow command bar x");
-  ls.push_back(new MgrCap);
-  ls.back()->parse("allow command bar with k1=v1 x");
-  ls.push_back(new MgrCap);
-  ls.back()->parse("allow command bar with k1=v1 k2=v2 x");
-  ls.push_back(new MgrCap);
-  ls.back()->parse("allow module bar with k1=v1 k2=v2 x");
-  ls.push_back(new MgrCap);
-  ls.back()->parse("profile rbd pool=rbd");
+std::list<MgrCap> MgrCap::generate_test_instances() {
+  std::list<MgrCap> ls;
+  ls.emplace_back();
+  ls.emplace_back();
+  ls.back().parse("allow *");
+  ls.emplace_back();
+  ls.back().parse("allow rwx");
+  ls.emplace_back();
+  ls.back().parse("allow service foo x");
+  ls.emplace_back();
+  ls.back().parse("allow command bar x");
+  ls.emplace_back();
+  ls.back().parse("allow service foo r, allow command bar x");
+  ls.emplace_back();
+  ls.back().parse("allow command bar with k1=v1 x");
+  ls.emplace_back();
+  ls.back().parse("allow command bar with k1=v1 k2=v2 x");
+  ls.emplace_back();
+  ls.back().parse("allow module bar with k1=v1 k2=v2 x");
+  ls.emplace_back();
+  ls.back().parse("profile rbd pool=rbd");
+  return ls;
 }
 
 // grammar

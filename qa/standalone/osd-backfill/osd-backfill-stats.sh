@@ -24,11 +24,9 @@ function run() {
     # Fix port????
     export CEPH_MON="127.0.0.1:7114" # git grep '\<7114\>' : there must be only one
     export CEPH_ARGS
-    CEPH_ARGS+="--fsid=$(uuidgen) --auth-supported=none "
+    CEPH_ARGS+="--fsid=$(uuidgen) --auth_cluster_required=none --auth_service_required=none --auth_client_required=none "
     CEPH_ARGS+="--mon-host=$CEPH_MON "
     CEPH_ARGS+="--osd_min_pg_log_entries=5 --osd_max_pg_log_entries=10 "
-    # Use "high_recovery_ops" profile if mclock_scheduler is enabled.
-    CEPH_ARGS+="--osd-mclock-profile=high_recovery_ops "
     export margin=10
     export objects=200
     export poolname=test
@@ -57,9 +55,9 @@ function above_margin() {
     return $(( $check >= $target && $check <= $target + $margin ? 0 : 1 ))
 }
 
-FIND_UPACT='grep "pg[[]${PG}.*backfilling.*update_calc_stats " $log | tail -1 | sed "s/.*[)] \([[][^ p]*\).*$/\1/"'
-FIND_FIRST='grep "pg[[]${PG}.*backfilling.*update_calc_stats $which " $log | grep -F " ${UPACT}${addp}" | grep -v est | head -1 | sed "s/.* \([0-9]*\)$/\1/"'
-FIND_LAST='grep "pg[[]${PG}.*backfilling.*update_calc_stats $which " $log | tail -1 | sed "s/.* \([0-9]*\)$/\1/"'
+FIND_UPACT='grep "pg[[]${PG}.*backfilling.*PeeringState::update_calc_stats " $log | tail -1 | sed "s/.*[)] \([[][^ p]*\).*$/\1/"'
+FIND_FIRST='grep "pg[[]${PG}.*backfilling.*PeeringState::update_calc_stats $which " $log | grep -F " ${UPACT}${addp}" | grep -v est | head -1 | sed "s/.* \([0-9]*\)$/\1/"'
+FIND_LAST='grep "pg[[]${PG}.*backfilling.*PeeringState::update_calc_stats $which " $log | tail -1 | sed "s/.* \([0-9]*\)$/\1/"'
 
 function check() {
     local dir=$1

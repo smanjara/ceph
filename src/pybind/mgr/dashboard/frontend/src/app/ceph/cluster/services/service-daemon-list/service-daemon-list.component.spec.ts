@@ -3,17 +3,22 @@ import { HttpClientTestingModule } from '@angular/common/http/testing';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 
 import _ from 'lodash';
-import { NgxPipeFunctionModule } from 'ngx-pipe-function';
-import { ToastrModule } from 'ngx-toastr';
-import { of } from 'rxjs';
+import { PipesModule } from '~/app/shared/pipes/pipes.module';
+
+import { Observable, of } from 'rxjs';
 
 import { CephModule } from '~/app/ceph/ceph.module';
 import { CoreModule } from '~/app/core/core.module';
 import { CephServiceService } from '~/app/shared/api/ceph-service.service';
+import { DaemonService } from '~/app/shared/api/daemon.service';
 import { HostService } from '~/app/shared/api/host.service';
 import { PaginateObservable } from '~/app/shared/api/paginate.model';
 import { CdTableFetchDataContext } from '~/app/shared/models/cd-table-fetch-data-context';
 import { SharedModule } from '~/app/shared/shared.module';
+import { ModalCdsService } from '~/app/shared/services/modal-cds.service';
+import { DeleteConfirmationModalComponent } from '~/app/shared/components/delete-confirmation-modal/delete-confirmation-modal.component';
+import { DaemonAction } from '~/app/shared/models/service.interface';
+import { DeletionImpact } from '~/app/shared/enum/delete-confirmation-modal-impact.enum';
 import { configureTestBed } from '~/testing/unit-test-helper';
 import { ServiceDaemonListComponent } from './service-daemon-list.component';
 
@@ -27,7 +32,7 @@ describe('ServiceDaemonListComponent', () => {
       hostname: 'osd0',
       container_id: '003c10beafc8c27b635bcdfed1ed832e4c1005be89bb1bb05ad4cc6c2b98e41b',
       container_image_id: 'e70344c77bcbf3ee389b9bf5128f635cf95f3d59e005c5d8e67fc19bcc74ed23',
-      container_image_name: 'docker.io/ceph/daemon-base:latest-master-devel',
+      container_image_name: 'quay.io/ceph/daemon-base:latest-master-devel',
       daemon_id: '3',
       daemon_type: 'osd',
       daemon_name: 'osd.3',
@@ -47,7 +52,7 @@ describe('ServiceDaemonListComponent', () => {
       hostname: 'osd0',
       container_id: 'baeec41a01374b3ed41016d542d19aef4a70d69c27274f271e26381a0cc58e7a',
       container_image_id: 'e70344c77bcbf3ee389b9bf5128f635cf95f3d59e005c5d8e67fc19bcc74ed23',
-      container_image_name: 'docker.io/ceph/daemon-base:latest-master-devel',
+      container_image_name: 'quay.io/ceph/daemon-base:latest-master-devel',
       daemon_id: '4',
       daemon_type: 'osd',
       daemon_name: 'osd.4',
@@ -63,7 +68,7 @@ describe('ServiceDaemonListComponent', () => {
       hostname: 'osd0',
       container_id: '8483de277e365bea4365cee9e1f26606be85c471e4da5d51f57e4b85a42c616e',
       container_image_id: 'e70344c77bcbf3ee389b9bf5128f635cf95f3d59e005c5d8e67fc19bcc74ed23',
-      container_image_name: 'docker.io/ceph/daemon-base:latest-master-devel',
+      container_image_name: 'quay.io/ceph/daemon-base:latest-master-devel',
       daemon_id: '5',
       daemon_type: 'osd',
       daemon_name: 'osd.5',
@@ -79,7 +84,7 @@ describe('ServiceDaemonListComponent', () => {
       hostname: 'mon0',
       container_id: '6ca0574f47e300a6979eaf4e7c283a8c4325c2235ae60358482fc4cd58844a21',
       container_image_id: 'e70344c77bcbf3ee389b9bf5128f635cf95f3d59e005c5d8e67fc19bcc74ed23',
-      container_image_name: 'docker.io/ceph/daemon-base:latest-master-devel',
+      container_image_name: 'quay.io/ceph/daemon-base:latest-master-devel',
       daemon_id: 'a',
       daemon_name: 'mon.a',
       daemon_type: 'mon',
@@ -99,7 +104,7 @@ describe('ServiceDaemonListComponent', () => {
       service_name: 'osd',
       status: {
         container_image_id: 'e70344c77bcbf3ee389b9bf5128f635cf95f3d59e005c5d8e67fc19bcc74ed23',
-        container_image_name: 'docker.io/ceph/daemon-base:latest-master-devel',
+        container_image_name: 'quay.io/ceph/daemon-base:latest-master-devel',
         size: 3,
         running: 3,
         last_refresh: '2020-02-25T04:33:26.465699'
@@ -111,7 +116,7 @@ describe('ServiceDaemonListComponent', () => {
       service_name: 'crash',
       status: {
         container_image_id: 'e70344c77bcbf3ee389b9bf5128f635cf95f3d59e005c5d8e67fc19bcc74ed23',
-        container_image_name: 'docker.io/ceph/daemon-base:latest-master-devel',
+        container_image_name: 'quay.io/ceph/daemon-base:latest-master-devel',
         size: 1,
         running: 1,
         last_refresh: '2020-02-25T04:33:26.465766'
@@ -131,14 +136,7 @@ describe('ServiceDaemonListComponent', () => {
   };
 
   configureTestBed({
-    imports: [
-      HttpClientTestingModule,
-      CephModule,
-      CoreModule,
-      NgxPipeFunctionModule,
-      SharedModule,
-      ToastrModule.forRoot()
-    ]
+    imports: [HttpClientTestingModule, CephModule, CoreModule, PipesModule, SharedModule]
   });
 
   beforeEach(() => {
@@ -190,11 +188,104 @@ describe('ServiceDaemonListComponent', () => {
   it('should call daemon action', () => {
     const daemon = daemons[0];
     component.selection.selected = [daemon];
-    component['daemonService'].action = jest.fn(() => of());
-    for (const action of ['start', 'stop', 'restart', 'redeploy']) {
+    const daemonService = TestBed.inject(DaemonService);
+    const modalService = TestBed.inject(ModalCdsService);
+    const showSpy = spyOn(modalService, 'show');
+    const actionSpy = spyOn(daemonService, 'action').and.returnValue(of({ body: 'ok' } as any));
+
+    component.daemonAction(DaemonAction.START);
+    expect(showSpy).not.toHaveBeenCalled();
+    expect(actionSpy).toHaveBeenCalledWith(daemon.daemon_name, DaemonAction.START, undefined);
+
+    actionSpy.calls.reset();
+    component.daemonAction(DaemonAction.REDEPLOY);
+    expect(showSpy).not.toHaveBeenCalled();
+    expect(actionSpy).toHaveBeenCalledWith(daemon.daemon_name, DaemonAction.REDEPLOY, undefined);
+
+    for (const action of [DaemonAction.STOP, DaemonAction.RESTART] as const) {
+      actionSpy.calls.reset();
+      showSpy.calls.reset();
+      actionSpy.and.returnValue(of({ body: 'scheduled' } as any));
       component.daemonAction(action);
-      expect(component['daemonService'].action).toHaveBeenCalledWith(daemon.daemon_name, action);
+      expect(showSpy).not.toHaveBeenCalled();
+      expect(actionSpy).toHaveBeenCalledWith(daemon.daemon_name, action, undefined);
     }
+  });
+
+  it('should open delete-confirmation modal for restart when daemon type needs orchestrator force', () => {
+    const modalService = TestBed.inject(ModalCdsService);
+    const showSpy = spyOn(modalService, 'show');
+    const daemonService = TestBed.inject(DaemonService);
+    spyOn(daemonService, 'action').and.returnValue(of({ body: 'scheduled' } as any));
+    const rgw = {
+      hostname: 'h1',
+      daemon_id: 'x',
+      daemon_type: 'rgw',
+      daemon_name: 'rgw.foo.host',
+      status_desc: 'running'
+    };
+    component.selection.selected = [rgw];
+    component.daemonAction(DaemonAction.RESTART);
+    expect(showSpy).toHaveBeenCalledWith(
+      DeleteConfirmationModalComponent,
+      jasmine.objectContaining({
+        impact: DeletionImpact.medium,
+        itemNames: ['rgw.foo.host'],
+        actionDescription: DaemonAction.RESTART
+      })
+    );
+    const modalConfig = showSpy.calls.mostRecent().args[1] as {
+      infoMessage?: string;
+      submitActionObservable: () => Observable<unknown>;
+    };
+    expect(modalConfig.infoMessage).toContain('rgw');
+    expect(modalConfig.infoMessage).toContain('orchestrator force option');
+
+    expect(daemonService.action).not.toHaveBeenCalled();
+    modalConfig.submitActionObservable().subscribe();
+    expect(daemonService.action).toHaveBeenCalledWith('rgw.foo.host', DaemonAction.RESTART, true);
+  });
+
+  it('should include daemon_type in modal infoMessage for each orchestrator-force type', () => {
+    const modalService = TestBed.inject(ModalCdsService);
+    const showSpy = spyOn(modalService, 'show');
+    const daemonService = TestBed.inject(DaemonService);
+    spyOn(daemonService, 'action').and.returnValue(of({ body: 'ok' } as any));
+
+    for (const daemonType of ['nfs', 'grafana', 'alertmanager'] as const) {
+      showSpy.calls.reset();
+      component.selection.selected = [
+        {
+          hostname: 'h1',
+          daemon_id: 'id',
+          daemon_type: daemonType,
+          daemon_name: `${daemonType}.host`,
+          status_desc: 'running'
+        }
+      ];
+      component.daemonAction(DaemonAction.STOP);
+      const cfg = showSpy.calls.mostRecent().args[1] as { infoMessage?: string };
+      expect(cfg.infoMessage).toContain(daemonType);
+      expect(cfg.infoMessage).toContain('orchestrator force option');
+    }
+  });
+
+  it('should not show force modal for stop/restart on osd and other types outside the force list', () => {
+    const modalService = TestBed.inject(ModalCdsService);
+    const showSpy = spyOn(modalService, 'show');
+    const daemonService = TestBed.inject(DaemonService);
+    spyOn(daemonService, 'action').and.returnValue(of({ body: 'ok' } as any));
+    const crash = {
+      hostname: 'h1',
+      daemon_id: 'uuid',
+      daemon_type: 'crash',
+      daemon_name: 'crash.h1',
+      status_desc: 'running'
+    };
+    component.selection.selected = [crash];
+    component.daemonAction(DaemonAction.STOP);
+    expect(showSpy).not.toHaveBeenCalled();
+    expect(daemonService.action).toHaveBeenCalledWith('crash.h1', DaemonAction.STOP, undefined);
   });
 
   it('should disable daemon actions', () => {
@@ -203,11 +294,11 @@ describe('ServiceDaemonListComponent', () => {
       status_desc: 'running'
     };
 
-    const states = {
-      start: true,
-      stop: false,
-      restart: false,
-      redeploy: false
+    const states: Record<DaemonAction, boolean> = {
+      [DaemonAction.START]: true,
+      [DaemonAction.STOP]: false,
+      [DaemonAction.RESTART]: false,
+      [DaemonAction.REDEPLOY]: false
     };
     const expectBool = (toExpect: boolean, arg: boolean) => {
       if (toExpect === true) {
@@ -218,15 +309,15 @@ describe('ServiceDaemonListComponent', () => {
     };
 
     component.selection.selected = [daemon];
-    for (const action of ['start', 'stop', 'restart', 'redeploy']) {
+    for (const action of Object.values(DaemonAction)) {
       expectBool(states[action], component.actionDisabled(action));
     }
 
     daemon.status_desc = 'stopped';
-    states.start = false;
-    states.stop = true;
+    states[DaemonAction.START] = false;
+    states[DaemonAction.STOP] = true;
     component.selection.selected = [daemon];
-    for (const action of ['start', 'stop', 'restart', 'redeploy']) {
+    for (const action of Object.values(DaemonAction)) {
       expectBool(states[action], component.actionDisabled(action));
     }
   });
@@ -236,18 +327,18 @@ describe('ServiceDaemonListComponent', () => {
       daemon_type: 'mgr',
       status_desc: 'running'
     };
-    for (const action of ['start', 'stop', 'restart', 'redeploy']) {
+    for (const action of Object.values(DaemonAction)) {
       expect(component.actionDisabled(action)).toBeTruthy();
     }
     daemon.daemon_type = 'mon';
-    for (const action of ['start', 'stop', 'restart', 'redeploy']) {
+    for (const action of Object.values(DaemonAction)) {
       expect(component.actionDisabled(action)).toBeTruthy();
     }
   });
 
   it('should disable daemon actions if no selection', () => {
     component.selection.selected = [];
-    for (const action of ['start', 'stop', 'restart', 'redeploy']) {
+    for (const action of Object.values(DaemonAction)) {
       expect(component.actionDisabled(action)).toBeTruthy();
     }
   });

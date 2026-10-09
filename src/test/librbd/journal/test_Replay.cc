@@ -1,8 +1,9 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "test/librbd/test_fixture.h"
 #include "test/librbd/test_support.h"
+#include "common/Cond.h"
 #include "cls/rbd/cls_rbd_types.h"
 #include "cls/journal/cls_journal_types.h"
 #include "cls/journal/cls_journal_client.h"
@@ -21,6 +22,8 @@
 #include "librbd/io/ImageRequest.h"
 #include "librbd/io/ReadResult.h"
 #include "librbd/journal/Types.h"
+
+#include <shared_mutex> // for std::shared_lock
 
 void register_test_journal_replay() {
 }

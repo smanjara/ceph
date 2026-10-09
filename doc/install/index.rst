@@ -1,77 +1,116 @@
 .. _install-overview:
 
-===============
-Installing Ceph
-===============
+=================
+ Installing Ceph
+=================
 
-There are multiple ways to install Ceph.  Choose the method that best suits
-your needs.
+.. meta::
+   :description: Choose how to install and deploy a Ceph cluster, with cephadm, Rook, another deployment tool, or by hand, and find the pages to plan, set up, and upgrade it.
+   :ceph-page-type: assembly
 
-Recommended methods
-~~~~~~~~~~~~~~~~~~~
-
-:ref:`Cephadm <cephadm_deploying_new_cluster>` installs and manages a Ceph
-cluster that uses containers and systemd and is tightly integrated with the CLI
-and dashboard GUI.
-
-* cephadm supports only Octopus and newer releases.
-* cephadm is fully integrated with the orchestration API and fully supports the
-  CLI and dashboard features that are used to manage cluster deployment.
-* cephadm requires container support (in the form of Podman or Docker) and
-  Python 3.
-
-`Rook <https://rook.io/>`_ deploys and manages Ceph clusters running
-in Kubernetes, while also enabling management of storage resources and
-provisioning via Kubernetes APIs. We recommend Rook as the way to run Ceph in
-Kubernetes or to connect an existing Ceph storage cluster to Kubernetes.
-
-* Rook supports only Nautilus and newer releases of Ceph.
-* Rook is the preferred method for running Ceph on Kubernetes, or for
-  connecting a Kubernetes cluster to an existing (external) Ceph
-  cluster.
-* Rook supports the orchestrator API. Management features in the CLI and
-  dashboard are fully supported.
-
-Other methods
-~~~~~~~~~~~~~
-
-`ceph-ansible <https://docs.ceph.com/ceph-ansible/>`_ deploys and manages
-Ceph clusters using Ansible.
-
-* ceph-ansible is widely deployed.
-* ceph-ansible is not integrated with the orchestrator APIs that were
-  introduced in Nautilus and Octopus, which means that the management features
-  and dashboard integration introduced in Nautilus and Octopus are not
-  available in Ceph clusters deployed by means of ceph-ansible.
-
-
-`ceph-deploy <https://docs.ceph.com/projects/ceph-deploy/en/latest/>`_ is a
-tool that can be used to quickly deploy clusters. It is deprecated.
-
-  .. IMPORTANT::
-
-   ceph-deploy is not actively maintained. It is not tested on versions of Ceph
-   newer than Nautilus. It does not support RHEL8, CentOS 8, or newer operating
-   systems.
-
-`ceph-salt <https://github.com/ceph/ceph-salt>`_ installs Ceph using Salt and cephadm.
-
-`jaas.ai/ceph-mon <https://jaas.ai/ceph-mon>`_ installs Ceph using Juju.
-
-`github.com/openstack/puppet-ceph <https://github.com/openstack/puppet-ceph>`_  installs Ceph via Puppet.
-
-Ceph can also be :ref:`installed manually <install-manual>`.
-
+Choose a deployment method, plan the hardware and operating system, then set
+up the cluster.
 
 .. toctree::
+   :maxdepth: 1
    :hidden:
 
    index_manual
+   windows-install
+   windows-basic-config
+   windows-troubleshooting
 
-Windows
-~~~~~~~
+.. _recommended-methods:
 
-For Windows installations, consult this document:
-`Windows installation guide`_.
+.. rubric:: Choose a Deployment Method
 
-.. _Windows installation guide: ./windows-install
+.. list-table::
+   :header-rows: 1
+   :widths: 20 45 35
+
+   * - Method
+     - When to use it
+     - Where to go
+   * - :term:`cephadm` (recommended)
+     - Installing and managing a cluster on Linux :term:`hosts <Host>` that
+       have systemd, Python 3, and Podman or Docker. Cephadm supports only
+       Octopus and newer :term:`releases <Ceph Release>`.
+     - :ref:`cephadm_deploying_new_cluster`
+   * - Rook (recommended for Kubernetes)
+     - Running Ceph in Kubernetes, with storage resources and provisioning
+       managed through Kubernetes APIs, or connecting a Kubernetes cluster
+       to an existing (external) Ceph cluster
+     - `rook.io <https://rook.io/>`__
+   * - ceph-salt
+     - Installing Ceph with Salt and cephadm
+     - `github.com/ceph/ceph-salt <https://github.com/ceph/ceph-salt>`__
+   * - Juju
+     - Installing Ceph with Juju
+     - `charmhub.io/ceph-mon <https://charmhub.io/ceph-mon>`__
+   * - Puppet
+     - Installing Ceph with Puppet
+     - `github.com/openstack/puppet-ceph
+       <https://github.com/openstack/puppet-ceph>`__
+   * - OpenNebula HCI clusters
+     - Deploying Ceph as the storage of OpenNebula 6.10 HCI clusters, on
+       bare-metal servers in AWS or on premises (a legacy component that
+       OpenNebula 7 no longer includes)
+     - `docs.opennebula.io (6.10)
+       <https://docs.opennebula.io/6.10/provision_clusters/hci_clusters/overview.html>`__
+   * - Manual installation
+     - Developing your own deployment scripts, or installing on hosts that
+       cannot run cephadm, such as FreeBSD hosts
+     - :ref:`install-manual`
+
+Cephadm is fully integrated with the orchestrator API, so the CLI and
+:term:`dashboard <Dashboard>` features that manage cluster deployment are
+fully supported. Rook supports the orchestrator API but implements only some
+of its commands: for example, ``ceph orch`` cannot create or remove OSDs in
+a Rook cluster. Use the Rook operator for that.
+
+.. rubric:: Plan
+
+- :ref:`hardware-recommendations`: how to choose CPUs, memory, storage
+  devices, and networks for a cluster.
+- :ref:`os-recommendations`: the distributions, kernels, and container hosts
+  that each Ceph release is built and tested on.
+- :doc:`/cephadm/compatibility`: the Podman versions that work with each Ceph
+  release, and the cephadm features that are still under development.
+
+.. rubric:: Set Up
+
+- :ref:`packages`: add the Ceph package repository for APT or DNF, use
+  development builds, or download packages for hosts without internet
+  access.
+- :ref:`install-windows`: the :term:`Ceph client <Ceph Client>` for Windows,
+  with which a host maps :term:`RBD` images as local disks and mounts
+  :term:`CephFS` file systems. If something fails, see
+  :ref:`install-windows-troubleshooting`.
+- :ref:`install-windows-basic-config`: the configuration file and
+  :term:`keyring <Keyring>` that the Windows client needs to connect to a
+  cluster.
+
+.. rubric:: Look Up
+
+- :ref:`containers`: where Ceph publishes its container images, and what
+  each tag points to.
+- :ref:`install-mirrors`: mirrors of ``download.ceph.com`` for packages and
+  tarballs, and how to run your own.
+- :ref:`ceph-releases-index`: the releases that are maintained now, and the
+  release notes of every release.
+
+.. rubric:: Next Steps
+
+- :doc:`/cephadm/upgrade`: upgrade a cluster that cephadm manages to a new
+  release.
+- :ref:`rados-operations`: check the cluster's health, monitor it, manage
+  :term:`pools <Pools>` and data placement, and add or replace hardware.
+
+.. rubric:: Additional Resources
+
+- :ref:`Cephadm <cephadm>`: managing hosts and services, and the other tasks
+  that cephadm performs after deployment.
+- :doc:`Troubleshooting cephadm </cephadm/troubleshooting>`: what to check
+  when a cephadm command fails or a service stops running.
+- :ref:`start-here`: what Ceph is, and a single-host test cluster to learn
+  on.

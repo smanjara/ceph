@@ -3,89 +3,39 @@ import ipaddress
 import logging
 import re
 
-from teuthology import misc as teuthology
 from teuthology.config import config as teuth_config
+from teuthology.exceptions import ConfigError
 
 log = logging.getLogger(__name__)
 
 
-def subst_vip(ctx, cmd):
-    p = re.compile(r'({{VIP(\d+)}})')
-    for m in p.findall(cmd):
-        n = int(m[1])
-        if n >= len(ctx.vip["vips"]):
-            log.warning(f'no VIP{n} (we have {len(ctx.vip["vips"])})')
-        else:
-            cmd = cmd.replace(m[0], str(ctx.vip["vips"][n]))
-
-    if '{{VIPPREFIXLEN}}' in cmd:
-        cmd = cmd.replace('{{VIPPREFIXLEN}}', str(ctx.vip["vnet"].prefixlen))
-
-    if '{{VIPSUBNET}}' in cmd:
-        cmd = cmd.replace('{{VIPSUBNET}}', str(ctx.vip["vnet"].network_address))
-
-    return cmd
-
-
-def echo(ctx, config):
-    """
-    This is mostly for debugging
-    """
-    for remote in ctx.cluster.remotes.keys():
-        log.info(subst_vip(ctx, config))
-
-
-def exec(ctx, config):
-    """
-    This is similar to the standard 'exec' task, but does the VIP substitutions.
-    """
-    assert isinstance(config, dict), "task exec got invalid config"
-
-    testdir = teuthology.get_testdir(ctx)
-
-    if 'all-roles' in config and len(config) == 1:
-        a = config['all-roles']
-        roles = teuthology.all_roles(ctx.cluster)
-        config = dict((id_, a) for id_ in roles if not id_.startswith('host.'))
-    elif 'all-hosts' in config and len(config) == 1:
-        a = config['all-hosts']
-        roles = teuthology.all_roles(ctx.cluster)
-        config = dict((id_, a) for id_ in roles if id_.startswith('host.'))
-
-    for role, ls in config.items():
-        (remote,) = ctx.cluster.only(role).remotes.keys()
-        log.info('Running commands on role %s host %s', role, remote.name)
-        for c in ls:
-            c.replace('$TESTDIR', testdir)
-            remote.run(
-                args=[
-                    'sudo',
-                    'TESTDIR={tdir}'.format(tdir=testdir),
-                    'bash',
-                    '-ex',
-                    '-c',
-                    subst_vip(ctx, c)],
-                )
-
-
-def map_vips(mip, count):
-    for mapping in teuth_config.get('vip', []):
+def _map_vips(mip, count):
+    vip_entries = teuth_config.get('vip', [])
+    if not vip_entries:
+        raise ConfigError(
+            'at least one item must be configured for "vip" config key'
+            ' to use the vip task'
+        )
+    for mapping in vip_entries:
         mnet = ipaddress.ip_network(mapping['machine_subnet'])
         vnet = ipaddress.ip_network(mapping['virtual_subnet'])
         if vnet.prefixlen >= mnet.prefixlen:
             log.error(f"virtual_subnet {vnet} prefix >= machine_subnet {mnet} prefix")
-            return None
-        if mip in mnet:
-            pos = list(mnet.hosts()).index(mip)
-            log.info(f"{mip} in {mnet}, pos {pos}")
-            r = []
-            for sub in vnet.subnets(new_prefix=mnet.prefixlen):
-                r += [list(sub.hosts())[pos]]
-                count -= 1
-                if count == 0:
-                    break
-            return vnet, r
-    return None
+            raise ConfigError('virtual subnet too small')
+        if mip not in mnet:
+            # not our machine subnet
+            log.info(f"machine ip {mip} not in machine subnet {mnet}")
+            continue
+        pos = list(mnet.hosts()).index(mip)
+        log.info(f"{mip} in {mnet}, pos {pos}")
+        r = []
+        for sub in vnet.subnets(new_prefix=mnet.prefixlen):
+            r += [list(sub.hosts())[pos]]
+            count -= 1
+            if count == 0:
+                break
+        return vnet, r
+    raise ConfigError(f"no matching machine subnet found for {mip}")
 
 
 @contextlib.contextmanager
@@ -136,14 +86,14 @@ def task(ctx, config):
         ip = remote.ssh.get_transport().getpeername()[0]
         log.info(f'peername {ip}')
         mip = ipaddress.ip_address(ip)
-        vnet, vips = map_vips(mip, count + 1)
+        vnet, vips = _map_vips(mip, count + 1)
         static = vips.pop(0)
         log.info(f"{remote.hostname} static {static}, vnet {vnet}")
 
         if not ctx.vip:
             # do this only once (use the first remote we see), since we only need 1
             # set of virtual IPs, regardless of how many remotes we have.
-            log.info("VIPs are {map(str, vips)}")
+            log.info(f"VIPs are {vips!r}")
             ctx.vip = {
                 'vnet': vnet,
                 'vips': vips,

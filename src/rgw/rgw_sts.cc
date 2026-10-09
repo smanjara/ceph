@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include <errno.h>
 #include <ctime>
@@ -18,15 +18,14 @@
 #include "include/types.h"
 #include "rgw_string.h"
 
+#include "rgw_account.h"
 #include "rgw_b64.h"
 #include "rgw_common.h"
-#include "rgw_tools.h"
 #include "rgw_role.h"
-#include "rgw_user.h"
+#include "driver/rados/rgw_user.h"
 #include "rgw_iam_policy.h"
 #include "rgw_sts.h"
 #include "rgw_sal.h"
-#include "rgw_sal_rados.h"
 
 #define dout_subsys ceph_subsys_rgw
 
@@ -54,7 +53,7 @@ int Credentials::generateCredentials(const DoutPrefixProvider *dpp,
                           rgw::auth::Identity* identity)
 {
   uuid_d accessKey, secretKey;
-  char accessKeyId_str[MAX_ACCESS_KEY_LEN], secretAccessKey_str[MAX_SECRET_KEY_LEN];
+  char accessKeyId_str[MAX_ACCESS_KEY_LEN + 1], secretAccessKey_str[MAX_SECRET_KEY_LEN + 1];
 
   //AccessKeyId
   gen_rand_alphanumeric_plain(cct, accessKeyId_str, sizeof(accessKeyId_str));
@@ -70,22 +69,16 @@ int Credentials::generateCredentials(const DoutPrefixProvider *dpp,
   expiration = ceph::to_iso_8601(exp);
 
   //Session Token - Encrypt using AES
-  auto* cryptohandler = cct->get_crypto_handler(CEPH_CRYPTO_AES);
-  if (! cryptohandler) {
-    ldpp_dout(dpp, 0) << "ERROR: No AES cryto handler found !" << dendl;
+  if (cct->_conf->rgw_sts_key.empty()) {
+    ldpp_dout(dpp, 1) << "ERROR: rgw sts key not set" << dendl;
     return -EINVAL;
   }
-  string secret_s = cct->_conf->rgw_sts_key;
-  buffer::ptr secret(secret_s.c_str(), secret_s.length());
-  int ret = 0;
-  if (ret = cryptohandler->validate_secret(secret); ret < 0) {
-    ldpp_dout(dpp, 0) << "ERROR: Invalid rgw sts key, please ensure its length is 16" << dendl;
-    return ret;
-  }
+
   string error;
-  std::unique_ptr<CryptoKeyHandler> keyhandler(cryptohandler->get_key_handler(secret, error));
+  int ret;
+  auto keyhandler = secret_to_handler(cct, cct->_conf->rgw_sts_key, error);
   if (! keyhandler) {
-    ldpp_dout(dpp, 0) << "ERROR: No Key handler found !" << dendl;
+    ldpp_dout(dpp, 0) << "ERROR: Invalid rgw sts key; " << error << dendl;
     return -EINVAL;
   }
   error.clear();
@@ -123,7 +116,7 @@ int Credentials::generateCredentials(const DoutPrefixProvider *dpp,
   if (identity) {
     token.acct_name = identity->get_acct_name();
     token.perm_mask = identity->get_perm_mask();
-    token.is_admin = identity->is_admin_of(token.user);
+    token.is_admin = identity->is_admin();
     token.acct_type = identity->get_identity_type();
   } else {
     token.acct_name = {};
@@ -139,7 +132,7 @@ int Credentials::generateCredentials(const DoutPrefixProvider *dpp,
   buffer::list input, enc_output;
   encode(token, input);
 
-  if (ret = keyhandler->encrypt(input, enc_output, &error); ret < 0) {
+  if (ret = keyhandler->encrypt_ext(cct, 14, input, enc_output, &error); ret < 0) {
     ldpp_dout(dpp, 0) << "ERROR: Encrypting session token returned an error !" << dendl;
     return ret;
   }
@@ -275,7 +268,7 @@ int AssumeRoleRequest::validate_input(const DoutPrefixProvider *dpp) const
       return -EINVAL;
     }
   }
-  if (! tokenCode.empty() && tokenCode.size() == TOKEN_CODE_SIZE) {
+  if (! tokenCode.empty() && tokenCode.size() != TOKEN_CODE_SIZE) {
     ldpp_dout(dpp, 0) << "Either token code is empty or token code size is invalid: " << tokenCode.size() << dendl;
     return -EINVAL;
   }
@@ -290,8 +283,16 @@ std::tuple<int, rgw::sal::RGWRole*> STSService::getRoleInfo(const DoutPrefixProv
   if (auto r_arn = rgw::ARN::parse(arn); r_arn) {
     auto pos = r_arn->resource.find_last_of('/');
     string roleName = r_arn->resource.substr(pos + 1);
-    std::unique_ptr<rgw::sal::RGWRole> role = driver->get_role(roleName, r_arn->account);
-    if (int ret = role->get(dpp, y); ret < 0) {
+    string tenant = r_arn->account;
+
+    rgw_account_id account;
+    if (rgw::account::validate_id(tenant)) {
+      account = std::move(tenant);
+      tenant.clear();
+    }
+
+    std::unique_ptr<rgw::sal::RGWRole> role = driver->get_role(roleName, tenant, account);
+    if (int ret = role->load_by_name(dpp, y); ret < 0) {
       if (ret == -ENOENT) {
         ldpp_dout(dpp, 0) << "Role doesn't exist: " << roleName << dendl;
         ret = -ERR_NO_ROLE_FOUND;
@@ -317,23 +318,6 @@ std::tuple<int, rgw::sal::RGWRole*> STSService::getRoleInfo(const DoutPrefixProv
     ldpp_dout(dpp, 0) << "Invalid role arn: " << arn << dendl;
     return make_tuple(-EINVAL, nullptr);
   }
-}
-
-int STSService::storeARN(const DoutPrefixProvider *dpp, string& arn, optional_yield y)
-{
-  int ret = 0;
-  std::unique_ptr<rgw::sal::User> user = driver->get_user(user_id);
-  if ((ret = user->load_user(dpp, y)) < 0) {
-    return -ERR_NO_SUCH_ENTITY;
-  }
-
-  user->get_info().assumed_role_arn = arn;
-
-  ret = user->store_user(dpp, y, false, &user->get_info());
-  if (ret < 0) {
-    return -ERR_INTERNAL_ERROR;
-  }
-  return ret;
 }
 
 AssumeRoleWithWebIdentityResponse STSService::assumeRoleWithWebIdentity(const DoutPrefixProvider *dpp, AssumeRoleWithWebIdentityRequest& req)
@@ -407,16 +391,16 @@ AssumeRoleResponse STSService::assumeRole(const DoutPrefixProvider *dpp,
   AssumeRoleResponse response;
   response.packedPolicySize = 0;
 
-  //Get the role info which is being assumed
-  boost::optional<rgw::ARN> r_arn = rgw::ARN::parse(req.getRoleARN());
-  if (r_arn == boost::none) {
-    ldpp_dout(dpp, 0) << "Error in parsing role arn: " << req.getRoleARN() << dendl;
-    response.retCode = -EINVAL;
+  auto [ret, r] = getRoleInfo(dpp, req.getRoleARN(), y);
+  if (ret < 0) {
+    response.retCode = ret;
     return response;
   }
 
-  string roleId = role->get_id();
-  uint64_t roleMaxSessionDuration = role->get_max_session_duration();
+  boost::optional<rgw::ARN> r_arn = rgw::ARN::parse(req.getRoleARN());
+
+  string roleId = r->get_id();
+  uint64_t roleMaxSessionDuration = r->get_max_session_duration();
   req.setMaxDuration(roleMaxSessionDuration);
 
   //Validate input
@@ -443,13 +427,6 @@ AssumeRoleResponse STSService::assumeRole(const DoutPrefixProvider *dpp,
                                               boost::none,
                                               boost::none,
                                               user_id, nullptr);
-  if (response.retCode < 0) {
-    return response;
-  }
-
-  //Save ARN with the user
-  string arn = response.user.getARN();
-  response.retCode = storeARN(dpp, arn, y);
   if (response.retCode < 0) {
     return response;
   }
@@ -490,4 +467,56 @@ GetSessionTokenResponse STSService::getSessionToken(const DoutPrefixProvider *dp
   return make_tuple(0, cred);
 }
 
+class ExposedCryptoKey : public CryptoKey {// XXX do better fix
+public:
+  std::shared_ptr<CryptoKeyHandler> & get_key_handler() {
+    return ckh;
+  }
+};
+
+std::shared_ptr<CryptoKeyHandler> secret_to_handler(CephContext* cct,
+  const std::string &secret, std::string &error)
+{
+  std::shared_ptr<CryptoKeyHandler> r;
+  CryptoKey key;
+  bool good = false;
+  try {
+    key.decode_base64(secret);
+    good = true;
+  } catch (const ceph::buffer::end_of_buffer& e) {
+    error = "decode failed; end of buffer";
+  } catch (const ceph::buffer::malformed_input& e) {
+    error = "decode failed; maiformed input";
+  }
+  if (good) {
+    ExposedCryptoKey *ep = (ExposedCryptoKey*)& key;
+    r.swap(ep->get_key_handler());
+  } else {
+    std::shared_ptr<CryptoHandler> cryptohandler;
+    int len = secret.length();
+    int ret;
+    switch(len) {
+    case 16:
+      cryptohandler = cct->get_crypto_manager()->get_handler(CEPH_CRYPTO_AES);
+      break;
+    case 32:
+      cryptohandler = cct->get_crypto_manager()->get_handler(CEPH_CRYPTO_AES256KRB5);
+      break;
+    default:
+      ;
+    }
+    if (!cryptohandler) {
+      // fail invalid length (return decode failed)
+    } else {
+      buffer::ptr bp(secret.c_str(), len);
+      ret = cryptohandler->validate_secret(bp);
+      if (ret < 0) {
+        error = "invalid secret";
+      } else {
+        r.reset(cryptohandler->get_key_handler(bp, error));
+      }
+    }
+  }
+  return r;
+}
 }

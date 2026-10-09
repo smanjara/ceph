@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -13,8 +13,7 @@
  *
  */
 
-#ifndef RGW_HTTP_CLIENT_CURL_H
-#define RGW_HTTP_CLIENT_CURL_H
+#pragma once
 
 #include <map>
 #include <boost/optional.hpp>
@@ -28,5 +27,3 @@ void setup_curl(boost::optional<const fe_map_t&> m);
 void cleanup_curl();
 }
 }
-
-#endif

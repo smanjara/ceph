@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,7 +16,10 @@
 #ifndef CEPH_REFCOUNTEDOBJ_H
 #define CEPH_REFCOUNTEDOBJ_H
  
+#ifndef WITH_CRIMSON
 #include "common/ceph_mutex.h"
+#endif
+
 #include "common/ref.h"
 #include "include/common_fwd.h"
 
@@ -74,12 +78,7 @@ protected:
 private:
   void _get() const;
 
-#if defined(WITH_SEASTAR) && !defined(WITH_ALIEN)
-  // crimson is single threaded at the moment
-  mutable uint64_t nref{1};
-#else
   mutable std::atomic<uint64_t> nref{1};
-#endif
   CephContext *cct{nullptr};
 };
 
@@ -94,7 +93,7 @@ template<typename... Args>
   virtual ~RefCountedObjectSafe() override {}
 };
 
-#if !defined(WITH_SEASTAR)|| defined(WITH_ALIEN)
+#ifndef WITH_CRIMSON
 
 /**
  * RefCountedCond
@@ -185,7 +184,13 @@ struct RefCountedWaitObject {
   }
 };
 
-#endif // !defined(WITH_SEASTAR)|| defined(WITH_ALIEN)
+static inline void intrusive_ptr_add_ref(RefCountedWaitObject *p) {
+  p->get();
+}
+static inline void intrusive_ptr_release(RefCountedWaitObject *p) {
+  p->put();
+}
+#endif // ifndef WITH_CRIMSON
 
 static inline void intrusive_ptr_add_ref(const RefCountedObject *p) {
   p->get();
@@ -201,7 +206,7 @@ struct UniquePtrDeleter
     p->put();
   }
 };
-}
+} // namespace TOPNSPC::common
 using RefCountedPtr = ceph::ref_t<TOPNSPC::common::RefCountedObject>;
 
 #endif

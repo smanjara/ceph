@@ -1,5 +1,5 @@
 import hashlib
-from mgr_module import CLICommand, CLIReadCommand, CLIWriteCommand, MgrModule, Option
+from mgr_module import MgrModule, Option
 import datetime
 import errno
 import functools
@@ -9,8 +9,10 @@ from collections import defaultdict
 from prettytable import PrettyTable
 import re
 from threading import Event, Lock
-from typing import cast, Any, Callable, DefaultDict, Dict, Iterable, List, Optional, Tuple, TypeVar,\
+from typing import cast, Any, Callable, DefaultDict, Dict, Iterable, List, Optional, Tuple, TypeVar, \
     Union, TYPE_CHECKING
+
+from .cli import CrashCLICommand
 
 
 DATEFMT = '%Y-%m-%dT%H:%M:%S.%f'
@@ -38,6 +40,7 @@ CrashT = Dict[str, Union[str, List[str]]]
 
 
 class Module(MgrModule):
+    CLICommand = CrashCLICommand
     MODULE_OPTIONS = [
         Option(
             name='warn_recent_interval',
@@ -101,12 +104,11 @@ class Module(MgrModule):
                 and 'archived' not in crash)
         }
 
-        def prune_detail(ls: List[str]) -> int:
+        def prune_detail(ls: List[str]) -> Tuple[List[str], int]:
             num = len(ls)
             if num > 30:
-                ls = ls[0:30]
-                ls.append('and %d more' % (num - 30))
-            return num
+                ls = ls[0:30] + ['and %d more' % (num - 30)]
+            return ls, num
 
         daemon_crashes = []
         module_crashes = []
@@ -128,8 +130,8 @@ class Module(MgrModule):
                 crash.get('utsname_hostname', '(unknown)'),
                 crash.get('timestamp', 'unknown time'))
             for crash in module_crashes]
-        daemon_num = prune_detail(daemon_detail)
-        module_num = prune_detail(module_detail)
+        daemon_detail, daemon_num = prune_detail(daemon_detail)
+        module_detail, module_num = prune_detail(module_detail)
 
         health_checks: Dict[str, Dict[str, Union[int, str, List[str]]]] = {}
         if daemon_detail:
@@ -215,7 +217,7 @@ class Module(MgrModule):
 
     # command handlers
 
-    @CLIReadCommand('crash info')
+    @CrashCLICommand.Read('crash info')
     @with_crashes
     def do_info(self, id: str) -> Tuple[int, str, str]:
         """
@@ -225,11 +227,12 @@ class Module(MgrModule):
         assert self.crashes is not None
         crash = self.crashes.get(crashid)
         if not crash:
-            return errno.EINVAL, '', 'crash info: %s not found' % crashid
+            return -errno.EINVAL, '', 'crash info: %s not found' % crashid
         val = json.dumps(crash, indent=4, sort_keys=True)
         return 0, val, ''
 
-    @CLICommand('crash post')
+    @CrashCLICommand('crash post')
+    @with_crashes
     def do_post(self, inbuf: str) -> Tuple[int, str, str]:
         """
         Add a crash dump (use -i <jsonfile>)
@@ -237,7 +240,7 @@ class Module(MgrModule):
         try:
             metadata = self.validate_crash_metadata(inbuf)
         except Exception as e:
-            return errno.EINVAL, '', 'malformed crash metadata: %s' % e
+            return -errno.EINVAL, '', 'malformed crash metadata: %s' % e
         if 'backtrace' in metadata:
             backtrace = cast(List[str], metadata.get('backtrace'))
             assert_msg = cast(Optional[str], metadata.get('assert_msg'))
@@ -252,8 +255,6 @@ class Module(MgrModule):
         return 0, '', ''
 
     def ls(self) -> Tuple[int, str, str]:
-        if not self.crashes:
-            self._load_crashes()
         return self.do_ls_all('')
 
     def _do_ls(self, t: Iterable[CrashT], format: Optional[str]) -> Tuple[int, str, str]:
@@ -273,7 +274,7 @@ class Module(MgrModule):
                                '' if 'archived' in c else '*'])
             return 0, table.get_string(), ''
 
-    @CLIReadCommand('crash ls')
+    @CrashCLICommand.Read('crash ls')
     @with_crashes
     def do_ls_all(self, format: Optional[str] = None) -> Tuple[int, str, str]:
         """
@@ -282,7 +283,7 @@ class Module(MgrModule):
         assert self.crashes is not None
         return self._do_ls(self.crashes.values(), format)
 
-    @CLIReadCommand('crash ls-new')
+    @CrashCLICommand.Read('crash ls-new')
     @with_crashes
     def do_ls_new(self, format: Optional[str] = None) -> Tuple[int, str, str]:
         """
@@ -293,7 +294,7 @@ class Module(MgrModule):
              if 'archived' not in crash]
         return self._do_ls(t, format)
 
-    @CLICommand('crash rm')
+    @CrashCLICommand('crash rm')
     @with_crashes
     def do_rm(self, id: str) -> Tuple[int, str, str]:
         """
@@ -308,7 +309,7 @@ class Module(MgrModule):
             self._refresh_health_checks()
         return 0, '', ''
 
-    @CLICommand('crash prune')
+    @CrashCLICommand('crash prune')
     @with_crashes
     def do_prune(self, keep: int) -> Tuple[int, str, str]:
         """
@@ -332,7 +333,7 @@ class Module(MgrModule):
         if removed_any:
             self._refresh_health_checks()
 
-    @CLIWriteCommand('crash archive')
+    @CrashCLICommand.Write('crash archive')
     @with_crashes
     def do_archive(self, id: str) -> Tuple[int, str, str]:
         """
@@ -342,7 +343,7 @@ class Module(MgrModule):
         assert self.crashes is not None
         crash = self.crashes.get(crashid)
         if not crash:
-            return errno.EINVAL, '', 'crash info: %s not found' % crashid
+            return -errno.EINVAL, '', 'crash info: %s not found' % crashid
         if not crash.get('archived'):
             crash['archived'] = str(datetime.datetime.utcnow())
             self.crashes[crashid] = crash
@@ -351,7 +352,7 @@ class Module(MgrModule):
             self._refresh_health_checks()
         return 0, '', ''
 
-    @CLIWriteCommand('crash archive-all')
+    @CrashCLICommand.Write('crash archive-all')
     @with_crashes
     def do_archive_all(self) -> Tuple[int, str, str]:
         """
@@ -367,7 +368,7 @@ class Module(MgrModule):
         self._refresh_health_checks()
         return 0, '', ''
 
-    @CLIReadCommand('crash stat')
+    @CrashCLICommand.Read('crash stat')
     @with_crashes
     def do_stat(self) -> Tuple[int, str, str]:
         """
@@ -418,7 +419,7 @@ class Module(MgrModule):
             retlines.append(binstr(bindict))
         return 0, '\n'.join(retlines), ''
 
-    @CLIReadCommand('crash json_report')
+    @CrashCLICommand.Read('crash json_report')
     @with_crashes
     def do_json_report(self, hours: int) -> Tuple[int, str, str]:
         """

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -20,19 +21,23 @@
 #include "common/config.h"
 #include "compressor/Compressor.h"
 
+class QatAccel;
+class UadkAccel;
+
 class ZlibCompressor : public Compressor {
   bool isal_enabled;
   CephContext *const cct;
-public:
-  ZlibCompressor(CephContext *cct, bool isal)
-    : Compressor(COMP_ALG_ZLIB, "zlib"), isal_enabled(isal), cct(cct) {
 #ifdef HAVE_QATZIP
-    if (cct->_conf->qat_compressor_enabled && qat_accel.init("zlib"))
-      qat_enabled = true;
-    else
-      qat_enabled = false;
+  bool qat_enabled;
+  static QatAccel qat_accel;
 #endif
-  }
+#ifdef HAVE_UADK
+  bool uadk_enabled;
+  static UadkAccel uadk_accel;
+#endif
+
+ public:
+  ZlibCompressor(CephContext *cct, bool isal);
 
   int compress(const ceph::buffer::list &in, ceph::buffer::list &out, std::optional<int32_t> &compressor_message) override;
   int decompress(const ceph::buffer::list &in, ceph::buffer::list &out, std::optional<int32_t> compressor_message) override;

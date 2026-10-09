@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -7,6 +7,8 @@
 #include <optional>
 #include <ostream>
 
+#include "common/fmt_common.h"
+#include <fmt/ranges.h>
 #include "crimson/os/seastore/onode_manager/staged-fltree/fwd.h"
 #include "crimson/os/seastore/onode_manager/staged-fltree/node_types.h"
 #include "crimson/os/seastore/onode_manager/staged-fltree/value.h"
@@ -90,7 +92,7 @@ struct MatchHistory {
     } else if (*match == MatchKindCMP::GT) {
       return os << "GT";
     } else {
-      ceph_abort("impossble path");
+      ceph_abort_msg("impossble path");
     }
   }
 
@@ -207,19 +209,18 @@ struct staged_position_t {
 
   index_t index;
   nxt_t nxt;
-};
-template <match_stage_t STAGE>
-std::ostream& operator<<(std::ostream& os, const staged_position_t<STAGE>& pos) {
-  if (pos.index == INDEX_END) {
-    os << "END";
-  } else if (pos.index == INDEX_LAST) {
-    os << "LAST";
-  } else {
-    os << pos.index;
-    assert(is_valid_index(pos.index));
+
+  std::string fmt_print() const {
+    if (index == INDEX_END) {
+      return fmt::format("END, {}", nxt.fmt_print());
+    }
+    if (index == INDEX_LAST) {
+      return fmt::format("LAST, {}", nxt.fmt_print());
+    }
+    assert(is_valid_index(index));
+    return fmt::format("{}, {}", index, nxt.fmt_print());
   }
-  return os << ", " << pos.nxt;
-}
+};
 
 template <>
 struct staged_position_t<STAGE_BOTTOM> {
@@ -280,19 +281,17 @@ struct staged_position_t<STAGE_BOTTOM> {
   static me_t end() { return {INDEX_END}; }
 
   index_t index;
-};
-template <>
-inline std::ostream& operator<<(std::ostream& os, const staged_position_t<STAGE_BOTTOM>& pos) {
-  if (pos.index == INDEX_END) {
-    os << "END";
-  } else if (pos.index == INDEX_LAST) {
-    os << "LAST";
-  } else {
-    os << pos.index;
-    assert(is_valid_index(pos.index));
+  std::string fmt_print() const {
+    if (index == INDEX_END) {
+      return "END";
+    }
+    if (index == INDEX_LAST) {
+      return "LAST";
+    }
+    assert(is_valid_index(index));
+    return std::to_string(index);
   }
-  return os;
-}
+};
 
 using search_position_t = staged_position_t<STAGE_TOP>;
 
@@ -320,7 +319,7 @@ const staged_position_t<STAGE>& cast_down(const search_position_t& pos) {
 #endif
     return pos.nxt.nxt;
   } else {
-    ceph_abort("impossible path");
+    ceph_abort_msg("impossible path");
   }
 }
 
@@ -342,7 +341,7 @@ staged_position_t<STAGE>& cast_down_fill_0(search_position_t& pos) {
     pos.nxt.index = 0;
     return pos.nxt.nxt;
   } else {
-    ceph_abort("impossible path");
+    ceph_abort_msg("impossible path");
   }
 }
 
@@ -358,7 +357,7 @@ search_position_t normalize(staged_position_t<STAGE>&& pos) {
   } else if (STAGE == STAGE_RIGHT) {
     return {0u, {0u, std::move(pos)}};
   } else {
-    ceph_abort("impossible path");
+    ceph_abort_msg("impossible path");
   }
 }
 
@@ -433,10 +432,37 @@ struct node_stats_t {
   unsigned num_kvs = 0;
 };
 
+} // namespace crimson::os::seastore::onode
+
+namespace std {
+template <crimson::os::seastore::onode::match_stage_t STAGE>
+std::ostream& operator<<(
+    std::ostream& os,
+    const crimson::os::seastore::onode::staged_position_t<STAGE>& pos) {
+  return os << pos.fmt_print();
 }
+} // namespace std
+
+
+namespace fmt {
+// staged_position_t has static begin()/end() factory methods unrelated to
+// iteration; fmt's range auto-detection picks them up and tries to
+// dereference the (non-dereferenceable) result, so opt out explicitly.
+template <crimson::os::seastore::onode::match_stage_t S>
+struct is_range<crimson::os::seastore::onode::staged_position_t<S>, char>
+  : std::false_type {};
+
+template <crimson::os::seastore::onode::match_stage_t S>
+struct formatter<crimson::os::seastore::onode::staged_position_t<S>> {
+  constexpr auto parse(fmt::format_parse_context& ctx) { return ctx.begin(); }
+  template <typename FormatContext>
+  auto format(const crimson::os::seastore::onode::staged_position_t<S>& k,
+              FormatContext& ctx) const {
+    return fmt::format_to(ctx.out(), "{}", k.fmt_print());
+  }
+};
 
 #if FMT_VERSION >= 90000
-template <crimson::os::seastore::onode::match_stage_t S>
-struct fmt::formatter<crimson::os::seastore::onode::staged_position_t<S>> : fmt::ostream_formatter {};
-template <> struct fmt::formatter<crimson::os::seastore::onode::MatchHistory> : fmt::ostream_formatter {};
+template <> struct formatter<crimson::os::seastore::onode::MatchHistory> : ostream_formatter {};
 #endif
+}  // namespace fmt

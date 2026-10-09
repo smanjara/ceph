@@ -34,14 +34,17 @@ static void rm_r(const string& path)
 
 void StoreTestFixture::SetUp()
 {
-
-  int r = ::mkdir(data_dir.c_str(), 0777);
-  if (r < 0) {
-    r = -errno;
-    cerr << __func__ << ": unable to create " << data_dir << ": " << cpp_strerror(r) << std::endl;
+  // Create a unique temporary directory for this fixture instance so that
+  // tests can safely run in parallel without colliding on the same path.
+  std::string tmpl = type + ".test_temp_dir.XXXXXX";
+  char* tmp = ::mkdtemp(tmpl.data());
+  if (!tmp) {
+    int r = -errno;
+    cerr << __func__ << ": mkdtemp(" << tmpl << ") failed: " << cpp_strerror(r) << std::endl;
+    ASSERT_TRUE(tmp);
   }
-  ASSERT_EQ(0, r);
-
+  data_dir = tmp;
+  store.reset(nullptr);
   store = ObjectStore::create(g_ceph_context,
                               type,
                               data_dir,
@@ -77,10 +80,6 @@ void StoreTestFixture::TearDown()
   // config settings. Hence setting it to 'unsafe' here as test case is closing.
   g_conf()._clear_safe_to_start_threads();
   PopSettings(0);
-  if (!orig_death_test_style.empty()) {
-    ::testing::FLAGS_gtest_death_test_style = orig_death_test_style;
-    orig_death_test_style.clear();
-  }
 }
 
 void StoreTestFixture::SetVal(ConfigProxy& _conf, const char* key, const char* val)
@@ -132,4 +131,8 @@ void StoreTestFixture::CloseAndReopen() {
 #endif
   ASSERT_EQ(0, store->mount());
   g_conf().set_safe_to_start_threads();
+}
+
+void StoreTestFixture::RemoveTestObjectStore() {
+  rm_r(data_dir);
 }

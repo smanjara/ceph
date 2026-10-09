@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -13,7 +14,12 @@
  *
  */
 
+#include "include/compat.h"
+#include "include/sock_compat.h"
+#include "common/safe_io.h"
+
 #include <cstdio>
+#include <sstream>
 
 #include <errno.h>
 #include <fcntl.h>
@@ -38,10 +44,6 @@
 #if defined(__linux__) 
 #include <sys/vfs.h>
 #endif
-
-#include "include/compat.h"
-#include "include/sock_compat.h"
-#include "common/safe_io.h"
 
 // The type-value for a ZFS FS in fstatfs.
 #define FS_ZFS_TYPE 0xde
@@ -116,7 +118,9 @@ int pipe_cloexec(int pipefd[2], int flags)
   if (pipe(pipefd) == -1)
     return -1;
 
-  #ifndef _WIN32
+#  ifdef _WIN32
+  return 0;
+#  else
   /*
    * The old-fashioned, race-condition prone way that we have to fall
    * back on if pipe2 does not exist.
@@ -128,14 +132,15 @@ int pipe_cloexec(int pipefd[2], int flags)
   if (fcntl(pipefd[1], F_SETFD, FD_CLOEXEC) < 0) {
     goto fail;
   }
-  #endif
 
   return 0;
+
 fail:
   int save_errno = errno;
   VOID_TEMP_FAILURE_RETRY(close(pipefd[0]));
   VOID_TEMP_FAILURE_RETRY(close(pipefd[1]));
   return (errno = save_errno, -1);
+#  endif
 #endif
 }
 
@@ -149,16 +154,17 @@ int socket_cloexec(int domain, int type, int protocol)
   if (fd == -1)
     return -1;
 
-  #ifndef _WIN32
+#  ifdef _WIN32
+  return fd;
+#  else
   if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0)
     goto fail;
-  #endif
-
   return fd;
 fail:
   int save_errno = errno;
   VOID_TEMP_FAILURE_RETRY(close(fd));
   return (errno = save_errno, -1);
+#  endif
 #endif
 }
 
@@ -200,16 +206,18 @@ int accept_cloexec(int sockfd, struct sockaddr* addr, socklen_t* addrlen)
   if (fd == -1)
     return -1;
 
-  #ifndef _WIN32
+#  ifdef _WIN32
+  return fd;
+#  else
   if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0)
     goto fail;
-  #endif
 
   return fd;
 fail:
   int save_errno = errno;
   VOID_TEMP_FAILURE_RETRY(close(fd));
   return (errno = save_errno, -1);
+#  endif
 #endif
 }
 
@@ -361,7 +369,7 @@ ssize_t preadv(int fd, const struct iovec *iov, int iov_cnt) {
     if (r < 0)
       return r;
     read += r;
-    if (r < iov[i].iov_len)
+    if ((unsigned)r < iov[i].iov_len)
       break;
   }
 
@@ -376,7 +384,7 @@ ssize_t writev(int fd, const struct iovec *iov, int iov_cnt) {
     if (r < 0)
       return r;
     written += r;
-    if (r < iov[i].iov_len)
+    if ((unsigned)r < iov[i].iov_len)
       break;
   }
 
@@ -565,3 +573,66 @@ ssize_t get_self_exe_path(char* path, int buff_length) {
 }
 
 #endif /* _WIN32 */
+
+
+static thread_local char cached_thread_name[256]{};
+
+int ceph_pthread_setname(char const* name)
+{
+  strncpy(cached_thread_name, name, sizeof cached_thread_name - 1);
+#if defined(_WIN32) && defined(__clang__) && \
+    !defined(_LIBCPP_HAS_THREAD_API_PTHREAD)
+  // In this case, llvm doesn't use the pthread api for std::thread.
+  // We cannot use native_handle() with the pthread api, nor can we pass
+  // it to Windows API functions.
+  return 0;
+#elif defined(HAVE_PTHREAD_SETNAME_NP)
+  #if defined(__APPLE__)
+      return pthread_setname_np(name);
+  #else
+      return pthread_setname_np(pthread_self(), name);
+  #endif
+#elif defined(HAVE_PTHREAD_SET_NAME_NP)
+  pthread_set_name_np(pthread_self(), name);          \
+  return 0;
+#else
+  return 0;
+#endif
+}
+
+int ceph_pthread_getname(char* name, size_t len)
+{
+  if (cached_thread_name[0]) {
+    if (len > 0) {
+      strncpy(name, cached_thread_name, len);
+      name[len-1] = 0;
+    }
+    return 0;
+  } else {
+#if defined(_WIN32) && defined(__clang__) && \
+    !defined(_LIBCPP_HAS_THREAD_API_PTHREAD)
+    if (len > 0) {
+      strcpy(name, "");
+    }
+    return 0;
+#elif defined(HAVE_PTHREAD_GETNAME_NP) || defined(HAVE_PTHREAD_GET_NAME_NP)
+#  if defined(HAVE_PTHREAD_GETNAME_NP)
+    int rc = pthread_getname_np(pthread_self(), cached_thread_name, sizeof cached_thread_name);
+#  else
+    int rc = pthread_get_name_np(pthread_self(), cached_thread_name, sizeof cached_thread_name);
+#  endif
+    if (rc == 0) {
+      strncpy(name, cached_thread_name, len);
+      name[len-1] = 0;
+      return 0;
+    } else {
+      return rc;
+    }
+#else
+    if (len > 0) {
+      strcpy(name, "");
+    }
+    return 0;
+#endif
+  }
+}

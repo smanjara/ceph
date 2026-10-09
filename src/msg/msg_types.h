@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,18 +16,20 @@
 #ifndef CEPH_MSG_TYPES_H
 #define CEPH_MSG_TYPES_H
 
-#include <sstream>
+#include <algorithm> // for std::min()
+#include <set>
+#include <string>
 
 #include <netinet/in.h>
-#include <fmt/format.h>
+#include "common/fmt_common.h"
 #if FMT_VERSION >= 90000
 #include <fmt/ostream.h>
 #endif
 
 #include "include/ceph_features.h"
-#include "include/types.h"
 #include "include/blobhash.h"
 #include "include/encoding.h"
+#include "include/msgr.h" // for CEPH_ENTITY_TYPE_*
 
 #define MAX_PORT_NUMBER 65535
 
@@ -41,8 +44,6 @@ namespace ceph {
 
 std::ostream& operator<<(std::ostream& out, const sockaddr_storage &ss);
 std::ostream& operator<<(std::ostream& out, const sockaddr *sa);
-
-typedef uint8_t entity_type_t;
 
 class entity_name_t {
 public:
@@ -98,7 +99,16 @@ public:
   }
   void dump(ceph::Formatter *f) const;
 
-  static void generate_test_instances(std::list<entity_name_t*>& o);
+  template <typename FormatContext>
+  auto fmt_print_ctx(FormatContext& ctx) const {
+    if (is_new() || _num < 0) {
+      return fmt::format_to(ctx.out(), "{}.?", type_str());
+    } else {
+      return fmt::format_to(ctx.out(), "{}.{}",type_str(), _num);
+    }
+  }
+
+  static std::list<entity_name_t> generate_test_instances();
 };
 WRITE_CLASS_DENC(entity_name_t)
 
@@ -432,11 +442,7 @@ struct entity_addr_t {
   std::string ip_only_to_str() const;
   std::string ip_n_port_to_str() const;
 
-  std::string get_legacy_str() const {
-    std::ostringstream ss;
-    ss << get_sockaddr() << "/" << get_nonce();
-    return ss.str();
-  }
+  std::string get_legacy_str() const;
 
   bool parse(const std::string_view s, int default_type=TYPE_DEFAULT);
   bool parse(const char *s, const char **end = 0, int default_type=TYPE_DEFAULT);
@@ -545,15 +551,13 @@ struct entity_addr_t {
   }
 
   void dump(ceph::Formatter *f) const;
+  std::string fmt_print() const; ///< used by the default fmt formatter
 
-  static void generate_test_instances(std::list<entity_addr_t*>& o);
+  static std::list<entity_addr_t> generate_test_instances();
 };
 WRITE_CLASS_ENCODER_FEATURES(entity_addr_t)
 
 std::ostream& operator<<(std::ostream& out, const entity_addr_t &addr);
-#if FMT_VERSION >= 90000
-template <> struct fmt::formatter<entity_addr_t> : fmt::ostream_formatter {};
-#endif
 
 inline bool operator==(const entity_addr_t& a, const entity_addr_t& b) { return memcmp(&a, &b, sizeof(a)) == 0; }
 inline bool operator!=(const entity_addr_t& a, const entity_addr_t& b) { return memcmp(&a, &b, sizeof(a)) != 0; }
@@ -674,7 +678,7 @@ struct entity_addrvec_t {
   void encode(ceph::buffer::list& bl, uint64_t features) const;
   void decode(ceph::buffer::list::const_iterator& bl);
   void dump(ceph::Formatter *f) const;
-  static void generate_test_instances(std::list<entity_addrvec_t*>& ls);
+  static std::list<entity_addrvec_t> generate_test_instances();
 
   bool legacy_equals(const entity_addrvec_t& o) const {
     if (v == o.v) {
@@ -718,15 +722,7 @@ struct entity_addrvec_t {
     return false;
   }
 
-  friend std::ostream& operator<<(std::ostream& out, const entity_addrvec_t& av) {
-    if (av.v.empty()) {
-      return out;
-    } else if (av.v.size() == 1) {
-      return out << av.v[0];
-    } else {
-      return out << av.v;
-    }
-  }
+  friend std::ostream& operator<<(std::ostream& out, const entity_addrvec_t& av);
 
   friend bool operator==(const entity_addrvec_t& l, const entity_addrvec_t& r) {
     return l.v == r.v;
@@ -787,7 +783,7 @@ struct entity_inst_t {
   }
 
   void dump(ceph::Formatter *f) const;
-  static void generate_test_instances(std::list<entity_inst_t*>& o);
+  static std::list<entity_inst_t> generate_test_instances();
 };
 WRITE_CLASS_ENCODER_FEATURES(entity_inst_t)
 

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -196,6 +197,7 @@ TEST(TestOSDScrub, scrub_time_permit) {
   now = utime_t(mktime(&tm), 0);
   ret = osd->scrub_time_permit(now);
   ASSERT_FALSE(ret);
+  mc.shutdown();
 }
 
 // Local Variables:

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_CLIENT_METASESSION_H
 #define CEPH_CLIENT_METASESSION_H
@@ -15,6 +15,7 @@ struct Cap;
 struct Inode;
 struct CapSnap;
 struct MetaRequest;
+class Context;
 
 struct MetaSession {
   mds_rank_t mds_num;
@@ -47,7 +48,7 @@ struct MetaSession {
   int mds_state = MDSMap::STATE_NULL;
   bool readonly = false;
 
-  std::list<Context*> waiting_for_open;
+  std::vector<Context*> waiting_for_open;
 
   xlist<Cap*> caps;
   // dirty_list keeps all the dirty inodes before flushing in current session.
@@ -61,6 +62,13 @@ struct MetaSession {
 
   MetaSession(mds_rank_t mds_num, ConnectionRef con, const entity_addrvec_t& addrs)
     : mds_num(mds_num), con(con), addrs(addrs) {
+  }
+  ~MetaSession() {
+    ceph_assert(caps.empty());
+    ceph_assert(dirty_list.empty());
+    ceph_assert(flushing_caps.empty());
+    ceph_assert(requests.empty());
+    ceph_assert(unsafe_requests.empty());
   }
 
   xlist<Inode*> &get_dirty_list() { return dirty_list; }

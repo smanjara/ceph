@@ -1,10 +1,12 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "include/rados/librados_fwd.hpp"
 #include "mds/mdstypes.h"
 #include "cls_cephfs.h"
+#include "cls_cephfs_types.h"
 
+struct inode_backtrace_t;
 class AccumulateArgs;
 
 class ClsCephFSClient
@@ -15,6 +17,7 @@ class ClsCephFSClient
       inodeno_t inode_no,
       const uint64_t obj_index,
       const uint64_t obj_size,
+      const int64_t obj_pool_id,
       const time_t mtime);
 
   static int fetch_inode_accumulate_result(

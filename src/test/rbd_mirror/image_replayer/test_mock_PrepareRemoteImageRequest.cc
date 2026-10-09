@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "test/rbd_mirror/test_mock_fixture.h"
 #include "cls/rbd/cls_rbd_types.h"
@@ -328,6 +328,8 @@ TEST_F(TestMockImageReplayerPrepareRemoteImageRequest, SuccessJournal) {
   ASSERT_TRUE(mock_journal_state_builder.remote_journaler != nullptr);
   ASSERT_EQ(cls::journal::CLIENT_STATE_DISCONNECTED,
             mock_journal_state_builder.remote_client_state);
+  // owned by StateBuilder, normally freed in StateBuilder::close()
+  delete mock_journal_state_builder.remote_journaler;
 }
 
 TEST_F(TestMockImageReplayerPrepareRemoteImageRequest, SuccessSnapshot) {
@@ -431,6 +433,8 @@ TEST_F(TestMockImageReplayerPrepareRemoteImageRequest, SuccessNotRegistered) {
   ASSERT_TRUE(mock_journal_state_builder.remote_journaler != nullptr);
   ASSERT_EQ(cls::journal::CLIENT_STATE_CONNECTED,
             mock_journal_state_builder.remote_client_state);
+  // owned by StateBuilder, normally freed in StateBuilder::close()
+  delete mock_journal_state_builder.remote_journaler;
 }
 
 TEST_F(TestMockImageReplayerPrepareRemoteImageRequest, GetMirrorImageIdError) {

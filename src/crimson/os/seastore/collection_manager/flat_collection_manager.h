@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -20,11 +20,13 @@ class FlatCollectionManager : public CollectionManager {
   }
 
   using get_root_iertr = base_iertr;
-  using get_root_ret = get_root_iertr::future<CollectionNodeRef>;
+  using get_root_ret = get_root_iertr::future<FlatCollectionNodeRef>;
   get_root_ret get_coll_root(const coll_root_t &coll_root, Transaction &t);
 
 public:
   explicit FlatCollectionManager(TransactionManager &tm);
+
+  get_coll_node_ret get_coll_node(const coll_root_t &coll_root, Transaction &t) final;
 
   mkfs_ret mkfs(Transaction &t) final;
 

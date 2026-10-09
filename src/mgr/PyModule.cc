@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -21,6 +22,8 @@
 
 #include "include/stringify.h"
 #include "common/BackTrace.h"
+#include "common/JSONFormatter.h"
+#include "common/split.h"
 #include "global/signal_handler.h"
 
 #include "common/debug.h"
@@ -38,6 +41,18 @@ std::string PyModule::mgr_store_prefix = "mgr/";
 #define BOOST_BIND_GLOBAL_PLACEHOLDERS
 // Boost apparently can't be bothered to fix its own usage of its own
 // deprecated features.
+
+// Fix instances of "'BOOST_PP_ITERATION_02' was not declared in this scope; did
+// you mean 'BOOST_PP_ITERATION_05'" and related macro error bullshit that spans
+// 300 lines of errors
+//
+// Apparently you can't include boost/python stuff _and_ have this header
+// defined
+//
+// Thanks to the ceph-aur folks for the fix at:
+// https://github.com/bazaah/aur-ceph/commit/8c5cc7d8deec002f7596b6d0860859a0a718f12b 
+#undef BOOST_MPL_CFG_NO_PREPROCESSED_HEADERS
+
 #include <boost/python/extract.hpp>
 #include <boost/python/import.hpp>
 #include <boost/python/object.hpp>
@@ -47,7 +62,6 @@ std::string PyModule::mgr_store_prefix = "mgr/";
 
 
 using std::string;
-using std::wstring;
 
 // decode a Python exception into a string
 std::string handle_pyerror(
@@ -96,7 +110,7 @@ std::string handle_pyerror(
   }
   formatted = str("").join(formatted_list);
 
-  if (!module.empty()) {
+  if (crash_dump && !module.empty()) {
     std::list<std::string> bt_strings;
     std::map<std::string, std::string> extra;
     
@@ -141,6 +155,48 @@ std::string peek_pyerror()
   PyErr_Restore(ptype, pvalue, ptraceback);
 
   return exc_msg;
+}
+
+std::span<std::byte const> py_bytes_as_span(PyObject *bytes)
+{
+  assert(bytes);
+  assert(PyBytes_CheckExact(bytes));
+  Py_ssize_t length;
+  char *buf;
+  [[maybe_unused]] int r = PyBytes_AsStringAndSize(
+    bytes, &buf, &length);
+  assert(r == 0);
+  return std::span<std::byte const>((const std::byte*)buf, size_t(length));
+}
+
+PyObject *py_bytes_from_span(std::span<std::byte const> s)
+{
+  auto ret = PyBytes_FromStringAndSize(
+    reinterpret_cast<const char*>(s.data()), s.size_bytes());
+  assert(ret);
+  return ret;
+}
+
+std::vector<std::byte> py_bytes_as_vec(PyObject *bytes)
+{
+  assert(bytes);
+  assert(PyBytes_CheckExact(bytes));
+  Py_ssize_t length;
+  char *buf;
+  [[maybe_unused]] int r = PyBytes_AsStringAndSize(
+    bytes, &buf, &length);
+  assert(r == 0);
+  return std::vector<std::byte>{
+    reinterpret_cast<const std::byte*>(buf),
+    reinterpret_cast<const std::byte*>(buf) + size_t(length)};
+}
+
+PyObject *py_bytes_from_vec(const std::vector<std::byte> &s)
+{
+  auto ret = PyBytes_FromStringAndSize(
+    reinterpret_cast<const char *>(s.data()), s.size());
+  assert(ret);
+  return ret;
 }
 
 
@@ -231,71 +287,9 @@ std::pair<int, std::string> PyModuleConfig::set_config(
   }
 }
 
-std::string PyModule::get_site_packages()
-{
-  std::stringstream site_packages;
-
-  // CPython doesn't auto-add site-packages dirs to sys.path for us,
-  // but it does provide a module that we can ask for them.
-  auto site_module = PyImport_ImportModule("site");
-  ceph_assert(site_module);
-
-  auto site_packages_fn = PyObject_GetAttrString(site_module, "getsitepackages");
-  if (site_packages_fn != nullptr) {
-    auto site_packages_list = PyObject_CallObject(site_packages_fn, nullptr);
-    ceph_assert(site_packages_list);
-
-    auto n = PyList_Size(site_packages_list);
-    for (Py_ssize_t i = 0; i < n; ++i) {
-      if (i != 0) {
-        site_packages << ":";
-      }
-      site_packages << PyUnicode_AsUTF8(PyList_GetItem(site_packages_list, i));
-    }
-
-    Py_DECREF(site_packages_list);
-    Py_DECREF(site_packages_fn);
-  } else {
-    // Fall back to generating our own site-packages paths by imitating
-    // what the standard site.py does.  This is annoying but it lets us
-    // run inside virtualenvs :-/
-
-    auto site_packages_fn = PyObject_GetAttrString(site_module, "addsitepackages");
-    ceph_assert(site_packages_fn);
-
-    auto known_paths = PySet_New(nullptr);
-    auto pArgs = PyTuple_Pack(1, known_paths);
-    PyObject_CallObject(site_packages_fn, pArgs);
-    Py_DECREF(pArgs);
-    Py_DECREF(known_paths);
-    Py_DECREF(site_packages_fn);
-
-    auto sys_module = PyImport_ImportModule("sys");
-    ceph_assert(sys_module);
-    auto sys_path = PyObject_GetAttrString(sys_module, "path");
-    ceph_assert(sys_path);
-
-    dout(1) << "sys.path:" << dendl;
-    auto n = PyList_Size(sys_path);
-    bool first = true;
-    for (Py_ssize_t i = 0; i < n; ++i) {
-      dout(1) << "  " << PyUnicode_AsUTF8(PyList_GetItem(sys_path, i)) << dendl;
-      if (first) {
-        first = false;
-      } else {
-        site_packages << ":";
-      }
-      site_packages << PyUnicode_AsUTF8(PyList_GetItem(sys_path, i));
-    }
-
-    Py_DECREF(sys_path);
-    Py_DECREF(sys_module);
-  }
-
-  Py_DECREF(site_module);
-
-  return site_packages.str();
-}
+  PyModule::PyModule(const std::string &module_name_)
+    : module_name(module_name_)
+  { }
 
 PyObject* PyModule::init_ceph_logger()
 {
@@ -305,9 +299,33 @@ PyObject* PyModule::init_ceph_logger()
   return py_logger;
 }
 
+// module-independent sink for the Python root-logger fallback; the Python
+// side maps the record's level to a ceph debug level, so the usual
+// subsystem gating applies per record
+static PyObject*
+ceph_mgr_log(PyObject *self, PyObject *args)
+{
+  int level = 0;
+  char *record = nullptr;
+  if (!PyArg_ParseTuple(args, "is:mgr_log", &level, &record)) {
+    return nullptr;
+  }
+  if (level < 0) {
+    level = 0;
+  }
+#undef dout_prefix
+#define dout_prefix *_dout
+  dout(ceph::dout::need_dynamic(level)) << record << dendl;
+#undef dout_prefix
+#define dout_prefix *_dout << "mgr[py] "
+  Py_RETURN_NONE;
+}
+
 PyObject* PyModule::init_ceph_module()
 {
   static PyMethodDef module_methods[] = {
+    {"mgr_log", ceph_mgr_log, METH_VARARGS,
+     "log a preformatted record to the mgr daemon log at a debug level"},
     {nullptr, nullptr, 0, nullptr}
   };
   static PyModuleDef ceph_module_def = {
@@ -346,8 +364,23 @@ int PyModule::load(PyThreadState *pMainThreadState)
 {
   ceph_assert(pMainThreadState != nullptr);
 
-  // Configure sub-interpreter
-  {
+  const auto subinterpreter_modules_opt = g_conf().get_val<std::string>(
+    "mgr_subinterpreter_modules"
+  );
+  auto subinterpreter_modules = ceph::split(subinterpreter_modules_opt);
+  use_main_interpreter = std::count(
+    subinterpreter_modules.begin(), subinterpreter_modules.end(), "*"
+  ) == 0 && std::count(
+    subinterpreter_modules.begin(), subinterpreter_modules.end(), module_name
+  ) == 0;
+
+  if (use_main_interpreter) {
+    // Use main interpreter
+    derr << "Loading module " << module_name << " in main interpreter" << dendl;
+    pMyThreadState.set(pMainThreadState);
+  } else {
+    // Configure sub-interpreter
+    derr << "Loading module " << module_name << " in sub-interpreter" << dendl;
     SafeThreadState sts(pMainThreadState);
     Gil gil(sts);
 
@@ -357,24 +390,21 @@ int PyModule::load(PyThreadState *pMainThreadState)
       return -EINVAL;
     } else {
       pMyThreadState.set(thread_state);
-      // Some python modules do not cope with an unpopulated argv, so lets
-      // fake one.  This step also picks up site-packages into sys.path.
-      const wchar_t *argv[] = {L"ceph-mgr"};
-      PySys_SetArgv(1, (wchar_t**)argv);
-      // Configure sys.path to include mgr_module_path
-      string paths = (g_conf().get_val<std::string>("mgr_module_path") + ':' +
-                      get_site_packages() + ':');
-      wstring sys_path(wstring(begin(paths), end(paths)) + Py_GetPath());
-      PySys_SetPath(const_cast<wchar_t*>(sys_path.c_str()));
-      dout(10) << "Computed sys.path '"
-	       << string(begin(sys_path), end(sys_path)) << "'" << dendl;
     }
   }
+
   // Environment is all good, import the external module
   {
     Gil gil(pMyThreadState);
 
     int r;
+
+    pPickleModule = PyImport_ImportModule("pickle");
+    if (!pPickleModule) {
+      derr << "Unable to load pickle" << dendl;
+      return -EINVAL;
+    }
+
     r = load_subclass_of("MgrModule", &pClass);
     if (r) {
       derr << "Class not found in module '" << module_name << "'" << dendl;
@@ -515,7 +545,15 @@ int PyModule::load_notify_types()
 {
   PyObject *ls = PyObject_GetAttrString(pClass, "NOTIFY_TYPES");
   if (ls == nullptr) {
-    derr << "Module " << get_name() << " has missing NOTIFY_TYPES member" << dendl;
+    // NOTIFY_TYPES is optional - clear expected AttributeError
+    if (PyErr_ExceptionMatches(PyExc_AttributeError)) {
+      PyErr_Clear();
+      dout(10) << "Module " << get_name() << " has no NOTIFY_TYPES member" << dendl;
+      return 0;
+    }
+    // Unexpected error - report it
+    derr << "Error getting NOTIFY_TYPES from " << get_name() << ": "
+         << handle_pyerror(true, module_name, "load_notify_types") << dendl;
     return -EINVAL;
   }
   if (!PyObject_TypeCheck(ls, &PyList_Type)) {
@@ -608,6 +646,13 @@ int PyModule::load_options()
       if (t >= 0) {
 	option.type = t;
       }
+    }
+    p = PyDict_GetItemString(pOption, "level");
+    if (p && PyLong_Check(p)) {
+      long v = PyLong_AsLong(p);
+      option.level = static_cast<Option::level_t>(v);
+    } else {
+      option.level = Option::level_t::LEVEL_ADVANCED;
     }
     p = PyDict_GetItemString(pOption, "desc");
     if (p && PyObject_TypeCheck(p, &PyUnicode_Type)) {
@@ -726,6 +771,7 @@ int PyModule::load_subclass_of(const char* base_class, PyObject** py_class)
     error_string = peek_pyerror();
     derr << "Module not found: '" << module_name << "'" << dendl;
     derr << handle_pyerror(true, module_name, "PyModule::load_subclass_of") << dendl;
+    Py_DECREF(mgr_module_type);
     return -ENOENT;
   }
   auto locals = PyModule_GetDict(plugin_module);
@@ -766,6 +812,26 @@ PyModule::~PyModule()
     Gil gil(pMyThreadState, true);
     Py_XDECREF(pClass);
     Py_XDECREF(pStandbyClass);
+    Py_XDECREF(pPickleModule);
+    if (use_main_interpreter) {
+      Py_EndInterpreter(pMyThreadState.ts);
+    }
+    pMyThreadState.ts = nullptr;
   }
 }
 
+int PyModule::perf_counter_build(CephContext *cct) {
+  ceph_assert(perfcounter == nullptr);
+  PerfCountersBuilder pcb(cct, "mgr_module_" + get_name(), l_pym_first, l_pym_last);
+  pcb.add_u64_avg(l_pym_notify_avg_usec, "notify_avg_usec", "Average time spent in notify calls", "nsec", 0);
+  pcb.add_u64_avg(l_pym_cmd_avg_usec, "cmd_avg_usec", "Average time spent in command calls", "csec", 0);
+  pcb.add_u64(l_pym_alive, "alive", "Is the module alive?", "aliv", 0, uint64_t(1));
+  pcb.add_u64(l_pym_cpu_usage, "cpu_usage", "CPU usage in percent", "cpu", 0, uint64_t(100));
+  pcb.add_u64(l_pym_mem_rss_change, "mem_rss_change", "Memory RSS change in bytes", "", 0);
+  pcb.add_u64(l_pym_mem_rss_current, "mem_rss_current", "Memory RSS current in bytes", "", 0);
+  pcb.add_u64(l_pym_serve_cpu_usage, "serve_cpu_usage", "Serve thread CPU usage in percent", "cpu", 0, uint64_t(100));
+  perfcounter = std::unique_ptr<PerfCounters>(pcb.create_perf_counters());
+  cct->get_perfcounters_collection()->add(perfcounter.get());
+
+  return 0;
+}

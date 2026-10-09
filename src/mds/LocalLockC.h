@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -20,7 +21,7 @@
 
 class LocalLockC : public SimpleLock {
 public:
-  LocalLockC(MDSCacheObject *o, LockType *t) : 
+  LocalLockC(MDSCacheObject *o, const LockType *t) :
     SimpleLock(o, t) {
     set_state(LOCK_LOCK); // always.
   }
@@ -30,11 +31,11 @@ public:
   }
 
   bool can_xlock_local() const {
-    return !is_wrlocked() && (get_xlock_by() == MutationRef());
+    return !is_wrlocked() && !has_xlock_by();
   }
 
   bool can_wrlock() const {
-    return !is_xlocked();
+    return !is_xlocked() && !is_waiter_for(SimpleLock::WAIT_XLOCK);
   }
   void get_wrlock(client_t client) {
     ceph_assert(can_wrlock());

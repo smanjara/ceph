@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -12,6 +13,8 @@
  * 
  */
 
+#include "heap_profiler.h"
+
 #include "acconfig.h"
 
 // Use the newer gperftools header locations if available.
@@ -20,11 +23,13 @@
 #include <gperftools/heap-profiler.h>
 #include <gperftools/malloc_extension.h>
 
-#include "heap_profiler.h"
 #include "common/environment.h"
 #include "common/LogClient.h"
 #include "global/global_context.h"
 #include "common/debug.h"
+#include "include/container_ios.h"
+
+#include <iomanip>
 
 #define dout_context g_ceph_context
 
@@ -89,7 +94,7 @@ bool ceph_heap_profiler_running()
 
 static void get_profile_name(char *profile_name, int profile_name_len)
 {
-#if __GNUC__ && __GNUC__ >= 8
+#if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic push
   // Don't care, it doesn't matter, and we can't do anything about it.
 #pragma GCC diagnostic ignored "-Wformat-truncation"
@@ -108,7 +113,7 @@ static void get_profile_name(char *profile_name, int profile_name_len)
     snprintf(profile_name, profile_name_len, "%s/%s.profile",
 	     path, g_conf()->name.to_cstr());
   }
-#if __GNUC__ && __GNUC__ >= 8
+#if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic pop
 #endif
 }

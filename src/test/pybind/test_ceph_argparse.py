@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- mode:python; tab-width:4; indent-tabs-mode:nil; coding:utf-8 -*-
-# vim: ts=4 sw=4 smarttab expandtab fileencoding=utf-8
+# vim: ts=4 sw=4 expandtab fileencoding=utf-8
+
 #
 # Ceph - scalable distributed file system
 #
@@ -32,8 +33,11 @@ except ImportError:
 
 
 def get_command_descriptions(what):
+    print ("get_command_descriptions --" + what)
     CEPH_BIN = os.environ.get('CEPH_BIN', ".")
-    return os.popen(CEPH_BIN + "/get_command_descriptions " + "--" + what).read()
+    with os.popen(CEPH_BIN + "/get_command_descriptions " + "--" + what) as output_file:
+        output_contents = output_file.read()
+    return output_contents
 
 
 class ParseJsonFuncsigs(unittest.TestCase):
@@ -44,7 +48,6 @@ class ParseJsonFuncsigs(unittest.TestCase):
         # syntax error https://github.com/ceph/ceph/pull/585
         commands = get_command_descriptions("pull585")
         self.assertRaises(TypeError, parse_json_funcsigs, commands, 'cli')
-
 
 sigdict = parse_json_funcsigs(get_command_descriptions("all"), 'cli')
 
@@ -215,7 +218,7 @@ class TestPG(TestArgparse):
     def test_pg_missing_args_output(self):
         ret, _, stderr = self._capture_output(['pg'], stderr=True)
         self.assertEqual({}, ret)
-        self.assertRegexpMatches(stderr, re.compile('no valid command found.* closest matches'))
+        self.assertRegex(stderr, re.compile('no valid command found.* closest matches'))
 
     def test_pg_wrong_arg_output(self):
         ret, _, stderr = self._capture_output(['pg', 'map', 'bad-pgid'],
@@ -414,10 +417,10 @@ class TestMDS(TestArgparse):
 
 
 class TestFS(TestArgparse):
-    
+
     def test_dump(self):
         self.check_0_or_1_natural_arg('fs', 'dump')
-    
+
     def test_fs_new(self):
         self._assert_valid_command(['fs', 'new', 'default', 'metadata', 'data'])
 
@@ -910,6 +913,20 @@ class TestOSD(TestArgparse):
                                         '1.2.3.4/567', '600.40'])
             self._assert_valid_command(['osd', 'blocklist', action,
                                         '1.2.3.4', '600.40'])
+
+            self._assert_valid_command(['osd', 'blocklist', action,
+                                        'v1:1.2.3.4', '600.40'])
+            self._assert_valid_command(['osd', 'blocklist', action,
+                                        'v1:1.2.3.4/0', '600.40'])
+            self._assert_valid_command(['osd', 'blocklist', action,
+                                        'v2:2001:0db8:85a3:0000:0000:8a2e:0370:7334', '600.40'])
+            self._assert_valid_command(['osd', 'blocklist', action,
+                                        'v2:fe80::1/0', '600.40'])
+            self._assert_valid_command(['osd', 'blocklist', action,
+                                        'v2:[2607:f298:4:2243::5522]:0/0', '600.40'])
+            self._assert_valid_command(['osd', 'blocklist', action,
+                                        '[2001:0db8::85a3:0000:8a2e:0370:7334]:0/0', '600.40'])
+
             self.assertEqual({}, validate_command(sigdict, ['osd', 'blocklist',
                                                             action,
                                                             'invalid',
@@ -923,6 +940,14 @@ class TestOSD(TestArgparse):
                                                             '1.2.3.4/567',
                                                             '600.40',
                                                             'toomany']))
+            self.assertEqual({}, validate_command(sigdict, ['osd', 'blocklist',
+                                                            action,
+                                                            'v2:1.2.3.4/567',
+                                                            '600.40']))
+            self.assertEqual({}, validate_command(sigdict, ['osd', 'blocklist',
+                                                            action,
+                                                            'v1:1.2.3.4:65536/567',
+                                                            '600.40']))
 
     def test_pool_mksnap(self):
         self._assert_valid_command(['osd', 'pool', 'mksnap',
@@ -1320,6 +1345,30 @@ class TestValidate(unittest.TestCase):
     def test_args_and_kwargs_validate(self):
         for arg_type in (self.ARGS, self.KWARGS, self.KWARGS_EQ, self.MIXED):
             self._arg_kwarg_test(self.prefix, self.args, self.sig, arg_type)
+
+    def test_force_rejected_when_not_in_schema(self):
+        sig = parse_funcsig([
+            {'name': 'nqn', 'type': 'CephString'},
+            {'name': 'nsid', 'type': 'CephString'},
+        ])
+        self.assertRaises(ArgumentValid, validate, ['nqn1', '--force'], sig)
+        self.assertRaises(ArgumentValid, validate, ['--force', 'nqn1'], sig)
+
+    def test_force_accepted_when_in_schema_as_bool(self):
+        sig = parse_funcsig([
+            {'name': 'nqn', 'type': 'CephString'},
+            {'name': 'force', 'type': 'CephBool', 'req': False},
+        ])
+        result = validate(['nqn1', '--force'], sig)
+        self.assertEqual(result.get('force'), True)
+
+    def test_force_accepted_when_in_schema_as_string(self):
+        sig = parse_funcsig([
+            {'name': 'nqn', 'type': 'CephString'},
+            {'name': 'force', 'type': 'CephString', 'req': False},
+        ])
+        result = validate(['nqn1', '--force'], sig)
+        self.assertEqual(result.get('force'), '--force')
 
 
 if __name__ == '__main__':

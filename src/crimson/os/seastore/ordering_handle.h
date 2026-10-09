@@ -1,8 +1,11 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
+#include <chrono>
+
+#include <seastar/core/lowres_clock.hh>
 #include <seastar/core/shared_mutex.hh>
 
 #include "crimson/common/operation.h"
@@ -14,9 +17,9 @@ struct WritePipeline {
   struct ReserveProjectedUsage : OrderedExclusivePhaseT<ReserveProjectedUsage> {
     constexpr static auto type_name = "WritePipeline::reserve_projected_usage";
   } reserve_projected_usage;
-  struct OolWrites : UnorderedStageT<OolWrites> {
-    constexpr static auto type_name = "UnorderedStage::ool_writes_stage";
-  } ool_writes;
+  struct OolWritesAndLBAUpdates : UnorderedStageT<OolWritesAndLBAUpdates> {
+    constexpr static auto type_name = "UnorderedStage::ool_writes_and_update_lba_stage";
+  } ool_writes_and_lba_updates;
   struct Prepare : OrderedExclusivePhaseT<Prepare> {
     constexpr static auto type_name = "WritePipeline::prepare_phase";
   } prepare;
@@ -29,7 +32,7 @@ struct WritePipeline {
 
   using  BlockingEvents = std::tuple<
     ReserveProjectedUsage::BlockingEvent,
-    OolWrites::BlockingEvent,
+    OolWritesAndLBAUpdates::BlockingEvent,
     Prepare::BlockingEvent,
     DeviceSubmission::BlockingEvent,
     Finalize::BlockingEvent
@@ -70,7 +73,7 @@ struct OperationProxy {
   OperationProxy(OperationRef op) : op(std::move(op)) {}
 
   virtual seastar::future<> enter(WritePipeline::ReserveProjectedUsage&) = 0;
-  virtual seastar::future<> enter(WritePipeline::OolWrites&) = 0;
+  virtual seastar::future<> enter(WritePipeline::OolWritesAndLBAUpdates&) = 0;
   virtual seastar::future<> enter(WritePipeline::Prepare&) = 0;
   virtual seastar::future<> enter(WritePipeline::DeviceSubmission&) = 0;
   virtual seastar::future<> enter(WritePipeline::Finalize&) = 0;
@@ -95,7 +98,7 @@ struct OperationProxyT : OperationProxy {
   seastar::future<> enter(WritePipeline::ReserveProjectedUsage& s) final {
     return that()->enter_stage(s);
   }
-  seastar::future<> enter(WritePipeline::OolWrites& s) final {
+  seastar::future<> enter(WritePipeline::OolWritesAndLBAUpdates& s) final {
     return that()->enter_stage(s);
   }
   seastar::future<> enter(WritePipeline::Prepare& s) final {
@@ -120,29 +123,12 @@ struct OrderingHandle {
   // we can easily optimize this dynalloc out as all concretes are
   // supposed to have exactly the same size.
   std::unique_ptr<OperationProxy> op;
-  seastar::shared_mutex *collection_ordering_lock = nullptr;
 
   // in the future we might add further constructors / template to type
   // erasure while extracting the location of tracking events.
   OrderingHandle(std::unique_ptr<OperationProxy> op) : op(std::move(op)) {}
   OrderingHandle(OrderingHandle &&other)
-    : op(std::move(other.op)),
-      collection_ordering_lock(other.collection_ordering_lock) {
-    other.collection_ordering_lock = nullptr;
-  }
-
-  seastar::future<> take_collection_lock(seastar::shared_mutex &mutex) {
-    ceph_assert(!collection_ordering_lock);
-    collection_ordering_lock = &mutex;
-    return collection_ordering_lock->lock();
-  }
-
-  void maybe_release_collection_lock() {
-    if (collection_ordering_lock) {
-      collection_ordering_lock->unlock();
-      collection_ordering_lock = nullptr;
-    }
-  }
+    : op(std::move(other.op)) {}
 
   template <typename T>
   seastar::future<> enter(T &t) {
@@ -155,10 +141,6 @@ struct OrderingHandle {
 
   seastar::future<> complete() {
     return op->complete();
-  }
-
-  ~OrderingHandle() {
-    maybe_release_collection_lock();
   }
 };
 

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "crimson/common/exception.h"
 #include "crimson/osd/osdmap_gate.h"
@@ -54,6 +54,10 @@ seastar::future<epoch_t> OSDMapGate<OSDMapGateTypeV>::wait_for_map(
 
 template <OSDMapGateType OSDMapGateTypeV>
 void OSDMapGate<OSDMapGateTypeV>::got_map(epoch_t epoch) {
+  if (epoch == 0) {
+    return;
+  }
+  ceph_assert(epoch > current);
   current = epoch;
   auto first = waiting_peering.begin();
   auto last = waiting_peering.upper_bound(epoch);

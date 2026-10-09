@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "common/ceph_context.h"
 #include "common/ceph_json.h"
@@ -31,10 +31,11 @@ std::string instance_oid(const std::string &instance_id) {
 } // anonymous namespace
 
 InstanceWatcher::InstanceWatcher(librados::IoCtx &ioctx,
-                                 Listener &listener, ContextWQ *work_queue)
+                                 Listener &listener, ErrorListener &elistener, ContextWQ *work_queue)
   : Watcher(ioctx, instance_oid(stringify(ioctx.get_instance_id())), work_queue),
     m_ioctx(ioctx),
     m_listener(listener),
+    m_elistener(elistener),
     m_work_queue(work_queue),
     m_lock(ceph::make_mutex("cephfs::mirror::instance_watcher")) {
 }
@@ -86,21 +87,23 @@ void InstanceWatcher::handle_notify(uint64_t notify_id, uint64_t handle,
 
   std::string dir_path;
   std::string mode;
+  bool purging = false;
   try {
     JSONDecoder jd(bl);
     JSONDecoder::decode_json("dir_path", dir_path, &jd.parser, true);
     JSONDecoder::decode_json("mode", mode, &jd.parser, true);
+    JSONDecoder::decode_json("purging", purging, &jd.parser, false);
   } catch (const JSONDecoder::err &e) {
     derr << ": failed to decode notify json: " << e.what() << dendl;
   }
 
   dout(20) << ": notifier_id=" << notifier_id << ", dir_path=" << dir_path
-           << ", mode=" << mode << dendl;
+           << ", mode=" << mode << ", purging=" << purging << dendl;
 
   if (mode == "acquire") {
     m_listener.acquire_directory(dir_path);
   } else if (mode == "release") {
-    m_listener.release_directory(dir_path);
+    m_listener.release_directory(dir_path, purging);
   } else {
     derr << ": unknown mode" << dendl;
   }
@@ -114,14 +117,19 @@ void InstanceWatcher::handle_rewatch_complete(int r) {
 
   if (r == -EBLOCKLISTED) {
     dout(0) << ": client blocklisted" <<dendl;
-    std::scoped_lock locker(m_lock);
-    m_blocklisted = true;
+    {
+      std::scoped_lock locker(m_lock);
+      m_blocklisted = true;
+    }
+    m_elistener.set_blocklisted_ts();
   } else if (r == -ENOENT) {
     derr << ": mirroring object deleted" << dendl;
     m_failed = true;
+    m_elistener.set_failed_ts();
   } else if (r < 0) {
     derr << ": rewatch error: " << cpp_strerror(r) << dendl;
     m_failed = true;
+    m_elistener.set_failed_ts();
   }
 }
 

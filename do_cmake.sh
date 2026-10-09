@@ -2,7 +2,7 @@
 set -ex
 
 if [ -d .git ]; then
-    git submodule update --init --recursive
+    git submodule update --init --recursive --recommend-shallow
 fi
 
 : ${BUILD_DIR:=build}
@@ -14,24 +14,27 @@ if [ -e $BUILD_DIR ]; then
 fi
 
 PYBUILD="3"
-ARGS="-GNinja"
+ARGS="${ARGS} -GNinja"
 if [ -r /etc/os-release ]; then
   source /etc/os-release
   case "$ID" in
       fedora)
-          if [ "$VERSION_ID" -ge "35" ] ; then
-            PYBUILD="3.10"
-          elif [ "$VERSION_ID" -ge "33" ] ; then
-            PYBUILD="3.9"
-          elif [ "$VERSION_ID" -ge "32" ] ; then
-            PYBUILD="3.8"
+          if [ "$VERSION_ID" -ge "43" ] ; then
+            PYBUILD="3.14"
+          elif [ "$VERSION_ID" -ge "41" ] ; then
+            PYBUILD="3.13"
+          elif [ "$VERSION_ID" -ge "39" ] ; then
+            PYBUILD="3.12"
           else
-            PYBUILD="3.7"
+            # Fedora 37 and above
+            PYBUILD="3.11"
           fi
           ;;
-      rhel|centos)
+      almalinux|rocky|rhel|centos)
           MAJOR_VER=$(echo "$VERSION_ID" | sed -e 's/\..*$//')
-          if [ "$MAJOR_VER" -ge "9" ] ; then
+          if [ "$MAJOR_VER" -ge "10" ] ; then
+              PYBUILD="3.12"
+          elif [ "$MAJOR_VER" -ge "9" ] ; then
               PYBUILD="3.9"
           elif [ "$MAJOR_VER" -ge "8" ] ; then
               PYBUILD="3.6"
@@ -44,7 +47,11 @@ if [ -r /etc/os-release ]; then
           ;;
       ubuntu)
           MAJOR_VER=$(echo "$VERSION_ID" | sed -e 's/\..*$//')
-          if [ "$MAJOR_VER" -ge "22" ] ; then
+          if [ "$MAJOR_VER" -ge "26" ] ; then
+              PYBUILD="3.14"
+          elif [ "$MAJOR_VER" -ge "24" ] ; then
+              PYBUILD="3.12"
+          elif [ "$MAJOR_VER" -ge "22" ] ; then
               PYBUILD="3.10"
           fi
           ;;
@@ -61,7 +68,10 @@ fi
 
 ARGS+=" -DWITH_PYTHON3=${PYBUILD}"
 
-if type ccache > /dev/null 2>&1 ; then
+if type sccache > /dev/null 2>&1 ; then
+    echo "enabling sccache"
+    ARGS+=" -DWITH_SCCACHE=ON"
+elif type ccache > /dev/null 2>&1 ; then
     echo "enabling ccache"
     ARGS+=" -DWITH_CCACHE=ON"
 fi
@@ -81,10 +91,18 @@ ARGS+=" -DCMAKE_C_COMPILER=$c_compiler"
 
 mkdir $BUILD_DIR
 cd $BUILD_DIR
-if type cmake3 > /dev/null 2>&1 ; then
-    CMAKE=cmake3
-else
-    CMAKE=cmake
+
+# Only set CMAKE variable if not already set by user/environment.
+# This allows users to override with a custom cmake binary via environment variable.
+# Priority order: cmake 4.x+ (if available) -> cmake3 -> cmake (fallback)
+if [ -z "${CMAKE}" ]; then
+  if type cmake > /dev/null 2>&1 && cmake --version | grep -qE 'cmake version [4-9]\.'; then
+      CMAKE=cmake
+  elif type cmake3 > /dev/null 2>&1; then
+      CMAKE=cmake3
+  else
+      CMAKE=cmake
+  fi
 fi
 ${CMAKE} $ARGS "$@" $CEPH_GIT_DIR || exit 1
 set +x
@@ -99,13 +117,20 @@ EOF
 echo done.
 
 if [[ ! "$ARGS $@" =~ "-DCMAKE_BUILD_TYPE" ]]; then
-  cat <<EOF
-
+    if [ -d ../.git ]; then
+        printf "
 ****
-WARNING: do_cmake.sh now creates debug builds by default. Performance
-may be severely affected. Please use -DCMAKE_BUILD_TYPE=RelWithDebInfo
+WARNING: do_cmake.sh now creates debug builds by default if .git exists.
+Performance may be severely affected. Please use -DCMAKE_BUILD_TYPE=RelWithDebInfo
 if a performance sensitive build is required.
 ****
-EOF
+"
+    else
+        printf "
+****
+WARNING: do_cmake.sh now creates RelWithDebInfo builds by default when .git is absent.
+****
+"
+    fi
 fi
 

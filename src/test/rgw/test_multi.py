@@ -64,6 +64,13 @@ class Cluster(multisite.Cluster):
             cmd += ['--rgw-cache-enabled=false']
         return bash(cmd, **kwargs)
 
+    def ceph_admin(self, args = None, **kwargs):
+        """ ceph command """
+        cmd = [test_path + 'test-rgw-call.sh', 'call_ceph', self.cluster_id]
+        if args:
+            cmd += args
+        return bash(cmd, **kwargs)
+
     def start(self):
         cmd = [mstart_path + 'mstart.sh', self.cluster_id]
         env = None
@@ -179,6 +186,7 @@ def init(parse_args):
                                          'checkpoint_retries': 60,
                                          'checkpoint_delay': 5,
                                          'reconfigure_delay': 5,
+                                         'config_propagation_wait': 20,
                                          'use_ssl': 'false',
                                          })
     try:
@@ -209,6 +217,7 @@ def init(parse_args):
     parser.add_argument('--checkpoint-retries', type=int, default=cfg.getint(section, 'checkpoint_retries'))
     parser.add_argument('--checkpoint-delay', type=int, default=cfg.getint(section, 'checkpoint_delay'))
     parser.add_argument('--reconfigure-delay', type=int, default=cfg.getint(section, 'reconfigure_delay'))
+    parser.add_argument('--config-propagation-wait', type=int, default=cfg.getint(section, 'config_propagation_wait'))
     parser.add_argument('--use-ssl', type=bool, default=cfg.getboolean(section, 'use_ssl'))
 
 
@@ -246,12 +255,18 @@ def init(parse_args):
     admin_user = multisite.User('zone.user')
 
     user_creds = gen_credentials()
-    user = multisite.User('tester', tenant=args.tenant)
+    user = multisite.User('tester', tenant=args.tenant, account='RGW11111111111111111')
+
+    non_account_user_creds = gen_credentials()
+    non_account_user = multisite.User('nonaccounttester', tenant=args.tenant)
+
+    non_account_alt_user_creds = gen_credentials()
+    non_account_alt_user = multisite.User('nonaccountalttester', tenant=args.tenant)
 
     realm = multisite.Realm('r')
     if bootstrap:
         # create the realm on c1
-        realm.create(c1)
+        realm.create(c1, ['--default'])
     else:
         realm.get(c1)
     period = multisite.Period(realm=realm)
@@ -305,7 +320,7 @@ def init(parse_args):
                     cluster.start()
                     # pull realm configuration from the master's gateway
                     gateway = realm.meta_master_zone().gateways[0]
-                    realm.pull(cluster, gateway, admin_creds)
+                    realm.pull(cluster, gateway, admin_creds, ['--default'])
 
             endpoints = zone_endpoints(zg, z, args.gateways_per_zone)
             if is_master:
@@ -381,17 +396,31 @@ def init(parse_args):
                     arg = ['--display-name', '"Zone User"', '--system']
                     arg += admin_creds.credential_args()
                     admin_user.create(zone, arg)
-                    # create test user
-                    arg = ['--display-name', '"Test User"', '--caps', 'roles=*']
+                    # create test account/user
+                    arg = ['--account-id', user.account]
+                    arg += zone.zone_args()
+                    cluster.admin(['account', 'create'] + arg)
+                    arg = ['--display-name', 'TestUser']
                     arg += user_creds.credential_args()
                     user.create(zone, arg)
+                    # create non-account test user
+                    arg = ['--display-name', 'NonAccountTestUser']
+                    arg += non_account_user_creds.credential_args()
+                    non_account_user.create(zone, arg)
+                    # create non-account alt test user
+                    arg = ['--display-name', 'NonAccountAltTestUser']
+                    arg += non_account_alt_user_creds.credential_args()
+                    non_account_alt_user.create(zone, arg)
                 else:
                     # read users and update keys
                     admin_user.info(zone)
                     admin_creds = admin_user.credentials[0]
-                    arg = []
-                    user.info(zone, arg)
+                    user.info(zone)
                     user_creds = user.credentials[0]
+                    non_account_user.info(zone)
+                    non_account_user_creds = non_account_user.credentials[0]
+                    non_account_alt_user.info(zone)
+                    non_account_alt_user_creds = non_account_alt_user.credentials[0]
 
     if not bootstrap:
         period.get(c1)
@@ -399,8 +428,9 @@ def init(parse_args):
     config = Config(checkpoint_retries=args.checkpoint_retries,
                     checkpoint_delay=args.checkpoint_delay,
                     reconfigure_delay=args.reconfigure_delay,
+                    config_propagation_wait=args.config_propagation_wait,
                     tenant=args.tenant)
-    init_multi(realm, user, config)
+    init_multi(realm, user, non_account_user, non_account_alt_user, config)
 
 def setup_module():
     init(False)

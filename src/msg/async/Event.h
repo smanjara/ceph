@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -97,11 +98,7 @@ class EventCenter {
   using clock_type = ceph::coarse_mono_clock;
 
   struct AssociatedCenters {
-    EventCenter *centers[MAX_EVENTCENTER];
-    AssociatedCenters() {
-      // FIPS zeroization audit 20191115: this memset is not security related.
-      memset(centers, 0, MAX_EVENTCENTER * sizeof(EventCenter*));
-    }
+    EventCenter *centers[MAX_EVENTCENTER]{};
   };
 
   struct FileEvent {
@@ -205,7 +202,7 @@ class EventCenter {
 
   // Used by internal thread
   int create_file_event(int fd, int mask, EventCallbackRef ctxt);
-  uint64_t create_time_event(uint64_t milliseconds, EventCallbackRef ctxt);
+  uint64_t create_time_event(uint64_t microseconds, EventCallbackRef ctxt);
   void delete_file_event(int fd, int mask);
   void delete_time_event(uint64_t id);
   int process_events(unsigned timeout_microseconds, ceph::timespan *working_dur = nullptr);

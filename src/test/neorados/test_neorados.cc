@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "include/rados/librados.hpp"
 #include "include/neorados/RADOS.hpp"
@@ -29,7 +29,7 @@ TEST_F(TestNeoRADOS, MakeWithLibRADOS) {
 
   // provide pool that doesn't exists -- just testing round-trip
   ASSERT_THROW(
-    rados.execute({"dummy-obj"}, std::numeric_limits<int64_t>::max(),
+    rados.execute({"dummy-obj"}, IOContext{std::numeric_limits<int64_t>::max()},
                   std::move(op), nullptr, ceph::async::use_blocked),
     boost::system::system_error);
 }

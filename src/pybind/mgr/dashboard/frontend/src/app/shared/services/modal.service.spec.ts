@@ -7,7 +7,8 @@ import { configureTestBed } from '~/testing/unit-test-helper';
 import { ModalService } from './modal.service';
 
 @Component({
-  template: ``
+  template: ``,
+  standalone: false
 })
 class MockComponent {
   foo = '';
@@ -19,7 +20,7 @@ describe('ModalService', () => {
   let service: ModalService;
   let ngbModal: NgbModal;
 
-  configureTestBed({ declarations: [MockComponent], imports: [NgbModalModule] }, [MockComponent]);
+  configureTestBed({ declarations: [MockComponent], imports: [NgbModalModule] });
 
   beforeEach(() => {
     service = TestBed.inject(ModalService);
@@ -35,7 +36,7 @@ describe('ModalService', () => {
 
     const modaRef = service.show(MockComponent, { foo: 'bar' });
 
-    expect(ngbModal.open).toBeCalled();
+    expect(ngbModal.open).toHaveBeenCalled();
     expect(modaRef.componentInstance.foo).toBe('bar');
     expect(modaRef.componentInstance.activeModal).toBeTruthy();
   });
@@ -53,7 +54,7 @@ describe('ModalService', () => {
     tick();
     expect(service.hasOpenModals()).toBeFalsy();
 
-    expect(ngbModal.dismissAll).toBeCalled();
-    expect(ngbModal.hasOpenModals).toBeCalled();
+    expect(ngbModal.dismissAll).toHaveBeenCalled();
+    expect(ngbModal.hasOpenModals).toHaveBeenCalled();
   }));
 });

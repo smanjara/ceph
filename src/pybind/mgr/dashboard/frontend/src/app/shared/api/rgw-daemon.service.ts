@@ -5,7 +5,7 @@ import _ from 'lodash';
 import { BehaviorSubject, Observable, of, throwError } from 'rxjs';
 import { mergeMap, take, tap } from 'rxjs/operators';
 
-import { RgwDaemon } from '~/app/ceph/rgw/models/rgw-daemon';
+import { RgwDaemon, RgwDaemonDetailsResponse } from '~/app/ceph/rgw/models/rgw-daemon';
 import { cdEncode } from '~/app/shared/decorators/cd-encode';
 
 @cdEncode
@@ -35,8 +35,8 @@ export class RgwDaemonService {
     );
   }
 
-  get(id: string) {
-    return this.http.get(`${this.url}/${id}`);
+  get(id: string): Observable<RgwDaemonDetailsResponse> {
+    return this.http.get<RgwDaemonDetailsResponse>(`${this.url}/${id}`);
   }
 
   selectDaemon(daemon: RgwDaemon) {
@@ -78,5 +78,16 @@ export class RgwDaemonService {
         return next(params);
       })
     );
+  }
+
+  setMultisiteConfig(realm_name: string, zonegroup_name: string, zone_name: string) {
+    return this.request((params: HttpParams) => {
+      params = params.appendAll({
+        realm_name: realm_name,
+        zonegroup_name: zonegroup_name,
+        zone_name: zone_name
+      });
+      return this.http.put(`${this.url}/set_multisite_config`, null, { params: params });
+    });
   }
 }

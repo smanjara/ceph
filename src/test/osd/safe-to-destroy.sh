@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-
+source $(dirname $0)/../detect-build-env-vars.sh
 source $CEPH_ROOT/qa/standalone/ceph-helpers.sh
 
 set -e
@@ -10,7 +10,7 @@ function run() {
 
     export CEPH_MON="127.0.0.1:$(get_unused_port)"
     export CEPH_ARGS
-    CEPH_ARGS+="--fsid=$(uuidgen) --auth-supported=none "
+    CEPH_ARGS+="--fsid=$(uuidgen) --auth_cluster_required=none --auth_service_required=none --auth_client_required=none "
     CEPH_ARGS+="--mon-host=$CEPH_MON "
     set -e
 
@@ -25,13 +25,12 @@ function run() {
 function TEST_safe_to_destroy() {
     local dir=$1
 
-    run_mon $dir a
-    run_mgr $dir x
-    run_osd $dir 0
-    run_osd $dir 1
-    run_osd $dir 2
-    run_osd $dir 3
-
+    run_mon $dir a || return 1
+    run_mgr $dir x || return 1
+    run_osd $dir 0 || return 1
+    run_osd $dir 1 || return 1
+    run_osd $dir 2 || return 1
+    run_osd $dir 3 || return 1
     flush_pg_stats
 
     ceph osd safe-to-destroy 0
@@ -64,12 +63,12 @@ function TEST_safe_to_destroy() {
 function TEST_ok_to_stop() {
     local dir=$1
 
-    run_mon $dir a
-    run_mgr $dir x
-    run_osd $dir 0
-    run_osd $dir 1
-    run_osd $dir 2
-    run_osd $dir 3
+    run_mon $dir a || return 1
+    run_mgr $dir x || return 1
+    run_osd $dir 0 || return 1
+    run_osd $dir 1 || return 1
+    run_osd $dir 2 || return 1
+    run_osd $dir 3 || return 1
 
     ceph osd pool create foo 128
     ceph osd pool set foo size 3

@@ -1,10 +1,12 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "WriteLog.h"
 #include "include/buffer.h"
 #include "include/Context.h"
 #include "include/ceph_assert.h"
+#include "include/intarith.h" // for round_up_to()
+#include "common/Clock.h" // for ceph_clock_now()
 #include "common/deleter.h"
 #include "common/dout.h"
 #include "common/environment.h"
@@ -518,10 +520,6 @@ void WriteLog<I>::append_op_log_entries(GenericLogOperations &ops) {
     });
   // Append logs and update first_free_update
   append_ops(ops, append_ctx, new_first_free_entry);
-
-  if (ops.size()) {
-    this->dispatch_deferred_writes();
-  }
 }
 
 template <typename I>
@@ -896,6 +894,7 @@ void WriteLog<I>::append_ops(GenericLogOperations &ops, Context *ctx,
     m_first_free_entry = *new_first_free_entry;
     m_bytes_allocated -= bytes_to_free;
   }
+  this->dispatch_deferred_writes();
 
   bdev->aio_submit(&aio->ioc);
 }

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -13,6 +14,7 @@
  */
 
 #include "include/encoding.h"
+#include "cls_cephfs_types.h"
 
 /**
  * Value class for the xattr we'll use to accumulate
@@ -137,11 +139,14 @@ public:
   uint64_t ceiling_obj_size;
   // Largest object seen
   uint64_t max_obj_size;
+  // Non-default object pool id seen
+  int64_t obj_pool_id;
   // Highest mtime seen
   int64_t   max_mtime;
 
   AccumulateResult()
-    : ceiling_obj_index(0), ceiling_obj_size(0), max_obj_size(0), max_mtime(0)
+    : ceiling_obj_index(0), ceiling_obj_size(0), max_obj_size(0),
+      obj_pool_id(-1), max_mtime(0)
   {}
 };
 

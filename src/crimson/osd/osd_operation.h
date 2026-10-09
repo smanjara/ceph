@@ -1,9 +1,10 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
 #include "crimson/common/operation.h"
+#include "crimson/net/Connection.h"
 #include "crimson/osd/pg_interval_interrupt_condition.h"
 #include "crimson/osd/scheduler/scheduler.h"
 #include "osd/osd_types.h"
@@ -27,41 +28,113 @@ struct ConnectionPipeline {
       "ConnectionPipeline::await_map";
   } await_map;
 
-  struct GetPG : OrderedExclusivePhaseT<GetPG> {
+  struct GetPGMapping : OrderedExclusivePhaseT<GetPGMapping> {
     static constexpr auto type_name =
-      "ConnectionPipeline::get_pg";
-  } get_pg;
+      "ConnectionPipeline::get_pg_mapping";
+  } get_pg_mapping;
 };
+
+struct PerShardPipeline {
+  struct CreateOrWaitPG : OrderedExclusivePhaseT<CreateOrWaitPG> {
+    static constexpr auto type_name =
+      "PerShardPipeline::create_or_wait_pg";
+  } create_or_wait_pg;
+};
+
+struct PGPeeringPipeline {
+  struct AwaitMap : OrderedExclusivePhaseT<AwaitMap> {
+    static constexpr auto type_name = "PeeringEvent::PGPipeline::await_map";
+  } await_map;
+  struct Process : OrderedExclusivePhaseT<Process> {
+    static constexpr auto type_name = "PeeringEvent::PGPipeline::process";
+  } process;
+};
+
+struct CommonPGPipeline {
+  struct WaitPGReady : OrderedConcurrentPhaseT<WaitPGReady> {
+    static constexpr auto type_name = "CommonPGPipeline:::wait_pg_ready";
+  } wait_pg_ready;
+  struct GetOBC : OrderedExclusivePhaseT<GetOBC> {
+    static constexpr auto type_name = "CommonPGPipeline:::get_obc";
+  } get_obc;
+};
+
+struct PGRepopPipeline {
+  struct Process : OrderedExclusivePhaseT<Process> {
+    static constexpr auto type_name = "PGRepopPipeline::process";
+  } process;
+  struct WaitCommit : OrderedConcurrentPhaseT<WaitCommit> {
+    static constexpr auto type_name = "PGRepopPipeline::wait_repop";
+  } wait_commit;
+  struct SendReply : OrderedExclusivePhaseT<SendReply> {
+    static constexpr auto type_name = "PGRepopPipeline::send_reply";
+  } send_reply;
+};
+
+struct CommonOBCPipeline {
+  struct Process : OrderedExclusivePhaseT<Process> {
+    static constexpr auto type_name = "CommonOBCPipeline::process";
+  } process;
+  struct WaitRepop : OrderedConcurrentPhaseT<WaitRepop> {
+    static constexpr auto type_name = "CommonOBCPipeline::wait_repop";
+  } wait_repop;
+  struct SendReply : OrderedExclusivePhaseT<SendReply> {
+    static constexpr auto type_name = "CommonOBCPipeline::send_reply";
+  } send_reply;
+};
+
 
 enum class OperationTypeCode {
   client_request = 0,
   peering_event,
-  compound_peering_request,
   pg_advance_map,
   pg_creation,
   replicated_request,
+  replicated_request_reply,
   background_recovery,
   background_recovery_sub,
   internal_client_request,
   historic_client_request,
+  historic_slow_client_request,
   logmissing_request,
   logmissing_request_reply,
+  snaptrim_event,
+  snaptrimobj_subevent,
+  scrub_requested,
+  scrub_message,
+  scrub_find_range,
+  scrub_reserve_range,
+  scrub_scan,
+  pgpct_request,
+  ecrep_request,
+  snap_trim_initiate,
   last_op
 };
 
 static constexpr const char* const OP_NAMES[] = {
   "client_request",
   "peering_event",
-  "compound_peering_request",
   "pg_advance_map",
   "pg_creation",
   "replicated_request",
+  "replicated_request_reply",
   "background_recovery",
   "background_recovery_sub",
   "internal_client_request",
   "historic_client_request",
+  "historic_slow_client_request",
   "logmissing_request",
   "logmissing_request_reply",
+  "snaptrim_event",
+  "snaptrimobj_subevent",
+  "scrub_requested",
+  "scrub_message",
+  "scrub_find_range",
+  "scrub_reserve_range",
+  "scrub_scan",
+  "pgpct_request",
+  "ecrep_request",
+  "snap_trim_initiate",
 };
 
 // prevent the addition of OperationTypeCode-s with no matching OP_NAMES entry:
@@ -99,6 +172,61 @@ private:
   virtual void dump_detail(ceph::Formatter *f) const = 0;
 };
 
+class RemoteOperation {
+  crimson::net::ConnectionRef l_conn;
+  crimson::net::ConnectionXcoreRef r_conn;
+
+public:
+  RemoteOperation(crimson::net::ConnectionRef &&conn)
+    : l_conn(std::move(conn)) {}
+
+  crimson::net::Connection &get_local_connection() {
+    assert(l_conn);
+    assert(!r_conn);
+    return *l_conn;
+  };
+
+  crimson::net::Connection &get_foreign_connection() {
+    assert(r_conn);
+    assert(!l_conn);
+    return *r_conn;
+  };
+
+  crimson::net::ConnectionFFRef prepare_remote_submission() {
+    assert(l_conn);
+    assert(!r_conn);
+    auto ret = seastar::make_foreign(std::move(l_conn));
+    l_conn.reset();
+    return ret;
+  }
+
+  void finish_remote_submission(crimson::net::ConnectionFFRef conn) {
+    assert(conn);
+    assert(!l_conn);
+    assert(!r_conn);
+    r_conn = make_local_shared_foreign(std::move(conn));
+  }
+
+  crimson::net::Connection &get_connection() const {
+    if (l_conn) {
+      return *l_conn;
+    } else {
+      assert(r_conn);
+      return *r_conn;
+    }
+  }
+
+  /**
+   * get_remote_connection
+   *
+   * Return a reference to the remote connection to allow caller to
+   * perform a copy only as needed.
+   */
+  crimson::net::ConnectionXcoreRef &get_remote_connection() {
+    return r_conn;
+  }
+};
+
 template <class T>
 class TrackableOperationT : public OperationT<T> {
   T* that() {
@@ -134,17 +262,27 @@ protected:
     get_event<EventT>().trigger(*that(), std::forward<Args>(args)...);
   }
 
+  template <class BlockingEventT>
+  typename BlockingEventT::template Trigger<T>
+  get_trigger() {
+    return {get_event<BlockingEventT>(), *that()};
+  }
+
   template <class BlockingEventT, class InterruptorT=void, class F>
   auto with_blocking_event(F&& f) {
-    auto ret = std::forward<F>(f)(typename BlockingEventT::template Trigger<T>{
-      get_event<BlockingEventT>(), *that()
-    });
+    auto ret = std::forward<F>(f)(get_trigger<BlockingEventT>());
     if constexpr (std::is_same_v<InterruptorT, void>) {
       return ret;
     } else {
       using ret_t = decltype(ret);
       return typename InterruptorT::template futurize_t<ret_t>{std::move(ret)};
     }
+  }
+
+public:
+  static constexpr bool is_trackable = true;
+  virtual bool requires_pg() const {
+    return true;
   }
 };
 
@@ -174,6 +312,12 @@ protected:
     });
   }
 
+  template <class StageT>
+  void enter_stage_sync(StageT& stage) {
+    that()->get_handle().template enter_sync<T>(
+        stage, this->template get_trigger<typename StageT::BlockingEvent>());
+  }
+
   template <class OpT>
   friend class crimson::os::seastore::OperationProxyT;
 
@@ -193,12 +337,16 @@ struct OSDOperationRegistry : OperationRegistryT<
   void do_stop() override;
 
   void put_historic(const class ClientRequest& op);
+  void _put_historic(
+    op_list& list,
+    const class ClientRequest& op,
+    uint64_t max);
 
   size_t dump_historic_client_requests(ceph::Formatter* f) const;
   size_t dump_slowest_historic_client_requests(ceph::Formatter* f) const;
+  void visit_ops_in_flight(std::function<void(const ClientRequest&)>&& visit);
 
 private:
-  op_list::const_iterator last_of_recents;
   size_t num_recent_ops = 0;
   size_t num_slow_ops = 0;
 };
@@ -214,47 +362,61 @@ class OperationThrottler : public BlockerT<OperationThrottler>,
   friend BlockerT<OperationThrottler>;
   static constexpr const char* type_name = "OperationThrottler";
 
-  template <typename OperationT, typename F>
-  auto with_throttle(
-    OperationT* op,
-    crimson::osd::scheduler::params_t params,
-    F &&f) {
-    if (!max_in_progress) return f();
-    return acquire_throttle(params)
-      .then(std::forward<F>(f))
-      .then([this](auto x) {
-	release_throttle();
-	return x;
-      });
-  }
-
-  template <typename OperationT, typename F>
-  seastar::future<> with_throttle_while(
-    OperationT* op,
-    crimson::osd::scheduler::params_t params,
-    F &&f) {
-    return with_throttle(op, params, f).then([this, params, op, f](bool cont) {
-      return cont ? with_throttle_while(op, params, f) : seastar::now();
-    });
-  }
-
+  // Perf counters used to capture mClock throttling behavior per op class
+  std::unordered_map<SchedulerClass, uint64_t> throttled_ops;
+  std::unordered_map<SchedulerClass, uint64_t> total_wait_ms;
+  std::unordered_map<SchedulerClass, uint64_t> max_wait_ms;
+  std::unordered_map<SchedulerClass, seastar::metrics::histogram> wait_hist;
+  seastar::metrics::metric_groups metrics;
 
 public:
   OperationThrottler(ConfigProxy &conf);
+  void start();
+  seastar::future<> stop();
 
-  const char** get_tracked_conf_keys() const final;
+  std::vector<std::string> get_tracked_keys() const noexcept final;
   void handle_conf_change(const ConfigProxy& conf,
 			  const std::set<std::string> &changed) final;
   void update_from_config(const ConfigProxy &conf);
 
-  template <class OpT, class... Args>
-  seastar::future<> with_throttle_while(
-    BlockingEvent::Trigger<OpT>&& trigger,
-    Args&&... args) {
-    return trigger.maybe_record_blocking(
-      with_throttle_while(std::forward<Args>(args)...), *this);
+  bool available() const {
+    return !max_in_progress || in_progress < max_in_progress;
   }
 
+  // The returned guard's destructor is the mClock RequestCompletion
+  // (release_throttle), so it must be held for the throttled operation's whole
+  // lifetime.  Dropping it at acquisition frees the slot immediately and the
+  // operation never counts against max_in_progress.
+  class [[nodiscard("discarding the guard releases the throttle slot immediately")]] ThrottleReleaser {
+    OperationThrottler *parent = nullptr;
+  public:
+    ThrottleReleaser(OperationThrottler *parent) : parent(parent) {}
+    ThrottleReleaser(const ThrottleReleaser &) = delete;
+    ThrottleReleaser(ThrottleReleaser &&rhs) noexcept {
+      std::swap(parent, rhs.parent);
+    }
+
+    ~ThrottleReleaser() {
+      if (parent) {
+	parent->release_throttle();
+      }
+    }
+  };
+
+  void record_throttle_wait(SchedulerClass op_class, uint64_t wait_ms);
+  auto get_throttle(crimson::osd::scheduler::params_t params) {
+    auto start = seastar::steady_clock_type::now();
+    return acquire_throttle(
+      params
+    ).then([this, start, klass = params.klass] {
+      auto wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      seastar::steady_clock_type::now() - start).count();
+      record_throttle_wait(klass, wait_ms);
+      return ThrottleReleaser{this};
+    });
+  }
+  void register_metrics(const std::string &sched_type);
+  void initialize_scheduler(CephContext* cct, ConfigProxy &conf, bool is_rotational, int whoami);
 private:
   void dump_detail(Formatter *f) const final;
 
@@ -264,13 +426,21 @@ private:
   uint64_t in_progress = 0;
 
   uint64_t pending = 0;
+  bool started = false;
+  bool stopped = false;
+
+  seastar::condition_variable cv;
+  std::optional<seastar::future<>> bg_future;
 
   void wake();
+
+  seastar::future<> wake_set();
 
   seastar::future<> acquire_throttle(
     crimson::osd::scheduler::params_t params);
 
   void release_throttle();
+  seastar::future<> background_task();
 };
 
 }

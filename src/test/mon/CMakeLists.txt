@@ -17,6 +17,14 @@ add_executable(ceph_test_mon_msg
   test-mon-msg.cc
   )
 target_link_libraries(ceph_test_mon_msg os osdc global ${UNITTEST_LIBS})
+install(TARGETS ceph_test_mon_msg DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+# unittest_config_map
+add_executable(unittest_config_map
+  test_config_map.cc
+  )
+add_ceph_unittest(unittest_config_map)
+target_link_libraries(unittest_config_map mon global)
 
 # unittest_mon_moncap
 add_executable(unittest_mon_moncap
@@ -50,7 +58,7 @@ target_link_libraries(unittest_mon_montypes mon global)
 # ceph_test_mon_memory_target
 add_executable(ceph_test_mon_memory_target
   test_mon_memory_target.cc)
-target_link_libraries(ceph_test_mon_memory_target Boost::system Threads::Threads)
+target_link_libraries(ceph_test_mon_memory_target Boost::boost Threads::Threads)
 set_target_properties(ceph_test_mon_memory_target PROPERTIES
   SKIP_RPATH TRUE
   INSTALL_RPATH "")
@@ -81,3 +89,10 @@ add_executable(unittest_mon_election
   )
 add_ceph_unittest(unittest_mon_election)
 target_link_libraries(unittest_mon_election mon global)
+
+# unittest_monmap_monitor
+add_executable(unittest_monmap_monitor
+  test_monmap_monitor.cc
+  )
+add_ceph_unittest(unittest_monmap_monitor)
+target_link_libraries(unittest_monmap_monitor mon global)

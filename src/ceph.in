@@ -1,6 +1,6 @@
 #!@Python3_EXECUTABLE@
 # -*- mode:python -*-
-# vim: ts=4 sw=4 smarttab expandtab
+# vim: ts=4 sw=4 expandtab
 #
 # Processed in Makefile to add python #! line and version variable
 #
@@ -29,6 +29,7 @@ import stat
 import sys
 import time
 import platform
+import uuid
 
 from typing import Dict, List, Sequence, Tuple
 
@@ -139,6 +140,13 @@ if os.path.exists(os.path.join(MYPDIR, "CMakeCache.txt")) \
         pythonlib_path = os.path.join(lib_path,
                                       "cython_modules",
                                       get_pythonlib_dir())
+        if with_asan:
+            # respawn_in_path() below re-execs with the ASan runtime preloaded.
+            # Load the same suppression options add_ceph_test() uses (configured
+            # by CMake) first, so the re-exec'd interpreter does not report
+            # CPython/Cython module-init allocations as leaks at exit.
+            os.environ.setdefault("ASAN_OPTIONS", "@CEPH_ASAN_OPTIONS@")
+            os.environ.setdefault("LSAN_OPTIONS", "@CEPH_LSAN_OPTIONS@")
         respawn_in_path(lib_path, pybind_path, pythonlib_path,
                         asan_lib_path if with_asan else None)
 
@@ -308,7 +316,8 @@ def parse_cmdargs(args=None, target='') -> Tuple[argparse.ArgumentParser,
     parser.add_argument('--cluster', help='cluster name')
 
     parser.add_argument('--admin-daemon', dest='admin_socket',
-                        help='submit admin-socket commands (\"help\" for help)')
+                        help='submit admin-socket command (e.g. "help\" for' \
+                        ' a list of available commands)')
 
     parser.add_argument('-s', '--status', action='store_true',
                         help='show cluster status')
@@ -335,6 +344,8 @@ def parse_cmdargs(args=None, target='') -> Tuple[argparse.ArgumentParser,
     parser.add_argument('--concise', dest='verbose', action="store_false",
                         help="make less verbose")
 
+    parser.add_argument('--daemon-output-file', dest='daemon_output_file',
+                        help="output file location local to the daemon for JSON produced by tell commands")
     parser.add_argument('-f', '--format', choices=['json', 'json-pretty',
                         'xml', 'xml-pretty', 'plain', 'yaml'],
                         help="Note: yaml is only valid for orch commands", dest='output_format')
@@ -579,6 +590,8 @@ def do_command(parsed_args, target, cmdargs, sigdict, inbuf, verbose):
     if valid_dict:
         if parsed_args.output_format:
             valid_dict['format'] = parsed_args.output_format
+        if parsed_args.daemon_output_file:
+            valid_dict['output-file'] = parsed_args.daemon_output_file
         if verbose:
             print("Submitting command: ", valid_dict, file=sys.stderr)
     else:
@@ -588,6 +601,8 @@ def do_command(parsed_args, target, cmdargs, sigdict, inbuf, verbose):
     # Set extra options for polling commands only:
     if valid_dict.get('poll', False):
         valid_dict['width'] = Termsize().cols
+        valid_dict['session_id'] = str(uuid.uuid4())
+        valid_dict['period'] = parsed_args.period
     while True:
         try:
             # Only print the header for polling commands
@@ -1123,6 +1138,9 @@ def main():
             elif k != "watch_channel":
                 level = k.replace('watch_', '')
     if level:
+        if childargs:
+            print('Invalid command: unused arguments: {0}'.format(childargs), file=sys.stderr)
+            return errno.EINVAL
         # an awfully simple callback
         def watch_cb(arg, line, channel, name, who, stamp_sec, stamp_nsec, seq, level, msg):
             # Filter on channel
@@ -1309,7 +1327,7 @@ def main():
         if final_e:
             raise final_e
 
-    # Block until command completion (currently scrub and deep_scrub only)
+    # Block until command completion (currently scrub and deep scrub only)
     if block:
         wait(childargs, waitdata)
 

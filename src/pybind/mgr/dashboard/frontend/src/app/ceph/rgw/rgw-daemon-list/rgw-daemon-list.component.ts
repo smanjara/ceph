@@ -3,7 +3,7 @@ import { Component, OnInit } from '@angular/core';
 import { RgwDaemon } from '~/app/ceph/rgw/models/rgw-daemon';
 import { RgwDaemonService } from '~/app/shared/api/rgw-daemon.service';
 import { RgwSiteService } from '~/app/shared/api/rgw-site.service';
-import { ListWithDetails } from '~/app/shared/classes/list-with-details.class';
+import { CellTemplate } from '~/app/shared/enum/cell-template.enum';
 import { CdTableColumn } from '~/app/shared/models/cd-table-column';
 import { CdTableFetchDataContext } from '~/app/shared/models/cd-table-fetch-data-context';
 import { Permission } from '~/app/shared/models/permissions';
@@ -13,11 +13,12 @@ import { AuthStorageService } from '~/app/shared/services/auth-storage.service';
 @Component({
   selector: 'cd-rgw-daemon-list',
   templateUrl: './rgw-daemon-list.component.html',
-  styleUrls: ['./rgw-daemon-list.component.scss']
+  styleUrls: ['./rgw-daemon-list.component.scss'],
+  standalone: false
 })
-export class RgwDaemonListComponent extends ListWithDetails implements OnInit {
+export class RgwDaemonListComponent implements OnInit {
   columns: CdTableColumn[] = [];
-  daemons: RgwDaemon[] = [];
+  daemons: (RgwDaemon & { cdLink?: string })[] = [];
   grafanaPermission: Permission;
   isMultiSite: boolean;
 
@@ -26,9 +27,7 @@ export class RgwDaemonListComponent extends ListWithDetails implements OnInit {
     private authStorageService: AuthStorageService,
     private cephShortVersionPipe: CephShortVersionPipe,
     private rgwSiteService: RgwSiteService
-  ) {
-    super();
-  }
+  ) {}
 
   ngOnInit(): void {
     this.grafanaPermission = this.authStorageService.getPermissions().grafana;
@@ -36,7 +35,8 @@ export class RgwDaemonListComponent extends ListWithDetails implements OnInit {
       {
         name: $localize`ID`,
         prop: 'id',
-        flexGrow: 2
+        flexGrow: 2,
+        cellTransformation: CellTemplate.routerLink
       },
       {
         name: $localize`Hostname`,
@@ -44,18 +44,23 @@ export class RgwDaemonListComponent extends ListWithDetails implements OnInit {
         flexGrow: 2
       },
       {
-        name: $localize`Zone`,
-        prop: 'zone_name',
-        flexGrow: 2
-      },
-      {
-        name: $localize`Zone Group`,
-        prop: 'zonegroup_name',
-        flexGrow: 2
+        name: $localize`Port`,
+        prop: 'port',
+        flexGrow: 1
       },
       {
         name: $localize`Realm`,
         prop: 'realm_name',
+        flexGrow: 2
+      },
+      {
+        name: $localize`Zonegroup`,
+        prop: 'zonegroup_name',
+        flexGrow: 2
+      },
+      {
+        name: $localize`Zone`,
+        prop: 'zone_name',
         flexGrow: 2
       },
       {
@@ -77,6 +82,9 @@ export class RgwDaemonListComponent extends ListWithDetails implements OnInit {
   }
 
   private updateDaemons = (daemons: RgwDaemon[]) => {
-    this.daemons = daemons;
+    this.daemons = daemons.map((daemon) => ({
+      ...daemon,
+      cdLink: `/rgw/daemon/${encodeURIComponent(daemon.id)}/overview`
+    }));
   };
 }

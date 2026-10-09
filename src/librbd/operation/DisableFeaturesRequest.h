@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_OPERATION_DISABLE_FEATURES_REQUEST_H
 #define CEPH_LIBRBD_OPERATION_DISABLE_FEATURES_REQUEST_H
@@ -56,7 +56,7 @@ private:
    *    v
    * STATE_ACQUIRE_EXCLUSIVE_LOCK (skip if not
    *    |                          required)
-   *    | (disbling journaling)
+   *    | (disabling journaling)
    *    \-------------------\
    *    |                    |
    *    |                    V
@@ -92,8 +92,8 @@ private:
    * STATE_NOTIFY_UPDATE
    *    |
    *    v
-   * STATE_REALEASE_EXCLUSIVE_LOCK (skip if not
-   *    |                           required)
+   * STATE_RELEASE_EXCLUSIVE_LOCK (skip if not
+   *    |                          required)
    *    | (unblock writes)
    *    v
    * <finish>

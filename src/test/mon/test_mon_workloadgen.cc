@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -48,6 +49,7 @@
 #include "common/debug.h"
 #include "common/errno.h"
 #include "common/ceph_mutex.h"
+#include "common/JSONFormatter.h"
 #include "common/strtol.h"
 #include "common/LogEntry.h"
 #include "auth/KeyRing.h"
@@ -355,8 +357,6 @@ class OSDStub : public TestStub
       gen(whoami),
       mon_osd_rng(STUB_MON_OSD_FIRST, STUB_MON_OSD_LAST)
   {
-    dout(20) << __func__ << " auth supported: "
-	     << cct->_conf->auth_supported << dendl;
     stringstream ss;
     ss << "client-osd" << whoami;
     std::string public_msgr_type = cct->_conf->ms_public_type.empty() ? cct->_conf.get_val<std::string>("ms_type") : cct->_conf->ms_public_type;
@@ -770,8 +770,10 @@ class OSDStub : public TestStub
     if (first > osdmap.get_epoch() + 1) {
       dout(5) << __func__
 	      << osdmap.get_epoch() + 1 << ".." << (first-1) << dendl;
-      if ((m->oldest_map < first && osdmap.get_epoch() == 0) ||
-	  m->oldest_map <= osdmap.get_epoch()) {
+      if ((m->cluster_osdmap_trim_lower_bound <
+           first && osdmap.get_epoch() == 0) ||
+	  m->cluster_osdmap_trim_lower_bound <=
+          osdmap.get_epoch()) {
 	monc.sub_want("osdmap", osdmap.get_epoch()+1,
 		       CEPH_SUBSCRIBE_ONETIME);
 	monc.renew_subs();

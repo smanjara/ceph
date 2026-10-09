@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -18,17 +19,20 @@
 #include "auth/AuthServiceHandler.h"
 #include "auth/Auth.h"
 
+#include "common/ceph_mutex.h"
+
 class KeyServer;
 struct CephXAuthenticate;
 struct CephXServiceTicketInfo;
 
 class CephxServiceHandler  : public AuthServiceHandler {
   KeyServer *key_server;
-  uint64_t server_challenge;
+  uint64_t server_challenge = 0;
+
+  ceph::shared_mutex lock = ceph::make_shared_mutex("CephxServiceHandler::lock");
 
 public:
-  CephxServiceHandler(CephContext *cct_, KeyServer *ks) 
-    : AuthServiceHandler(cct_), key_server(ks), server_challenge(0) {}
+  CephxServiceHandler(CephContext *cct_, KeyServer *ks);
   ~CephxServiceHandler() override {}
   
   int handle_request(
@@ -49,6 +53,8 @@ private:
 			bool& should_enc_ticket);
   void build_cephx_response_header(int request_type, int status,
 				   ceph::buffer::list& bl);
+
+  bool cipher_is_allowed(int type);
 };
 
 #endif

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -21,7 +21,9 @@
 #include "rgw_rest_metadata.h"
 #include "rgw_client_io.h"
 #include "rgw_mdlog_types.h"
-#include "rgw_sal_rados.h"
+#ifdef WITH_RADOSGW_RADOS
+#include "driver/rados/rgw_sal_rados.h"
+#endif
 #include "common/errno.h"
 #include "common/strtol.h"
 #include "rgw/rgw_b64.h"
@@ -56,6 +58,7 @@ void RGWOp_Metadata_Get::execute(optional_yield y) {
 
   frame_metadata_key(s, metadata_key);
 
+#ifdef WITH_RADOSGW_RADOS
   auto meta_mgr = static_cast<rgw::sal::RadosStore*>(driver)->ctl()->meta.mgr;
 
   /* Get keys */
@@ -66,13 +69,14 @@ void RGWOp_Metadata_Get::execute(optional_yield y) {
   }
 
   op_ret = 0;
+#else
+  // the metadata manager is a RADOS-only facility
+  op_ret = -ENOTSUP;
+#endif
 }
 
 void RGWOp_Metadata_Get_Myself::execute(optional_yield y) {
-  string owner_id;
-
-  owner_id = s->owner.get_id().to_str();
-  s->info.args.append("key", owner_id);
+  s->info.args.append("key", to_string(s->owner.id));
 
   return RGWOp_Metadata_Get::execute(y);
 }
@@ -263,8 +267,13 @@ void RGWOp_Metadata_Put::execute(optional_yield y) {
     }
   }
 
+#ifdef WITH_RADOSGW_RADOS
   op_ret = static_cast<rgw::sal::RadosStore*>(driver)->ctl()->meta.mgr->put(metadata_key, bl, s->yield, s, sync_type,
 				       false, &ondisk_version);
+#else
+  // the metadata manager is a RADOS-only facility
+  op_ret = -ENOTSUP;
+#endif
   if (op_ret < 0) {
     ldpp_dout(s, 5) << "ERROR: can't put key: " << cpp_strerror(op_ret) << dendl;
     return;
@@ -294,7 +303,12 @@ void RGWOp_Metadata_Delete::execute(optional_yield y) {
   string metadata_key;
 
   frame_metadata_key(s, metadata_key);
+#ifdef WITH_RADOSGW_RADOS
   op_ret = static_cast<rgw::sal::RadosStore*>(driver)->ctl()->meta.mgr->remove(metadata_key, s->yield, s);
+#else
+  // the metadata manager is a RADOS-only facility
+  op_ret = -ENOTSUP;
+#endif
   if (op_ret < 0) {
     ldpp_dout(s, 5) << "ERROR: can't remove key: " << cpp_strerror(op_ret) << dendl;
     return;

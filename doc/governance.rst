@@ -29,7 +29,7 @@ Responsibilities
  * Point of contact for the project
  * Representatives for Ceph foundation board meetings
  * Ensure things get done
-
+   
 Membership
 ----------
 
@@ -38,8 +38,7 @@ Membership
  * Candidates self-nominate or are nominated by other members
  * Discussion of how roles/responsibilities may be delegated
  * Ranked-choice vote by the steering committee
- * 2 year terms, with one member being elected in even years, and the
-   other two in odd years
+ * 1 year terms with all members elected yearly
  * Members may resign at any time, and the steering committee may vote
    to appoint a replacement for the rest of their term
  * members must involve >1 employer
@@ -47,9 +46,9 @@ Membership
 Current Members
 ^^^^^^^^^^^^^^^
 
-* Dan van der Ster <daniel.vanderster@cern.ch>
-* Josh Durgin <jdurgin@redhat.com>
+* Dan van der Ster <dan.vanderster@clyso.com>
 * Neha Ojha <nojha@redhat.com>
+* Patrick Donnelly <pdonnell@ibm.com>
 
 .. _csc:
 
@@ -60,50 +59,67 @@ Responsibilities
 ----------------
 
  * Elect executive council
- * Amend governance model (by majority vote)
+ * Amend governance model by supermajority vote
  * Meet regularly to discuss and decide on tactical and strategic projects
    and improvements
+ * Hold an annual election
 
 Membership
 ----------
 
  * Developers, users, community members
- * Voting members can be nominated and added/removed by existing
-   members (2/3 majority)
+ * Members can be nominated and added/removed by existing members via a
+   supermajority vote
  * Anyone may attend steering committee meetings as a non-voting participant
  * Existing Ceph Leadership Team members are grandfathered in
  * Membership reflected by an email list and on the Ceph website and
    docs
 
+.. note:: A "supermajority" is a 2/3 majority of votes on a particular item
+          in an election. Abstaining does not bias a vote.
+
 Current Members
 ^^^^^^^^^^^^^^^
 
+ * Adam C. Emerson <aemerson@redhat.com>
  * Adam King <adking@redhat.com>
+ * Afreen Misbah <afreen@ibm.com>
+ * Anthony D'Atri <anthony.datri@gmail.com>
+ * Aviv Caro <Aviv.Caro@ibm.com>
+ * Bill Scales <bill_scales@uk.ibm.com>
  * Casey Bodley <cbodley@redhat.com>
- * Dan van der Ster <daniel.vanderster@cern.ch>
- * David Orman <ormandj@iland.com>
- * Ernesto Puerta <epuerta@redhat.com>
+ * Dan van der Ster <dan.vanderster@clyso.com>
+ * David Orman <ormandj@1111systems.com>
+ * Ernesto Puerta <epuertat@redhat.com>
+ * Gaurav Sitlani <gsitlani@ibm.com>
  * Gregory Farnum <gfarnum@redhat.com>
+ * Guillaume Abrioux <gabrioux@redhat.com>
  * Haomai Wang <haomai@xsky.com>
- * Ilya Dryomov <idryomov@redhat.com>
  * Igor Fedotov <igor.fedotov@croit.io>
- * Jeff Layton <jlayton@redhat.com>
+ * Ilya Dryomov <idryomov@redhat.com>
+ * Joseph Mundackal <jmundackal@bloomberg.net>
  * Josh Durgin <jdurgin@redhat.com>
- * João Eduardo Luis <joao@suse.de>
- * Ken Dreyer <kdreyer@redhat.com>
- * Mark Nelson <mnelson@redhat.com>
+ * João Eduardo Luis <joao@clyso.com>
+ * Kyle Bader <kbader@ibm.com>
+ * Laura Flores <lflores@ibm.com>
+ * Mark Nelson <mark.nelson@clyso.com>
+ * Matan Breizman <mbreizma@redhat.com>
  * Matt Benjamin <mbenjami@redhat.com>
  * Mike Perez <miperez@redhat.com>
- * Myoungwon Oh <myoungwon.oh@samsung.com>
+ * Myoungwon Oh <ohmyoungwon@gmail.com>
  * Neha Ojha <nojha@redhat.com>
- * Patrick Donnelly <pdonnell@redhat.com>
- * Sam Just <sjust@redhat.com>
- * Vikhyat Umrao <vikhyat@redhat.com>
+ * Patrick Donnelly <pdonnell@ibm.com>
+ * Radoslaw Zarzynski <rzarzyns@redhat.com>
+ * Redouane Kachach <rkachach@redhat.com>
+ * Sage McTaggart <sagemct@ibm.com>
+ * Venky Shankar <vshankar@redhat.com>
+ * Vikhyat Umrao <vikhyat@ibm.com>
  * Xie Xingguo <xie.xingguo@zte.com.cn>
- * Yehuda Sadeh <yehuda@redhat.com>
+ * Yaarit Hatuka <yhatuka@ibm.com>
+ * Yehuda Sadeh <yehuda@ui.com>
  * Yingxin Cheng <yingxin.cheng@intel.com>
  * Yuri Weinstein <yweinste@redhat.com>
- * Zac Dover <zac.dover@gmail.com>
+ * Zac Dover <zac.dover@proton.me>
 
 .. _ctl:
 

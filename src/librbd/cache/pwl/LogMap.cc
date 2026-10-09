@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "LogMap.h"
 #include "include/ceph_assert.h"
@@ -250,7 +250,7 @@ LogMapEntries<T> LogMap<T>::find_map_entries_locked(const BlockExtent &block_ext
  * represent the entire block extent of the GenericWriteLogEntry, and the
  * WriteLogMapEntry is added to the set.
  *
- * The set must not contain overlapping WriteLogMapEntrys. WriteLogMapEntrys
+ * The set must not contain overlapping write log entries. Entries
  * in the set that overlap with one being added are adjusted (shrunk, split,
  * or removed) before the new entry is added.
  *

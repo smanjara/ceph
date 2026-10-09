@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph distributed storage system
  *
@@ -15,6 +16,8 @@
  */
 
 #include <stdio.h>
+
+#include <iostream> // for std::cout
 #include <numeric>
 
 #include "global/global_init.h"
@@ -24,9 +27,46 @@
 
 #include "include/denc.h"
 
+#include <boost/container/flat_map.hpp>
+#include <boost/container/flat_set.hpp>
+#include <boost/optional.hpp>
+
 using namespace std;
 
 // test helpers
+
+template<typename T>
+std::string encode_to_string(const T& v) {
+  bufferlist bl;
+  encode(v, bl);
+  return bl.to_str();
+}
+
+template<typename T>
+void expect_wire_format(const T& v, const std::string& wire) {
+  ASSERT_EQ(wire, encode_to_string(v));
+
+  bufferlist bl;
+  bl.append(wire);
+  auto p = bl.cbegin();
+  T out;
+  decode(out, p);
+  ASSERT_EQ(v, out);
+  ASSERT_EQ(wire.size(), p.get_off());
+}
+
+static void append_le32(std::string& s, uint32_t v) {
+  for (unsigned i = 0; i < 4; ++i) {
+    s.push_back(static_cast<char>(v >> (i * 8)));
+  }
+}
+
+static void append_denc_header(std::string& s, uint8_t v,
+                               uint8_t compat, uint32_t len) {
+  s.push_back(static_cast<char>(v));
+  s.push_back(static_cast<char>(compat));
+  append_le32(s, len);
+}
 
 template<typename T>
 void test_encode_decode(T v) {
@@ -352,23 +392,48 @@ struct foo_t {
 };
 WRITE_CLASS_DENC_BOUNDED(foo_t)
 
-struct foo2_t {
-  int32_t c = 0;
-  uint64_t d = 123;
+struct foo2_accept1_t {
+  int32_t a = 0;
+  uint64_t b = 123;
+  int32_t c = -1; // uninitialized for v1
 
-  DENC(foo2_t, v, p) {
-    DENC_START(1, 1, p);
-    ::denc(v.c, p);
-    ::denc(v.d, p);
+  DENC(foo2_accept1_t, v, p) {
+    DENC_START(2, 1, p);
+    ::denc(v.a, p);
+    ::denc(v.b, p);
+    if (struct_v >= 2) {
+      ::denc(v.c, p);
+    }
     DENC_FINISH(p);
   }
+};
+WRITE_CLASS_DENC_BOUNDED(foo2_accept1_t)
 
-  friend bool operator==(const foo2_t& l, const foo2_t& r) {
-    return l.c == r.c && l.d == r.d;
+struct foo2_only2_t {
+  int32_t a = 0;
+  uint64_t b = 123;
+  uint32_t c = 55;
+
+  DENC(foo2_only2_t, v, p) {
+    DENC_START_COMPAT_2(2, 2, p);
+    ::denc(v.a, p);
+    ::denc(v.b, p);
+    ::denc(v.c, p);
+    DENC_FINISH(p);
   }
 };
-WRITE_CLASS_DENC_BOUNDED(foo2_t)
+WRITE_CLASS_DENC_BOUNDED(foo2_only2_t)
 
+struct denc_overread_t {
+  DENC(denc_overread_t, v, p) {
+    DENC_START(1, 1, p);
+    __u8 value = 0;
+    ::denc(value, p);
+    ::denc(value, p);
+    DENC_FINISH(p);
+  }
+};
+WRITE_CLASS_DENC_BOUNDED(denc_overread_t)
 
 struct bar_t {
   int32_t a = 0;
@@ -740,4 +805,83 @@ TEST(denc, no_copy_if_segmented_and_lengthy)
     ASSERT_EQ(0u, Legacy::n_denc);
     ASSERT_EQ(CEPH_PAGE_SIZE * 2, Legacy::n_decode);
   }
+}
+
+TEST(denc, compat_allows)
+{
+  foo_t v1;
+  v1.a = 5001; v1.b = 6002;
+  size_t s = 0;
+  denc(v1, s);
+  bufferlist bl;
+  {
+    auto app = bl.get_contiguous_appender(s);
+    denc(v1, app);
+  }
+
+  foo2_accept1_t v2;
+  v2.a = 111; v2.b = 111; v2.c = 111;
+  auto bpi = bl.front().begin();
+  denc(v2, bpi);
+  ASSERT_EQ(v1.a, v2.a);
+  ASSERT_EQ(v1.b, v2.b);
+  ASSERT_EQ(111, v2.c);
+}
+
+TEST(denc, compat_disallows)
+{
+  foo2_only2_t v2;
+  v2.a = 5001; v2.b = 6002; v2.c = 7003;
+  size_t s = 0;
+  denc(v2, s);
+  bufferlist bl;
+  {
+    auto app = bl.get_contiguous_appender(s);
+    denc(v2, app);
+  }
+
+  foo_t v1;
+  v1.a = 111; v1.b = 111;
+  auto bpi = bl.front().begin();
+  ASSERT_ANY_THROW(denc(v1,bpi));
+}
+
+TEST(denc, finish_skips_unread_fields)
+{
+  foo2_accept1_t v2;
+  v2.a = 5001;
+  v2.b = 6002;
+  v2.c = 7003;
+
+  size_t s = 0;
+  denc(v2, s);
+  bufferlist bl;
+  {
+    auto app = bl.get_contiguous_appender(s);
+    denc(v2, app);
+  }
+
+  foo_t v1;
+  auto bpi = bl.front().begin();
+  denc(v1, bpi);
+
+  ASSERT_EQ(v2.a, v1.a);
+  ASSERT_EQ(v2.b, v1.b);
+  ASSERT_EQ(bpi.get_pos(), bl.c_str() + bl.length());
+}
+
+TEST(denc, finish_rejects_overread)
+{
+  std::string wire;
+  append_denc_header(wire, 1, 1, 1);
+  wire.push_back(17);
+  wire.push_back(19);
+
+  bufferlist bl;
+  bl.append(wire);
+
+  denc_overread_t value;
+  auto bpi = bl.front().begin();
+
+  ASSERT_THROW(denc(value, bpi), buffer::malformed_input);
 }

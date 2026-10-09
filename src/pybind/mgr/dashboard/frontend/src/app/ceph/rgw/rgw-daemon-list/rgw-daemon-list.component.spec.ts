@@ -15,8 +15,9 @@ import { Permissions } from '~/app/shared/models/permissions';
 import { AuthStorageService } from '~/app/shared/services/auth-storage.service';
 import { SharedModule } from '~/app/shared/shared.module';
 import { configureTestBed, TabHelper } from '~/testing/unit-test-helper';
-import { RgwDaemonDetailsComponent } from '../rgw-daemon-details/rgw-daemon-details.component';
 import { RgwDaemonListComponent } from './rgw-daemon-list.component';
+import { TableComponent } from '~/app/shared/datatable/table/table.component';
+import { VERSION_PREFIX } from '~/app/shared/constants/app.constants';
 
 describe('RgwDaemonListComponent', () => {
   let component: RgwDaemonListComponent;
@@ -28,12 +29,14 @@ describe('RgwDaemonListComponent', () => {
   const daemon: RgwDaemon = {
     id: '8000',
     service_map_id: '4803',
-    version: 'ceph version',
+    version: VERSION_PREFIX,
     server_hostname: 'ceph',
     realm_name: 'realm1',
     zonegroup_name: 'zg1-realm1',
+    zonegroup_id: 'zg1-id',
     zone_name: 'zone1-zg1-realm1',
-    default: true
+    default: true,
+    port: 80
   };
 
   const expectTabsAndHeading = (length: number, heading: string) => {
@@ -43,7 +46,7 @@ describe('RgwDaemonListComponent', () => {
   };
 
   configureTestBed({
-    declarations: [RgwDaemonListComponent, RgwDaemonDetailsComponent],
+    declarations: [RgwDaemonListComponent, TableComponent],
     imports: [
       BrowserAnimationsModule,
       HttpClientTestingModule,
@@ -75,18 +78,22 @@ describe('RgwDaemonListComponent', () => {
     fixture.detectChanges();
     tick();
     expect(listDaemonsSpy).toHaveBeenCalledTimes(1);
-    expect(component.daemons).toEqual([daemon]);
+    expect(component.daemons[0].cdLink).toBe('/rgw/daemon/8000/overview');
+    const cdTableEl = fixture.debugElement.query(By.directive(TableComponent));
+    const cdTableComponent: TableComponent = cdTableEl.componentInstance;
+    cdTableComponent.ngAfterViewInit();
+    fixture.detectChanges();
     expect(fixture.debugElement.query(By.css('cd-table')).nativeElement.textContent).toContain(
-      'total of 1'
+      '1-1 of 1 item'
     );
 
     fixture.destroy();
   }));
 
-  it('should only show Daemons List tab', () => {
+  it('should only show Gateways List tab', () => {
     fixture.detectChanges();
 
-    expectTabsAndHeading(1, 'Daemons List');
+    expectTabsAndHeading(1, 'Gateways List');
   });
 
   it('should show Overall Performance tab', () => {

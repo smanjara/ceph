@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /**
  * All operations via the rados gateway are carried out by
@@ -10,13 +10,14 @@
  * to provide additional virtual methods such as send_response or get_params.
  */
 
-#ifndef CEPH_RGW_OP_H
-#define CEPH_RGW_OP_H
+#pragma once
 
+#include <cstdint>
 #include <limits.h>
 
 #include <array>
 #include <memory>
+#include <span>
 #include <string>
 #include <set>
 #include <map>
@@ -34,10 +35,13 @@
 #include "common/ceph_json.h"
 #include "common/ceph_time.h"
 
+#include "rgw_cksum.h"
 #include "rgw_common.h"
 #include "rgw_dmclock.h"
+
+struct rgw_crypt_src_identity;
 #include "rgw_sal.h"
-#include "rgw_user.h"
+#include "driver/rados/rgw_user.h"
 #include "rgw_bucket.h"
 #include "rgw_acl.h"
 #include "rgw_cors.h"
@@ -48,7 +52,6 @@
 #include "rgw_log.h"
 
 #include "rgw_lc.h"
-#include "rgw_torrent.h"
 #include "rgw_tag.h"
 #include "rgw_object_lock.h"
 #include "cls/rgw/cls_rgw_client.h"
@@ -56,36 +59,41 @@
 #include "rgw_bucket_encryption.h"
 #include "rgw_tracer.h"
 
-#include "services/svc_sys_obj.h"
-#include "services/svc_tier_rados.h"
-
 #include "include/ceph_assert.h"
-
-using ceph::crypto::SHA1;
 
 struct req_state;
 class RGWOp;
 class RGWRados;
 class RGWMultiCompleteUpload;
+class RGWPutObj_Torrent;
+class RGWMultiDelObject;
 
+namespace rgw::auth::registry { class StrategyRegistry; }
 
-namespace rgw {
-namespace auth {
-namespace registry {
+int rgw_forward_request_to_master(const DoutPrefixProvider* dpp,
+                                  const rgw::SiteConfig& site,
+                                  const rgw_owner& effective_owner,
+                                  bufferlist* indata, JSONParser* jp,
+                                  const req_info& req, rgw_err& err,
+                                  optional_yield y);
 
-class StrategyRegistry;
-
-}
-}
-}
-
-int rgw_op_get_bucket_policy_from_attr(const DoutPrefixProvider *dpp, 
+int rgw_op_get_bucket_policy_from_attr(const DoutPrefixProvider *dpp,
                                        CephContext *cct,
-				       rgw::sal::Driver* driver,
-                                       RGWBucketInfo& bucket_info,
+                                       rgw::sal::Driver* driver,
+                                       const rgw_user& bucket_owner,
                                        std::map<std::string, bufferlist>& bucket_attrs,
-                                       RGWAccessControlPolicy *policy,
-				       optional_yield y);
+                                       RGWAccessControlPolicy& policy,
+                                       optional_yield y);
+
+std::tuple<bool, bool> rgw_check_policy_condition(const DoutPrefixProvider *dpp, req_state* s, bool check_obj_exist_tag=true);
+
+int rgw_iam_add_buckettags(const DoutPrefixProvider *dpp, req_state* s);
+
+int get_owner_quota_info(const DoutPrefixProvider* dpp,
+                                optional_yield y,
+                                rgw::sal::Driver* driver,
+                                const rgw_owner& owner,
+                                RGWQuota& quotas);
 
 class RGWHandler {
 protected:
@@ -170,6 +178,36 @@ int rgw_rest_get_json_input(CephContext *cct, req_state *s, T& out,
   return 0;
 }
 
+// So! Now and then when we try to update bucket information, the
+// bucket has changed during the course of the operation. (Or we have
+// a cache consistency problem that Watch/Notify isn't ruling out
+// completely.)
+//
+// When this happens, we need to update the bucket info and try
+// again. We have, however, to try the right *part* again.  We can't
+// simply re-send, since that will obliterate the previous update.
+//
+// Thus, callers of this function should include everything that
+// merges information to be changed into the bucket information as
+// well as the call to set it.
+//
+// The called function must return an integer, negative on error. In
+// general, they should just return op_ret.
+template<typename F, typename B=rgw::sal::Bucket>
+int retry_raced_bucket_write(const DoutPrefixProvider *dpp,
+                             B* b,
+                             const F &f,
+                             optional_yield y) {
+  auto r = f();
+  for (auto i = 0u; i < 15u && r == -ECANCELED; ++i) {
+    r = b->try_refresh_info(dpp, nullptr, y);
+    if (r >= 0) {
+      r = f();
+    }
+  }
+  return r;
+}
+
 /**
  * Provide the base class for all ops.
  */
@@ -178,11 +216,13 @@ protected:
   req_state *s;
   RGWHandler *dialect_handler;
   rgw::sal::Driver* driver;
+  std::optional<RGWCORSRule> optional_global_cors;
   RGWCORSConfiguration bucket_cors;
   bool cors_exist;
   RGWQuota quota;
   int op_ret;
   int do_aws4_auth_completion();
+  bool init_called = false;
 
   virtual int init_quota();
 
@@ -222,6 +262,8 @@ public:
   virtual ~RGWOp() override;
 
   int get_ret() const { return op_ret; }
+  req_state* get_req_state() const { return s; }
+  rgw::sal::User* get_user() const { return s ? s->user.get() : nullptr; }
 
   virtual int init_processing(optional_yield y) {
     if (dialect_handler->supports_quota()) {
@@ -234,12 +276,24 @@ public:
   }
 
   virtual void init(rgw::sal::Driver* driver, req_state *s, RGWHandler *dialect_handler) {
+    if (init_called) return;
     this->driver = driver;
+    init_called = true;
     this->s = s;
     this->dialect_handler = dialect_handler;
   }
   int read_bucket_cors();
+  int read_global_cors();
   bool generate_cors_headers(std::string& origin, std::string& method, std::string& headers, std::string& exp_headers, unsigned *max_age);
+
+  /* Enforce CORS policy for cross-origin non-preflight requests.
+   *
+   * The check is skipped when:
+   *  - no Origin header is present
+   *  - getting a preflight request (handled entirely by RGWOptionsCORS)
+   *  - no bucket/global CORS configuration exists
+   */
+  int verify_cors_match();
 
   virtual int verify_params() { return 0; }
   virtual bool prefetch_data() { return false; }
@@ -267,6 +321,15 @@ public:
   }
   virtual const char* name() const = 0;
   virtual RGWOpType get_type() { return RGW_OP_UNKNOWN; }
+  virtual std::string canonical_name() const {
+    return fmt::format("REST.{}.{}",
+        s->info.method != nullptr ? s->info.method : "UNKNOWN",
+        name());
+  }
+  // by default we log all bucket operations
+  virtual bool always_do_bucket_logging() const {
+    return s->bucket != nullptr;
+  }
 
   virtual uint32_t op_mask() { return 0; }
 
@@ -327,14 +390,46 @@ public:
   }
 };
 
+class DataProcessorFilter : public RGWGetObj_Filter
+{
+  rgw::sal::DataProcessor* processor;
+  off_t ofs = 0;
+
+public:
+  DataProcessorFilter() {}
+  explicit DataProcessorFilter(rgw::sal::DataProcessor* proc) : processor(proc) {}
+  ~DataProcessorFilter() override {}
+
+  void set_processor(rgw::sal::DataProcessor* proc) {
+    processor = proc;
+  }
+
+  int handle_data(bufferlist& bl, off_t bl_ofs, off_t bl_len) override {
+    // DataProcessor requires ownership of the entire bufferlist.
+    // RGWGetObj_Filter, however, may reuse the original bufferlist after this call.
+    // To avoid unintended side effects, we create a copy of the relevant portion.
+    // Note: bl_ofs is the offset into this bufferlist, not an object offset.
+    bufferlist copy_bl;
+    bl.begin(bl_ofs).copy(bl_len, copy_bl);
+
+    int ret = processor->process(std::move(copy_bl), ofs);
+    if (ret < 0) return ret;
+    ofs += bl_len;
+    return bl_len;
+  }
+
+  int flush() override {
+    return processor->process({}, ofs);
+  }
+};
+
 class RGWGetObj : public RGWOp {
 protected:
-  seed torrent; // get torrent
   const char *range_str;
   const char *if_mod;
   const char *if_unmod;
-  const char *if_match;
-  const char *if_nomatch;
+  const char *if_match{nullptr};
+  const char *if_nomatch{nullptr};
   uint32_t mod_zone_id;
   uint64_t mod_pg_ver;
   off_t ofs;
@@ -347,17 +442,20 @@ protected:
   ceph::real_time *mod_ptr;
   ceph::real_time *unmod_ptr;
   rgw::sal::Attrs attrs;
+  bool get_torrent = false;
   bool get_data;
   bool partial_content;
   bool ignore_invalid_range;
   bool range_parsed;
   bool skip_manifest;
   bool skip_decrypt{false};
+  bool sync_cloudtiered{false};
   utime_t gc_invalidate_time;
   bool is_slo;
   std::string lo_etag;
   bool rgwx_stat; /* extended rgw stat operation */
   std::string version_id;
+  rgw_zone_set_entry dst_zone_trace;
 
   // compression attrs
   RGWCompressionInfo cs_info;
@@ -366,10 +464,19 @@ protected:
   bool first_data;
   uint64_t cur_ofs;
   bufferlist waiting;
-  uint64_t action = 0;
+  rgw::IAM::action_t action{};
 
   bool get_retention;
   bool get_legal_hold;
+
+  // optional partNumber param for s3
+  std::optional<int> multipart_part_num;
+  // PartsCount response when partNumber is specified
+  std::optional<int> multipart_parts_count;
+
+  // For AEAD encryption ciphers: preserve original encrypted size before plaintext conversion.
+  // Used by decrypt filter for range clamping. For non-AEAD modes, equals s->obj_size.
+  off_t encrypted_obj_size{0};
 
   int init_common();
 public:
@@ -415,7 +522,7 @@ public:
   int read_user_manifest_part(
     rgw::sal::Bucket* bucket,
     const rgw_bucket_dir_entry& ent,
-    RGWAccessControlPolicy * const bucket_acl,
+    const RGWAccessControlPolicy& bucket_acl,
     const boost::optional<rgw::IAM::Policy>& bucket_policy,
     const off_t start_ofs,
     const off_t end_ofs,
@@ -430,6 +537,12 @@ public:
   virtual int send_response_data(bufferlist& bl, off_t ofs, off_t len) = 0;
 
   const char* name() const override { return "get_obj"; }
+  std::string canonical_name() const override {
+    if (get_torrent) {
+      return fmt::format("REST.{}.TORRENT", s->info.method);
+    }
+    return fmt::format("REST.{}.OBJECT", s->info.method);
+  }
   RGWOpType get_type() override { return RGW_OP_GET_OBJ; }
   uint32_t op_mask() override { return RGW_OP_TYPE_READ; }
   virtual bool need_object_expiration() { return false; }
@@ -441,8 +554,8 @@ public:
     return 0;
   }
 
-  // get lua script to run as a "get object" filter 
-  int get_lua_filter(std::unique_ptr<RGWGetObj_Filter>* filter, 
+  // get lua script to run as a "get object" filter
+  int get_lua_filter(std::unique_ptr<RGWGetObj_Filter>* filter,
       RGWGetObj_Filter* cb);
 
   dmc::client_id dmclock_client() override { return dmc::client_id::data; }
@@ -471,6 +584,7 @@ class RGWGetObjTags : public RGWOp {
 
   virtual void send_response_data(bufferlist& bl) = 0;
   const char* name() const override { return "get_obj_tags"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.OBJECT_TAGGING", s->info.method); }
   virtual uint32_t op_mask() override { return RGW_OP_TYPE_READ; }
   RGWOpType get_type() override { return RGW_OP_GET_OBJ_TAGGING; }
 
@@ -486,6 +600,7 @@ class RGWPutObjTags : public RGWOp {
   virtual void send_response() override = 0;
   virtual int get_params(optional_yield y) = 0;
   const char* name() const override { return "put_obj_tags"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.OBJECT_TAGGING", s->info.method); }
   virtual uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
   RGWOpType get_type() override { return RGW_OP_PUT_OBJ_TAGGING; }
 
@@ -498,6 +613,7 @@ class RGWDeleteObjTags: public RGWOp {
   void execute(optional_yield y) override;
 
   const char* name() const override { return "delete_obj_tags"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.OBJECT_TAGGING", s->info.method); }
   virtual uint32_t op_mask() override { return RGW_OP_TYPE_DELETE; }
   RGWOpType get_type() override { return RGW_OP_DELETE_OBJ_TAGGING;}
 };
@@ -513,6 +629,7 @@ public:
 
   virtual void send_response_data(bufferlist& bl) = 0;
   const char* name() const override { return "get_bucket_tags"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.TAGGING", s->info.method); }
   virtual uint32_t op_mask() override { return RGW_OP_TYPE_READ; }
   RGWOpType get_type() override { return RGW_OP_GET_BUCKET_TAGGING; }
 };
@@ -528,6 +645,7 @@ public:
   virtual void send_response() override = 0;
   virtual int get_params(const DoutPrefixProvider *dpp, optional_yield y) = 0;
   const char* name() const override { return "put_bucket_tags"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.TAGGING", s->info.method); }
   virtual uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
   RGWOpType get_type() override { return RGW_OP_PUT_BUCKET_TAGGING; }
 };
@@ -553,6 +671,7 @@ public:
 
   virtual void send_response_data() = 0;
   const char* name() const override { return "get_bucket_replication"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.REPLICATION", s->info.method); }
   virtual uint32_t op_mask() override { return RGW_OP_TYPE_READ; }
   RGWOpType get_type() override { return RGW_OP_GET_BUCKET_REPLICATION; }
 };
@@ -568,6 +687,7 @@ public:
   virtual void send_response() override = 0;
   virtual int get_params(optional_yield y) = 0;
   const char* name() const override { return "put_bucket_replication"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.REPLICATION", s->info.method); }
   virtual uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
   RGWOpType get_type() override { return RGW_OP_PUT_BUCKET_REPLICATION; }
 };
@@ -581,6 +701,7 @@ public:
   void execute(optional_yield y) override;
 
   const char* name() const override { return "delete_bucket_replication"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.REPLICATION", s->info.method); }
   virtual uint32_t op_mask() override { return RGW_OP_TYPE_DELETE; }
   RGWOpType get_type() override { return RGW_OP_DELETE_BUCKET_REPLICATION;}
 };
@@ -656,6 +777,7 @@ public:
   void send_response() override = 0;
 
   const char* name() const override { return "bulk_delete"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.BULK_DELETE", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_BULK_DELETE; }
   uint32_t op_mask() override { return RGW_OP_TYPE_DELETE; }
   dmc::client_id dmclock_client() override { return dmc::client_id::data; }
@@ -696,7 +818,7 @@ protected:
 
   boost::optional<std::pair<std::string, rgw_obj_key>>
   parse_path(const std::string_view& path);
-  
+
   std::pair<std::string, std::string>
   handle_upload_path(req_state *s);
 
@@ -727,6 +849,7 @@ public:
   void execute(optional_yield y) override;
 
   const char* name() const override { return "bulk_upload"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.BULK_UPLOAD", s->info.method); }
 
   RGWOpType get_type() override {
     return RGW_OP_BULK_UPLOAD;
@@ -833,7 +956,7 @@ public:
   void execute(optional_yield y) override;
 
   virtual int get_params(optional_yield y) = 0;
-  virtual void handle_listing_chunk(rgw::sal::BucketList&& buckets) {
+  virtual void handle_listing_chunk(std::span<RGWBucketEnt> buckets) {
     /* The default implementation, used by e.g. S3, just generates a new
      * part of listing and sends it client immediately. Swift can behave
      * differently: when the reverse option is requested, all incoming
@@ -841,7 +964,7 @@ public:
     return send_response_data(buckets);
   }
   virtual void send_response_begin(bool has_buckets) = 0;
-  virtual void send_response_data(rgw::sal::BucketList& buckets) = 0;
+  virtual void send_response_data(std::span<const RGWBucketEnt> buckets) = 0;
   virtual void send_response_end() = 0;
   void send_response() override {}
 
@@ -849,6 +972,7 @@ public:
   virtual bool supports_account_metadata() { return false; }
 
   const char* name() const override { return "list_buckets"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.BUCKETS", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_LIST_BUCKETS; }
   uint32_t op_mask() override { return RGW_OP_TYPE_READ; }
 }; // class RGWListBuckets
@@ -902,29 +1026,27 @@ public:
 class RGWListBucket : public RGWOp {
 protected:
   std::string prefix;
-  rgw_obj_key marker; 
-  rgw_obj_key next_marker; 
+  rgw_obj_key marker;
+  rgw_obj_key next_marker;
   rgw_obj_key end_marker;
   std::string max_keys;
   std::string delimiter;
   std::string encoding_type;
-  bool list_versions;
-  int max;
+  bool list_versions{false};
+  int max{0};
   std::vector<rgw_bucket_dir_entry> objs;
   std::map<std::string, bool> common_prefixes;
+  std::optional<RGWStorageStats> stats; // initialized if need_container_stats()
 
-  int default_max;
-  bool is_truncated;
-  bool allow_unordered;
+  int default_max{0};
+  bool is_truncated{false};
+  bool allow_unordered{false};
 
-  int shard_id;
+  int shard_id{-1};
 
   int parse_max_keys();
 
 public:
-  RGWListBucket() : list_versions(false), max(0),
-                    default_max(0), is_truncated(false),
-		    allow_unordered(false), shard_id(-1) {}
   int verify_permission(optional_yield y) override;
   void pre_exec() override;
   void execute(optional_yield y) override;
@@ -935,21 +1057,10 @@ public:
   virtual int get_params(optional_yield y) = 0;
   void send_response() override = 0;
   const char* name() const override { return "list_bucket"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.BUCKET", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_LIST_BUCKET; }
   uint32_t op_mask() override { return RGW_OP_TYPE_READ; }
   virtual bool need_container_stats() { return false; }
-};
-
-class RGWGetBucketLogging : public RGWOp {
-public:
-  RGWGetBucketLogging() {}
-  int verify_permission(optional_yield y) override;
-  void execute(optional_yield) override { }
-
-  void send_response() override = 0;
-  const char* name() const override { return "get_bucket_logging"; }
-  RGWOpType get_type() override { return RGW_OP_GET_BUCKET_LOGGING; }
-  uint32_t op_mask() override { return RGW_OP_TYPE_READ; }
 };
 
 class RGWGetBucketLocation : public RGWOp {
@@ -961,6 +1072,7 @@ public:
 
   void send_response() override = 0;
   const char* name() const override { return "get_bucket_location"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.LOCATION", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_GET_BUCKET_LOCATION; }
   uint32_t op_mask() override { return RGW_OP_TYPE_READ; }
 };
@@ -979,6 +1091,7 @@ public:
 
   void send_response() override = 0;
   const char* name() const override { return "get_bucket_versioning"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.VERSIONING", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_GET_BUCKET_VERSIONING; }
   uint32_t op_mask() override { return RGW_OP_TYPE_READ; }
 };
@@ -1007,6 +1120,7 @@ public:
 
   void send_response() override = 0;
   const char* name() const override { return "set_bucket_versioning"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.VERSIONING", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_SET_BUCKET_VERSIONING; }
   uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
 };
@@ -1021,6 +1135,7 @@ public:
 
   void send_response() override = 0;
   const char* name() const override { return "get_bucket_website"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.WEBSITE", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_GET_BUCKET_WEBSITE; }
   uint32_t op_mask() override { return RGW_OP_TYPE_READ; }
 };
@@ -1040,6 +1155,7 @@ public:
 
   void send_response() override = 0;
   const char* name() const override { return "set_bucket_website"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.WEBSITE", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_SET_BUCKET_WEBSITE; }
   uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
 };
@@ -1054,19 +1170,22 @@ public:
 
   void send_response() override = 0;
   const char* name() const override { return "delete_bucket_website"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.WEBSITE", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_SET_BUCKET_WEBSITE; }
   uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
 };
 
 class RGWStatBucket : public RGWOp {
 protected:
-  std::unique_ptr<rgw::sal::Bucket> bucket;
+  RGWStorageStats stats;
+  bool report_stats{true};
 
 public:
   int verify_permission(optional_yield y) override;
   void pre_exec() override;
   void execute(optional_yield y) override;
 
+  virtual int get_params(optional_yield y) = 0;
   void send_response() override = 0;
   const char* name() const override { return "stat_bucket"; }
   RGWOpType get_type() override { return RGW_OP_STAT_BUCKET; }
@@ -1074,43 +1193,37 @@ public:
 };
 
 class RGWCreateBucket : public RGWOp {
-protected:
+ protected:
+  rgw::sal::Bucket::CreateParams createparams;
   RGWAccessControlPolicy policy;
   std::string location_constraint;
-  rgw_placement_rule placement_rule;
-  RGWBucketInfo info;
-  obj_version ep_objv;
-  bool has_cors;
-  bool relaxed_region_enforcement;
-  bool obj_lock_enabled;
+  bool has_cors = false;
+  bool has_policy = false;
+  uint32_t policy_rw_mask = 0;
+  bool relaxed_region_enforcement = false;
   RGWCORSConfiguration cors_config;
-  boost::optional<std::string> swift_ver_location;
-  std::map<std::string, buffer::list> attrs;
   std::set<std::string> rmattr_names;
-
   bufferlist in_data;
+  std::optional<rgw::s3::ObjectOwnership> object_ownership;
 
   virtual bool need_metadata_upload() const { return false; }
 
-public:
-  RGWCreateBucket() : has_cors(false), relaxed_region_enforcement(false), obj_lock_enabled(false) {}
-
+ public:
   void emplace_attr(std::string&& key, buffer::list&& bl) {
-    attrs.emplace(std::move(key), std::move(bl)); /* key and bl are r-value refs */
+    createparams.attrs.emplace(std::move(key), std::move(bl)); /* key and bl are r-value refs */
   }
-
   int verify_permission(optional_yield y) override;
   void pre_exec() override;
   void execute(optional_yield y) override;
   void init(rgw::sal::Driver* driver, req_state *s, RGWHandler *h) override {
     RGWOp::init(driver, s, h);
-    policy.set_ctx(s->cct);
     relaxed_region_enforcement =
 	s->cct->_conf.get_val<bool>("rgw_relaxed_region_enforcement");
   }
   virtual int get_params(optional_yield y) { return 0; }
   void send_response() override = 0;
   const char* name() const override { return "create_bucket"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.BUCKET", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_CREATE_BUCKET; }
   uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
 };
@@ -1128,6 +1241,7 @@ public:
 
   void send_response() override = 0;
   const char* name() const override { return "delete_bucket"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.BUCKET", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_DELETE_BUCKET; }
   uint32_t op_mask() override { return RGW_OP_TYPE_DELETE; }
 };
@@ -1187,15 +1301,15 @@ WRITE_CLASS_ENCODER(RGWSLOInfo)
 
 class RGWPutObj : public RGWOp {
 protected:
-  seed torrent;
   off_t ofs;
   const char *supplied_md5_b64;
   const char *supplied_etag;
-  const char *if_match;
-  const char *if_nomatch;
+  const char *if_match{nullptr};
+  const char *if_nomatch{nullptr};
   std::string copy_source;
   const char *copy_source_range;
   RGWBucketInfo copy_source_bucket_info;
+  rgw::sal::Attrs copy_source_bucket_attrs;
   std::string copy_source_tenant_name;
   std::string copy_source_bucket_name;
   std::string copy_source_object_name;
@@ -1205,7 +1319,7 @@ protected:
   std::string etag;
   bool chunked_upload;
   RGWAccessControlPolicy policy;
-  std::unique_ptr <RGWObjTags> obj_tags;
+  RGWObjTags obj_tags;
   const char *dlo_manifest;
   RGWSLOInfo *slo_info;
   rgw::sal::Attrs attrs;
@@ -1219,7 +1333,9 @@ protected:
   std::string multipart_upload_id;
   std::string multipart_part_str;
   int multipart_part_num = 0;
-  jspan multipart_trace;
+  rgw::cksum::Type multipart_cksum_type{rgw::cksum::Type::none};
+  uint16_t multipart_cksum_flags{rgw::cksum::Cksum::FLAG_CKSUM_NONE};
+  jspan_ptr multipart_trace;
 
   boost::optional<ceph::real_time> delete_at;
   //append obj
@@ -1230,6 +1346,8 @@ protected:
   //object lock
   RGWObjectRetention *obj_retention;
   RGWObjectLegalHold *obj_legal_hold;
+
+  std::optional<rgw::cksum::Cksum> cksum;
 
 public:
   RGWPutObj() : ofs(0),
@@ -1256,11 +1374,6 @@ public:
     delete obj_legal_hold;
   }
 
-  void init(rgw::sal::Driver* driver, req_state *s, RGWHandler *h) override {
-    RGWOp::init(driver, s, h);
-    policy.set_ctx(s->cct);
-  }
-
   virtual int init_processing(optional_yield y) override;
 
   void emplace_attr(std::string&& key, buffer::list&& bl) {
@@ -1283,9 +1396,12 @@ public:
                                  rgw::sal::DataProcessor *cb) {
     return 0;
   }
+  // if configured, construct a filter to generate torrent metadata
+  auto get_torrent_filter(rgw::sal::DataProcessor *cb)
+      -> std::optional<RGWPutObj_Torrent>;
 
-  // get lua script to run as a "put object" filter 
-  int get_lua_filter(std::unique_ptr<rgw::sal::DataProcessor>* filter, 
+  // get lua script to run as a "put object" filter
+  int get_lua_filter(std::unique_ptr<rgw::sal::DataProcessor>* filter,
       rgw::sal::DataProcessor* cb);
 
   int get_data_cb(bufferlist& bl, off_t bl_ofs, off_t bl_len);
@@ -1295,9 +1411,14 @@ public:
   virtual int get_data(bufferlist& bl) = 0;
   void send_response() override = 0;
   const char* name() const override { return "put_obj"; }
+  std::string canonical_name() const override {
+    const bool multipart = !multipart_upload_id.empty();
+    return fmt::format("REST.{}.{}", s->info.method, multipart ? "PART" : "OBJECT");
+  }
   RGWOpType get_type() override { return RGW_OP_PUT_OBJ; }
   uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
   dmc::client_id dmclock_client() override { return dmc::client_id::data; }
+  bool always_do_bucket_logging() const override { return false; }
 };
 
 class RGWPostObj : public RGWOp {
@@ -1312,6 +1433,7 @@ protected:
   RGWAccessControlPolicy policy;
   std::map<std::string, bufferlist> attrs;
   boost::optional<ceph::real_time> delete_at;
+  std::optional<rgw::cksum::Cksum> cksum;
 
   /* Must be called after get_data() or the result is undefined. */
   virtual std::string get_current_filename() const = 0;
@@ -1332,11 +1454,7 @@ public:
     attrs.emplace(std::move(key), std::move(bl)); /* key and bl are r-value refs */
   }
 
-  void init(rgw::sal::Driver* driver, req_state *s, RGWHandler *h) override {
-    RGWOp::init(driver, s, h);
-    policy.set_ctx(s->cct);
-  }
-
+  int init_processing(optional_yield y) override;
   int verify_permission(optional_yield y) override;
   void pre_exec() override;
   void execute(optional_yield y) override;
@@ -1349,6 +1467,7 @@ public:
   virtual int get_data(ceph::bufferlist& bl, bool& again) = 0;
   void send_response() override = 0;
   const char* name() const override { return "post_obj"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.OBJECT", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_POST_OBJ; }
   uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
   dmc::client_id dmclock_client() override { return dmc::client_id::data; }
@@ -1371,10 +1490,6 @@ public:
       has_policy(false) {
   }
 
-  void init(rgw::sal::Driver* driver, req_state *s, RGWHandler *h) override {
-    RGWOp::init(driver, s, h);
-    policy.set_ctx(s->cct);
-  }
   int init_processing(optional_yield y) override;
   int verify_permission(optional_yield y) override;
   void pre_exec() override { }
@@ -1399,7 +1514,7 @@ protected:
   RGWAccessControlPolicy policy;
   RGWCORSConfiguration cors_config;
   rgw_placement_rule placement_rule;
-  boost::optional<std::string> swift_ver_location;
+  std::optional<std::string> swift_ver_location;
 
 public:
   RGWPutMetadataBucket()
@@ -1408,11 +1523,6 @@ public:
 
   void emplace_attr(std::string&& key, buffer::list&& bl) {
     attrs.emplace(std::move(key), std::move(bl)); /* key and bl are r-value refs */
-  }
-
-  void init(rgw::sal::Driver* driver, req_state *s, RGWHandler *h) override {
-    RGWOp::init(driver, s, h);
-    policy.set_ctx(s->cct);
   }
 
   int verify_permission(optional_yield y) override;
@@ -1437,10 +1547,6 @@ public:
     : dlo_manifest(NULL)
   {}
 
-  void init(rgw::sal::Driver* driver, req_state *s, RGWHandler *h) override {
-    RGWOp::init(driver, s, h);
-    policy.set_ctx(s->cct);
-  }
   int verify_permission(optional_yield y) override;
   void pre_exec() override;
   void execute(optional_yield y) override;
@@ -1453,12 +1559,35 @@ public:
   virtual bool need_object_expiration() { return false; }
 };
 
+class RGWRestoreObj : public RGWOp {
+protected:
+  std::optional<uint64_t> expiry_days;
+  int restore_ret;
+public:
+  RGWRestoreObj() {}
+
+  int init_processing(optional_yield y) override;
+  int verify_permission(optional_yield y) override;
+  void pre_exec() override;
+  void execute(optional_yield y) override;
+  virtual int get_params(optional_yield y) {return 0;}
+
+  void send_response() override = 0;
+  const char* name() const override { return "restore_obj"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.RESTORE", s->info.method); }
+  RGWOpType get_type() override { return RGW_OP_RESTORE_OBJ; }
+  uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
+};
+
 class RGWDeleteObj : public RGWOp {
 protected:
   bool delete_marker;
   bool multipart_delete;
   std::string version_id;
   ceph::real_time unmod_since; /* if unmodified since */
+  ceph::real_time last_mod_time_match; /* if modified time match */
+  std::optional<uint64_t> size_match; /* if size match */
+  const char *if_match{nullptr}; /* if etag match */
   bool no_precondition_error;
   std::unique_ptr<RGWBulkDelete::Deleter> deleter;
   bool bypass_perm;
@@ -1474,6 +1603,7 @@ public:
       bypass_governance_mode(false) {
   }
 
+  int init_processing(optional_yield y) override;
   int verify_permission(optional_yield y) override;
   void pre_exec() override;
   void execute(optional_yield y) override;
@@ -1482,6 +1612,7 @@ public:
   virtual int get_params(optional_yield y) { return 0; }
   void send_response() override = 0;
   const char* name() const override { return "delete_obj"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.OBJECT", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_DELETE_OBJ; }
   uint32_t op_mask() override { return RGW_OP_TYPE_DELETE; }
   virtual bool need_object_expiration() { return false; }
@@ -1493,12 +1624,15 @@ protected:
   RGWAccessControlPolicy dest_policy;
   const char *if_mod;
   const char *if_unmod;
-  const char *if_match;
-  const char *if_nomatch;
+  const char *if_match{nullptr};
+  const char *if_nomatch{nullptr};
   // Required or it is not a copy operation
   std::string_view copy_source;
   // Not actually required
   std::optional<std::string_view> md_directive;
+  std::optional<RGWObjTags> obj_tags;
+  bool copy_source_tags = false;
+  std::map<std::string, std::string> crypt_http_responses;
 
   off_t ofs;
   off_t len;
@@ -1508,11 +1642,7 @@ protected:
   ceph::real_time *mod_ptr;
   ceph::real_time *unmod_ptr;
   rgw::sal::Attrs attrs;
-  std::string src_tenant_name, src_bucket_name, src_obj_name;
   std::unique_ptr<rgw::sal::Bucket> src_bucket;
-  std::string dest_tenant_name, dest_bucket_name, dest_obj_name;
-  std::unique_ptr<rgw::sal::Bucket> dest_bucket;
-  std::unique_ptr<rgw::sal::Object> dest_object;
   ceph::real_time src_mtime;
   ceph::real_time mtime;
   rgw::sal::AttrsMod attrs_mod;
@@ -1532,6 +1662,17 @@ protected:
   //object lock
   RGWObjectRetention *obj_retention;
   RGWObjectLegalHold *obj_legal_hold;
+
+  // remote copy progress helper
+  struct ProgressTracker {
+    std::mutex mtx;
+    std::condition_variable cv;
+    std::queue<off_t> ofs_queue;
+    std::atomic<bool> done{false};
+
+    ProgressTracker() {}
+  };
+  std::optional<ProgressTracker> progress_tracker;
 
   int init_common();
 
@@ -1568,14 +1709,18 @@ public:
     attrs.emplace(std::move(key), std::move(bl));
   }
 
-  void init(rgw::sal::Driver* driver, req_state *s, RGWHandler *h) override {
-    RGWOp::init(driver, s, h);
-    dest_policy.set_ctx(s->cct);
-  }
+  int init_processing(optional_yield y) override;
   int verify_permission(optional_yield y) override;
   void pre_exec() override;
   void execute(optional_yield y) override;
   void progress_cb(off_t ofs);
+  void progress_cb_handler();
+  ProgressTracker& get_progress_tracker() {
+    if (!progress_tracker) {
+      progress_tracker.emplace();
+    }
+    return *progress_tracker;
+  }
 
   virtual int check_storage_class(const rgw_placement_rule& src_placement) {
     return 0;
@@ -1586,6 +1731,7 @@ public:
   virtual void send_partial_response(off_t ofs) {}
   void send_response() override = 0;
   const char* name() const override { return "copy_obj"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.OBJECT", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_COPY_OBJ; }
   uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
   dmc::client_id dmclock_client() override { return dmc::client_id::data; }
@@ -1604,6 +1750,7 @@ public:
 
   void send_response() override = 0;
   const char* name() const override { return "get_acls"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.ACL", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_GET_ACLS; }
   uint32_t op_mask() override { return RGW_OP_TYPE_READ; }
 };
@@ -1611,7 +1758,6 @@ public:
 class RGWPutACLs : public RGWOp {
 protected:
   bufferlist data;
-  ACLOwner owner;
 
 public:
   RGWPutACLs() {}
@@ -1621,17 +1767,64 @@ public:
   void pre_exec() override;
   void execute(optional_yield y) override;
 
-  virtual int get_policy_from_state(rgw::sal::Driver* driver, req_state *s, std::stringstream& ss) { return 0; }
+  virtual int get_policy_from_state(const ACLOwner& owner,
+                                    RGWAccessControlPolicy& p) { return 0; }
   virtual int get_params(optional_yield y) = 0;
   void send_response() override = 0;
   const char* name() const override { return "put_acls"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.ACL", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_PUT_ACLS; }
   uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
 };
 
+class RGWGetObjAttrs : public RGWGetObj {
+protected:
+  std::string version_id;
+  std::string expected_bucket_owner;
+  std::optional<int> marker;
+  std::optional<int> max_parts;
+  uint16_t requested_attributes{0};
+#if 0
+  /* used to decrypt attributes for objects stored with SSE-C */
+  x-amz-server-side-encryption-customer-algorithm
+  x-amz-server-side-encryption-customer-key
+  x-amz-server-side-encryption-customer-key-MD5
+#endif
+public:
+
+  enum class ReqAttributes : uint16_t {
+    None = 0,
+    Etag,
+    Checksum,
+    ObjectParts,
+    StorageClass,
+    ObjectSize
+  };
+
+  static uint16_t as_flag(ReqAttributes attr) {
+    return 1 << (uint16_t(attr) ? uint16_t(attr) - 1 : 0);
+  }
+
+  static uint16_t recognize_attrs(const std::string& hdr, uint16_t deflt = 0);
+
+  RGWGetObjAttrs() : RGWGetObj()
+  {
+    RGWGetObj::get_data = false; // it's extra false
+  }
+
+  int verify_permission(optional_yield y) override;
+  void pre_exec() override;
+  void execute(optional_yield y) override;
+  void send_response() override = 0;
+  const char* name() const override { return "get_obj_attrs"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.OBJECT_ATTRIBUTES", s->info.method); }
+  RGWOpType get_type() override { return RGW_OP_GET_OBJ_ATTRS; }
+  uint32_t op_mask() override { return RGW_OP_TYPE_READ; }
+}; /* RGWGetObjAttrs */
+
 class RGWGetLC : public RGWOp {
 protected:
-    
+
 public:
   RGWGetLC() { }
   ~RGWGetLC() override { }
@@ -1642,6 +1835,7 @@ public:
 
   void send_response() override = 0;
   const char* name() const override { return "get_lifecycle"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.LIFECYCLE", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_GET_LC; }
   uint32_t op_mask() override { return RGW_OP_TYPE_READ; }
 };
@@ -1671,10 +1865,10 @@ public:
   void pre_exec() override;
   void execute(optional_yield y) override;
 
-//  virtual int get_policy_from_state(RGWRados* driver, req_state *s, std::stringstream& ss) { return 0; }
   virtual int get_params(optional_yield y) = 0;
   void send_response() override = 0;
   const char* name() const override { return "put_lifecycle"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.LIFECYCLE", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_PUT_LC; }
   uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
 };
@@ -1688,6 +1882,7 @@ public:
 
   void send_response() override = 0;
   const char* name() const override { return "delete_lifecycle"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.LIFECYCLE", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_DELETE_LC; }
   uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
 };
@@ -1703,6 +1898,7 @@ public:
 
   void send_response() override = 0;
   const char* name() const override { return "get_cors"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.CORS", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_GET_CORS; }
   uint32_t op_mask() override { return RGW_OP_TYPE_READ; }
 };
@@ -1722,6 +1918,7 @@ public:
   virtual int get_params(optional_yield y) = 0;
   void send_response() override = 0;
   const char* name() const override { return "put_cors"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.CORS", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_PUT_CORS; }
   uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
 };
@@ -1737,6 +1934,7 @@ public:
 
   void send_response() override = 0;
   const char* name() const override { return "delete_cors"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.CORS", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_DELETE_CORS; }
   uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
 };
@@ -1753,6 +1951,7 @@ public:
 
   int verify_permission(optional_yield y) override {return 0;}
   int validate_cors_request(RGWCORSConfiguration *cc);
+  int validate_global_cors_request(RGWCORSRule *cc);
   void execute(optional_yield y) override;
   void get_response_params(std::string& allowed_hdrs, std::string& exp_hdrs, unsigned *max_age);
   void send_response() override = 0;
@@ -1773,6 +1972,7 @@ public:
   int verify_permission(optional_yield y) override;
   void execute(optional_yield y) override;
   const char* name() const override { return "put_bucket_encryption"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.ENCRYPTION", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_PUT_BUCKET_ENCRYPTION; }
   uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
 };
@@ -1787,6 +1987,7 @@ public:
   int verify_permission(optional_yield y) override;
   void execute(optional_yield y) override;
   const char* name() const override { return "get_bucket_encryption"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.ENCRYPTION", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_GET_BUCKET_ENCRYPTION; }
   uint32_t op_mask() override { return RGW_OP_TYPE_READ; }
 };
@@ -1801,7 +2002,41 @@ public:
   int verify_permission(optional_yield y) override;
   void execute(optional_yield y) override;
   const char* name() const override { return "delete_bucket_encryption"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.ENCRYPTION", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_DELETE_BUCKET_ENCRYPTION; }
+  uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
+};
+
+class RGWPutBucketOwnershipControls : public RGWOp {
+ protected:
+  rgw::s3::OwnershipControls ownership;
+  bufferlist data;
+ public:
+  virtual int get_params(optional_yield y) = 0;
+  int verify_permission(optional_yield y) override;
+  void execute(optional_yield y) override;
+  const char* name() const override { return "put_bucket_ownership_controls"; }
+  RGWOpType get_type() override { return RGW_OP_PUT_BUCKET_OWNERSHIP_CONTROLS; }
+  uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
+};
+
+class RGWGetBucketOwnershipControls : public RGWOp {
+ protected:
+  rgw::s3::OwnershipControls ownership;
+ public:
+  int verify_permission(optional_yield y) override;
+  void execute(optional_yield y) override;
+  const char* name() const override { return "get_bucket_ownership_controls"; }
+  RGWOpType get_type() override { return RGW_OP_GET_BUCKET_OWNERSHIP_CONTROLS; }
+  uint32_t op_mask() override { return RGW_OP_TYPE_READ; }
+};
+
+class RGWDeleteBucketOwnershipControls : public RGWOp {
+ public:
+  int verify_permission(optional_yield y) override;
+  void execute(optional_yield y) override;
+  const char* name() const override { return "delete_bucket_ownership_controls"; }
+  RGWOpType get_type() override { return RGW_OP_DELETE_BUCKET_OWNERSHIP_CONTROLS; }
   uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
 };
 
@@ -1818,6 +2053,7 @@ public:
 
   void send_response() override = 0;
   const char* name() const override { return "get_request_payment"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.REQUEST_PAYMENT", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_GET_REQUEST_PAYMENT; }
   uint32_t op_mask() override { return RGW_OP_TYPE_READ; }
 };
@@ -1837,24 +2073,28 @@ public:
 
   void send_response() override = 0;
   const char* name() const override { return "set_request_payment"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.REQUEST_PAYMENT", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_SET_REQUEST_PAYMENT; }
   uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
 };
 
 class RGWInitMultipart : public RGWOp {
 protected:
+  RGWObjTags obj_tags;
   std::string upload_id;
   RGWAccessControlPolicy policy;
   ceph::real_time mtime;
-  jspan multipart_trace;
+  jspan_ptr multipart_trace;
+  //object lock
+  std::optional<RGWObjectRetention> obj_retention = std::nullopt;
+  std::optional<RGWObjectLegalHold> obj_legal_hold = std::nullopt;
+  rgw::sal::Attrs attrs;
+  rgw::cksum::Type cksum_algo{rgw::cksum::Type::none};
+  uint16_t cksum_flags{rgw::cksum::Cksum::FLAG_CKSUM_NONE};
 
 public:
   RGWInitMultipart() {}
 
-  void init(rgw::sal::Driver* driver, req_state *s, RGWHandler *h) override {
-    RGWOp::init(driver, s, h);
-    policy.set_ctx(s->cct);
-  }
   int verify_permission(optional_yield y) override;
   void pre_exec() override;
   void execute(optional_yield y) override;
@@ -1862,6 +2102,7 @@ public:
   virtual int get_params(optional_yield y) = 0;
   void send_response() override = 0;
   const char* name() const override { return "init_multipart"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.UPLOADS", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_INIT_MULTIPART; }
   uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
   virtual int prepare_encryption(std::map<std::string, bufferlist>& attrs) { return 0; }
@@ -1874,7 +2115,15 @@ protected:
   std::string version_id;
   bufferlist data;
   std::unique_ptr<rgw::sal::MPSerializer> serializer;
-  jspan multipart_trace;
+  jspan_ptr multipart_trace;
+  ceph::real_time upload_time;
+  std::unique_ptr<rgw::sal::Notification> res;
+  std::unique_ptr<rgw::sal::Object> meta_obj;
+  std::optional<rgw::cksum::Cksum> cksum;
+  std::optional<std::string> armored_cksum;
+  off_t ofs = 0;
+  const char *if_match{nullptr};
+  const char *if_nomatch{nullptr};
 
 public:
   RGWCompleteMultipart() {}
@@ -1887,15 +2136,19 @@ public:
   void complete() override;
 
   virtual int get_params(optional_yield y) = 0;
+  virtual int verify_encryption(std::map<std::string, bufferlist>& attrs,
+                                rgw::cksum::Type cksum_type) { return 0; }
   void send_response() override = 0;
   const char* name() const override { return "complete_multipart"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.UPLOAD", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_COMPLETE_MULTIPART; }
   uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
+  bool always_do_bucket_logging() const override { return false; }
 };
 
 class RGWAbortMultipart : public RGWOp {
 protected:
-  jspan multipart_trace;
+  jspan_ptr multipart_trace;
 public:
   RGWAbortMultipart() {}
 
@@ -1905,6 +2158,7 @@ public:
 
   void send_response() override = 0;
   const char* name() const override { return "abort_multipart"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.UPLOAD", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_ABORT_MULTIPART; }
   uint32_t op_mask() override { return RGW_OP_TYPE_DELETE; }
 };
@@ -1918,6 +2172,7 @@ protected:
   RGWAccessControlPolicy policy;
   bool truncated;
   rgw_placement_rule* placement;
+  std::optional<rgw::cksum::Cksum> cksum;
 
 public:
   RGWListMultipart() {
@@ -1926,10 +2181,6 @@ public:
     truncated = false;
   }
 
-  void init(rgw::sal::Driver* driver, req_state *s, RGWHandler *h) override {
-    RGWOp::init(driver, s, h);
-    policy = RGWAccessControlPolicy(s->cct);
-  }
   int verify_permission(optional_yield y) override;
   void pre_exec() override;
   void execute(optional_yield y) override;
@@ -1937,6 +2188,7 @@ public:
   virtual int get_params(optional_yield y) = 0;
   void send_response() override = 0;
   const char* name() const override { return "list_multipart"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.UPLOAD", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_LIST_MULTIPART; }
   uint32_t op_mask() override { return RGW_OP_TYPE_READ; }
 };
@@ -1976,6 +2228,7 @@ public:
   virtual int get_params(optional_yield y) = 0;
   void send_response() override = 0;
   const char* name() const override { return "list_bucket_multiparts"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.UPLOADS", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_LIST_BUCKET_MULTIPARTS; }
   uint32_t op_mask() override { return RGW_OP_TYPE_READ; }
 };
@@ -2028,30 +2281,21 @@ public:
   }
 };
 
-
 class RGWDeleteMultiObj : public RGWOp {
   /**
    * Handles the deletion of an individual object and uses
-   * set_partial_response to record the outcome. 
+   * set_partial_response to record the outcome.
    */
-  void handle_individual_object(const rgw_obj_key& o,
-				optional_yield y,
-                                boost::asio::deadline_timer *formatter_flush_cond);
-  
-  /**
-   * When the request is being executed in a coroutine, performs
-   * the actual formatter flushing and is responsible for the
-   * termination condition (when when all partial object responses
-   * have been sent). Note that the formatter flushing must be handled
-   * on the coroutine that invokes the execute method vs. the 
-   * coroutines that are spawned to handle individual objects because
-   * the flush logic uses a yield context that was captured
-   * and saved on the req_state vs. one that is passed on the stack.
-   * This is a no-op in the case where we're not executing as a coroutine.
-   */
-  void wait_flush(optional_yield y,
-                  boost::asio::deadline_timer *formatter_flush_cond,
-                  std::function<bool()> predicate);
+  void handle_individual_object(const RGWMultiDelObject& object,
+                                optional_yield y,
+                                const bool skip_olh_obj_update = false);
+
+  void handle_objects(const std::vector<RGWMultiDelObject>& objects,
+                      uint32_t max_aio, boost::asio::yield_context yield);
+
+  int run_lua_script(rgw::lua::context ctx,
+                     const rgw::sal::Object* multi_delete_obj,
+                     optional_yield y);
 
 protected:
   std::vector<delete_multi_obj_entry> ops_log_entries;
@@ -2059,7 +2303,6 @@ protected:
   rgw::sal::Bucket* bucket;
   bool quiet;
   bool status_dumped;
-  bool acl_allowed = false;
   bool bypass_perm;
   bool bypass_governance_mode;
 
@@ -2071,18 +2314,21 @@ public:
     bypass_governance_mode = false;
   }
 
+  int init_processing(optional_yield y) override;
   int verify_permission(optional_yield y) override;
   void pre_exec() override;
   void execute(optional_yield y) override;
+  void send_response() override;
 
   virtual int get_params(optional_yield y) = 0;
   virtual void send_status() = 0;
   virtual void begin_response() = 0;
   virtual void send_partial_response(const rgw_obj_key& key, bool delete_marker,
-                                     const std::string& marker_version_id, int ret,
-                                     boost::asio::deadline_timer *formatter_flush_cond) = 0;
+                                     const std::string& marker_version_id,
+                                     int ret) = 0;
   virtual void end_response() = 0;
   const char* name() const override { return "multi_object_delete"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.DELETE_MULTI_OBJECT", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_DELETE_MULTI_OBJ; }
   uint32_t op_mask() override { return RGW_OP_TYPE_DELETE; }
 
@@ -2104,11 +2350,7 @@ extern int rgw_build_bucket_policies(const DoutPrefixProvider *dpp, rgw::sal::Dr
 				     req_state* s, optional_yield y);
 extern int rgw_build_object_policies(const DoutPrefixProvider *dpp, rgw::sal::Driver* driver,
 				     req_state *s, bool prefetch_data, optional_yield y);
-extern void rgw_build_iam_environment(rgw::sal::Driver* driver,
-				      req_state* s);
-extern std::vector<rgw::IAM::Policy> get_iam_user_policy_from_attr(CephContext* cct,
-                        std::map<std::string, bufferlist>& attrs,
-                        const std::string& tenant);
+extern void rgw_build_iam_environment(req_state* s);
 
 inline int get_system_versioning_params(req_state *s,
 					uint64_t *olh_epoch,
@@ -2178,7 +2420,16 @@ inline int rgw_get_request_metadata(const DoutPrefixProvider *dpp,
       "x-amz-server-side-encryption-customer-algorithm",
       "x-amz-server-side-encryption-customer-key",
       "x-amz-server-side-encryption-customer-key-md5",
-      "x-amz-storage-class"
+      "x-amz-copy-source-server-side-encryption-customer-algorithm",
+      "x-amz-copy-source-server-side-encryption-customer-key",
+      "x-amz-copy-source-server-side-encryption-customer-key-md5",
+      /* XXX agreed w/cbodley that probably a cleanup is needed here--we probably
+       * don't want to store these, esp. under user.rgw */
+      "x-amz-storage-class",
+      "x-amz-content-sha256",
+      "x-amz-checksum-algorithm",
+      "x-amz-date",
+      "x-amz-tagging"
   };
 
   size_t valid_meta_count = 0;
@@ -2205,7 +2456,7 @@ inline int rgw_get_request_metadata(const DoutPrefixProvider *dpp,
         return -ENAMETOOLONG;
       }
 
-      /* Similar remarks apply to the check for value size. We're veryfing
+      /* Similar remarks apply to the check for value size. We're verifying
        * it early at the RGW's side as it's being claimed in /info. */
       const auto max_attr_size = cct->_conf->rgw_max_attr_size;
       if (max_attr_size && xattr.length() > max_attr_size) {
@@ -2237,25 +2488,21 @@ inline void encode_delete_at_attr(boost::optional<ceph::real_time> delete_at,
 {
   if (delete_at == boost::none) {
     return;
-  } 
+  }
 
   bufferlist delatbl;
   encode(*delete_at, delatbl);
   attrs[RGW_ATTR_DELETE_AT] = delatbl;
 } /* encode_delete_at_attr */
 
-inline void encode_obj_tags_attr(RGWObjTags* obj_tags, std::map<std::string, bufferlist>& attrs)
+inline void encode_obj_tags_attr(const RGWObjTags& obj_tags, std::map<std::string, bufferlist>& attrs)
 {
-  if (obj_tags == nullptr){
-    // we assume the user submitted a tag format which we couldn't parse since
-    // this wouldn't be parsed later by get/put obj tags, lets delete if the
-    // attr was populated
+  if (obj_tags.empty()) {
     return;
   }
-
   bufferlist tagsbl;
-  obj_tags->encode(tagsbl);
-  attrs[RGW_ATTR_TAGS] = tagsbl;
+  obj_tags.encode(tagsbl);
+  attrs[RGW_ATTR_TAGS] = std::move(tagsbl);
 }
 
 inline int encode_dlo_manifest_attr(const char * const dlo_manifest,
@@ -2274,16 +2521,17 @@ inline int encode_dlo_manifest_attr(const char * const dlo_manifest,
   return 0;
 } /* encode_dlo_manifest_attr */
 
-inline void complete_etag(MD5& hash, std::string *etag)
+inline void complete_etag(MD5& hash, std::string* etag)
 {
+  if (!etag) {
+    return;
+  }
   char etag_buf[CEPH_CRYPTO_MD5_DIGESTSIZE];
-  char etag_buf_str[CEPH_CRYPTO_MD5_DIGESTSIZE * 2 + 16];
 
   hash.Final((unsigned char *)etag_buf);
-  buf_to_hex((const unsigned char *)etag_buf, CEPH_CRYPTO_MD5_DIGESTSIZE,
-	    etag_buf_str);
-
-  *etag = etag_buf_str;
+  etag->clear();
+  etag->reserve(CEPH_CRYPTO_MD5_DIGESTSIZE * 2);
+  buf_to_hex(etag_buf, std::back_inserter(*etag));
 } /* complete_etag */
 
 using boost::container::flat_map;
@@ -2396,6 +2644,7 @@ public:
   void execute(optional_yield y) override;
   int get_params(optional_yield y);
   const char* name() const override { return "put_bucket_policy"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.BUCKETPOLICY", s->info.method); }
   RGWOpType get_type() override {
     return RGW_OP_PUT_BUCKET_POLICY;
   }
@@ -2412,6 +2661,7 @@ public:
   }
   void execute(optional_yield y) override;
   const char* name() const override { return "get_bucket_policy"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.BUCKETPOLICY", s->info.method); }
   RGWOpType get_type() override {
     return RGW_OP_GET_BUCKET_POLICY;
   }
@@ -2428,6 +2678,7 @@ public:
   void execute(optional_yield y) override;
   int get_params(optional_yield y);
   const char* name() const override { return "delete_bucket_policy"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.BUCKETPOLICY", s->info.method); }
   RGWOpType get_type() override {
     return RGW_OP_DELETE_BUCKET_POLICY;
   }
@@ -2447,6 +2698,7 @@ public:
   virtual void send_response() override = 0;
   virtual int get_params(optional_yield y) = 0;
   const char* name() const override { return "put_bucket_object_lock"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.OBJECT_LOCK", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_PUT_BUCKET_OBJ_LOCK; }
   uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
 };
@@ -2458,6 +2710,7 @@ public:
   void execute(optional_yield y) override;
   virtual void send_response() override = 0;
   const char* name() const override {return "get_bucket_object_lock"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.OBJECT_LOCK", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_GET_BUCKET_OBJ_LOCK; }
   uint32_t op_mask() override { return RGW_OP_TYPE_READ; }
 };
@@ -2476,6 +2729,7 @@ public:
   virtual void send_response() override = 0;
   virtual int get_params(optional_yield y) = 0;
   const char* name() const override { return "put_obj_retention"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.RETENTION", s->info.method); }
   uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
   RGWOpType get_type() override { return RGW_OP_PUT_OBJ_RETENTION; }
 };
@@ -2489,6 +2743,7 @@ public:
   void execute(optional_yield y) override;
   virtual void send_response() override = 0;
   const char* name() const override {return "get_obj_retention"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.RETENTION", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_GET_OBJ_RETENTION; }
   uint32_t op_mask() override { return RGW_OP_TYPE_READ; }
 };
@@ -2504,6 +2759,7 @@ public:
   virtual void send_response() override = 0;
   virtual int get_params(optional_yield y) = 0;
   const char* name() const override { return "put_obj_legal_hold"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.LEGAL_HOLD", s->info.method); }
   uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
   RGWOpType get_type() override { return RGW_OP_PUT_OBJ_LEGAL_HOLD; }
 };
@@ -2517,6 +2773,7 @@ public:
   void execute(optional_yield y) override;
   virtual void send_response() override = 0;
   const char* name() const override {return "get_obj_legal_hold"; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.LEGAL_HOLD", s->info.method); }
   RGWOpType get_type() override { return RGW_OP_GET_OBJ_LEGAL_HOLD; }
   uint32_t op_mask() override { return RGW_OP_TYPE_READ; }
 };
@@ -2601,6 +2858,7 @@ public:
   int verify_permission(optional_yield y) override;
   const char* name() const override { return "put_bucket_public_access_block";}
   virtual RGWOpType get_type() override { return RGW_OP_PUT_BUCKET_PUBLIC_ACCESS_BLOCK; }
+  std::string canonical_name() const override { return fmt::format("REST.{}.PUBLIC_ACCESS_BLOCK", s->info.method); }
   virtual uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
   int get_params(optional_yield y);
   void execute(optional_yield y) override;
@@ -2613,6 +2871,7 @@ protected:
 public:
   int verify_permission(optional_yield y) override;
   const char* name() const override { return "get_bucket_public_access_block";}
+  std::string canonical_name() const override { return fmt::format("REST.{}.PUBLIC_ACCESS_BLOCK", s->info.method); }
   virtual RGWOpType get_type() override { return RGW_OP_GET_BUCKET_PUBLIC_ACCESS_BLOCK; }
   virtual uint32_t op_mask() override { return RGW_OP_TYPE_READ; }
   int get_params(optional_yield y);
@@ -2626,6 +2885,7 @@ protected:
 public:
   int verify_permission(optional_yield y) override;
   const char* name() const override { return "delete_bucket_public_access_block";}
+  std::string canonical_name() const override { return fmt::format("REST.{}.PUBLIC_ACCESS_BLOCK", s->info.method); }
   virtual RGWOpType get_type() override { return RGW_OP_DELETE_BUCKET_PUBLIC_ACCESS_BLOCK; }
   virtual uint32_t op_mask() override { return RGW_OP_TYPE_WRITE; }
   int get_params(optional_yield y);
@@ -2670,4 +2930,14 @@ int rgw_policy_from_attrset(const DoutPrefixProvider *dpp,
                             std::map<std::string, bufferlist>& attrset,
                             RGWAccessControlPolicy *policy);
 
-#endif /* CEPH_RGW_OP_H */
+int get_decrypt_filter(
+  std::unique_ptr<RGWGetObj_Filter>* filter,
+  RGWGetObj_Filter* cb,
+  req_state* s,
+  std::map<std::string, bufferlist>& attrs,
+  bufferlist* manifest_bl,
+  std::map<std::string, std::string>* crypt_http_responses,
+  bool copy_source,
+  uint32_t part_num = 0,
+  off_t encrypted_total_size = 0,
+  const rgw_crypt_src_identity* src_identity = nullptr);

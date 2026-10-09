@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -11,6 +12,8 @@
  * Foundation.  See file COPYING.
  *
  */
+
+#include "common/Cond.h"
 #include "include/rados/librados.hpp"
 #include "include/rbd/librbd.hpp"
 #include "include/stringify.h"
@@ -202,7 +205,7 @@ public:
     librbd::ImageOptions clone_opts;
     clone_opts.set(RBD_IMAGE_OPTION_FEATURES, ictx->features);
     EXPECT_EQ(0, librbd::clone(m_local_io_ctx, m_local_image_id.c_str(),
-                               nullptr, "snap1", m_local_io_ctx,
+                               nullptr, CEPH_NOSNAP, "snap1", m_local_io_ctx,
                                clone_id.c_str(), "clone1", clone_opts,
                                GLOBAL_CLONE_IMAGE_ID, m_remote_mirror_uuid));
 

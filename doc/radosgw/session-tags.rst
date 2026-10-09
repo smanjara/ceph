@@ -5,7 +5,7 @@ Session tags for Attribute Based Access Control in STS
 Session tags are key-value pairs that can be passed while federating a user (currently it
 is only supported as part of the web token passed to AssumeRoleWithWebIdentity). The session
 tags are passed along as aws:PrincipalTag in the session credentials (temporary credentials)
-that is returned back by STS. These Principal Tags consists of the session tags that come in
+that is returned back by STS. These Principal Tags consist of the session tags that come in
 as part of the web token and the tags that are attached to the role being assumed. Please note
 that the tags have to be always specified in the following namespace: https://aws.amazon.com/tags.
 
@@ -43,10 +43,13 @@ An example of the session tags that are passed in by the IDP in the web token is
         "active": true
     }
 
-Steps to configure Keycloak to pass tags in the web token are described here:doc:`keycloak`.
+Steps to configure Keycloak to pass tags in the web token are described here:
+:ref:`radosgw_keycloak`.
 
-The trust policy must have 'sts:TagSession' permission if the web token passed in by the federated user contains session tags, otherwise
-the AssumeRoleWithWebIdentity action will fail. An example of the trust policy with sts:TagSession is as follows:
+The trust policy must have 'sts:TagSession' permission if the web token passed
+in by the federated user contains session tags, otherwise the
+AssumeRoleWithWebIdentity action will fail. An example of the trust policy with
+sts:TagSession is as follows:
 
 .. code-block:: python
 
@@ -67,7 +70,7 @@ Tag Keys
 The following are the tag keys that can be used in the role's trust policy or the role's permission policy:
 
 1. aws:RequestTag: This key is used to compare the key-value pair passed in the request with the key-value pair
-in the role's trust policy. In case of AssumeRoleWithWebIdentity, the session tags that are passed by the idp
+in the role's trust policy. In case of AssumeRoleWithWebIdentity, the session tags that are passed by the IDP
 in the web token can be used as aws:RequestTag in the role's trust policy based on which a federated user can be
 allowed to assume a role.
 
@@ -87,7 +90,7 @@ An example of a role trust policy that uses aws:RequestTag is as follows:
 	}
 
 2. aws:PrincipalTag: This key is used to compare the key-value pair attached to the principal with the key-value pair
-in the policy. In case of AssumeRoleWithWebIdentity, the session tags that are passed by the idp in the web token appear
+in the policy. In case of AssumeRoleWithWebIdentity, the session tags that are passed by the IDP in the web token appear
 as Principal tags in the temporary credentials once a user has been authenticated, and these tags can be used as
 aws:PrincipalTag in the role's permission policy.
 
@@ -101,7 +104,7 @@ An example of a role permission policy that uses aws:PrincipalTag is as follows:
 	    {
 	        "Effect":"Allow",
 	        "Action":["s3:*"],
-            "Resource":["arn:aws:s3::t1tenant:my-test-bucket","arn:aws:s3::t1tenant:my-test-bucket/*],"+
+            "Resource":["arn:aws:s3::t1tenant:my-test-bucket","arn:aws:s3::t1tenant:my-test-bucket/*"],
 	        "Condition":{"StringEquals":{"aws:PrincipalTag/Department":"Engineering"}}
 	    }]
 	}
@@ -145,7 +148,7 @@ An example of a role's trust policy that uses aws:TagKeys is as follows:
 	        "Effect":"Allow",
 	        "Action":["sts:AssumeRoleWithWebIdentity","sts:TagSession"],
 	        "Principal":{"Federated":["arn:aws:iam:::oidc-provider/localhost:8080/auth/realms/quickstart"]},
-	        "Condition":{"ForAllValues:StringEquals":{"aws:TagKeys":["Marketing,Engineering"]}}
+	        "Condition":{"ForAllValues:StringEquals":{"aws:TagKeys":["Department"]}}
 	    }]
 	}
 
@@ -165,13 +168,13 @@ An example of a role's permission policy that uses s3:ResourceTag is as follows:
         {
             "Effect":"Allow",
             "Action":["s3:PutBucketTagging"],
-            "Resource":["arn:aws:s3::t1tenant:my-test-bucket\","arn:aws:s3::t1tenant:my-test-bucket/*"]
+            "Resource":["arn:aws:s3::t1tenant:my-test-bucket","arn:aws:s3::t1tenant:my-test-bucket/*"]
         },
         {
             "Effect":"Allow",
             "Action":["s3:*"],
             "Resource":["*"],
-            "Condition":{"StringEquals":{"s3:ResourceTag/Department":\"Engineering"}}
+            "Condition":{"StringEquals":{"s3:ResourceTag/Department":"Engineering"}}
         }
     }
 
@@ -210,7 +213,7 @@ the s3 resource (object/ bucket):
         {
             "Effect":"Allow",
             "Action":["s3:PutBucketTagging"],
-            "Resource":["arn:aws:s3::t1tenant:my-test-bucket\","arn:aws:s3::t1tenant:my-test-bucket/*"]
+            "Resource":["arn:aws:s3::t1tenant:my-test-bucket","arn:aws:s3::t1tenant:my-test-bucket/*"]
         },
         {
             "Effect":"Allow",

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include <string.h>
 
@@ -8,11 +8,11 @@
 
 #include "include/types.h"
 
-#include "rgw_user.h"
+#include "driver/rados/rgw_user.h"
 #include "rgw_lc_s3.h"
 
 
-#define dout_subsys ceph_subsys_rgw
+#define dout_subsys ceph_subsys_rgw_lifecycle
 
 using namespace std;
 
@@ -64,11 +64,15 @@ void LCExpiration_S3::decode_xml(XMLObj *obj)
 
 void LCNoncurExpiration_S3::decode_xml(XMLObj *obj)
 {
+  RGWXMLDecoder::decode_xml("NewerNoncurrentVersions", newer_noncurrent, obj);
   RGWXMLDecoder::decode_xml("NoncurrentDays", days, obj, true);
 }
 
 void LCNoncurExpiration_S3::dump_xml(Formatter *f) const
 {
+  if(has_newer()) {
+    encode_xml("NewerNoncurrentVersions", newer_noncurrent, f);
+  }
   encode_xml("NoncurrentDays", days, f);
 }
 
@@ -128,6 +132,12 @@ void LCFilter_S3::dump_xml(Formatter *f) const
       encode_xml("ArchiveZone", "", f);
     }
   }
+  if (has_size_gt()) {
+    encode_xml("ObjectSizeGreaterThan", size_gt, f);
+  }
+  if (has_size_lt()) {
+    encode_xml("ObjectSizeLessThan", size_lt, f);
+  }
   if (multi) {
     f->close_section(); // And
   }
@@ -154,6 +164,13 @@ void LCFilter_S3::decode_xml(XMLObj *obj)
   /* parse optional ArchiveZone flag (extension) */
   if (o->find_first("ArchiveZone")) {
     flags |= make_flag(LCFlagType::ArchiveZone);
+  }
+
+  RGWXMLDecoder::decode_xml("ObjectSizeGreaterThan", size_gt, o, false);
+  RGWXMLDecoder::decode_xml("ObjectSizeLessThan", size_lt, o, false);
+  if (has_size_gt() && has_size_lt() &&
+      (size_lt <= size_gt)) {
+    throw RGWXMLDecoder::err("Filter maximum object size must be larger than the minimum object size");
   }
 
   obj_tags.clear(); // why is this needed?
@@ -218,6 +235,13 @@ void LCRule_S3::decode_xml(XMLObj *obj)
 
   RGWXMLDecoder::decode_xml("ID", id, obj);
 
+  if (!RGWXMLDecoder::decode_xml("Status", status, obj)) {
+    throw RGWXMLDecoder::err("missing Status in Rule");
+  }
+  if (status.compare("Enabled") != 0 && status.compare("Disabled") != 0) {
+    throw RGWXMLDecoder::err("bad Status in Rule");
+  }
+
   LCFilter_S3 filter_s3;
   if (!RGWXMLDecoder::decode_xml("Filter", filter_s3, obj)) {
     // Ideally the following code should be deprecated and we should return
@@ -231,15 +255,10 @@ void LCRule_S3::decode_xml(XMLObj *obj)
     if (!RGWXMLDecoder::decode_xml("Prefix", prefix, obj)) {
       throw RGWXMLDecoder::err("missing Prefix in Filter");
     }
+  } else {
+    filter_s3.set_flag(LCFlagType::Filter);
   }
   filter = (LCFilter)filter_s3;
-
-  if (!RGWXMLDecoder::decode_xml("Status", status, obj)) {
-    throw RGWXMLDecoder::err("missing Status in Filter");
-  }
-  if (status.compare("Enabled") != 0 && status.compare("Disabled") != 0) {
-    throw RGWXMLDecoder::err("bad Status in Filter");
-  }
 
   LCExpiration_S3 s3_expiration;
   LCNoncurExpiration_S3 s3_noncur_expiration;

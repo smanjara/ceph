@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# -*- mode:text; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-# vim: ts=8 sw=2 smarttab
+# -*- mode:text; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+# vim: ts=8 sw=2 sts=2 expandtab
+
 #
 # test the handling of a corrupted SnapMapper DB by Scrub
 
@@ -13,7 +14,7 @@ function run() {
 
   export CEPH_MON="127.0.0.1:7144" # git grep '\<7144\>' : there must be only one
   export CEPH_ARGS
-  CEPH_ARGS+="--fsid=$(uuidgen) --auth-supported=none "
+  CEPH_ARGS+="--fsid=$(uuidgen) --auth_cluster_required=none --auth_service_required=none --auth_client_required=none "
   CEPH_ARGS+="--mon-host=$CEPH_MON "
 
   export -n CEPH_CLI_TEST_DUP_COMMAND
@@ -77,7 +78,7 @@ function TEST_truncated_sna_record() {
     (( extr_dbg >= 1 )) && rados --format json-pretty -p $poolname listsnaps $objname
 
     # scrub the PG
-    ceph pg $pgid deep_scrub || return 1
+    ceph pg $pgid deep-scrub || return 1
 
     # we aren't just waiting for the scrub to terminate, but also for the
     # logs to be published
@@ -149,7 +150,7 @@ function TEST_truncated_sna_record() {
     local cur_prim=`ceph --format=json-pretty osd map $poolname $objname | jq -r '.up[0]'`
     ceph pg dump pgs
     sleep 2
-    ceph pg $pgid deep_scrub || return 1
+    ceph pg $pgid deep-scrub || return 1
     sleep 5
     ceph pg dump pgs
     (( extr_dbg >= 1 )) && grep -a "ERR" $dir/osd.$cur_prim.log
@@ -161,7 +162,7 @@ function TEST_truncated_sna_record() {
     echo "prev count: $prev_err_cnt"
 
     # scrub again. No errors expected this time
-    ceph pg $pgid deep_scrub || return 1
+    ceph pg $pgid deep-scrub || return 1
     sleep 5
     ceph pg dump pgs
     (( extr_dbg >= 1 )) && grep -a "ERR" $dir/osd.$cur_prim.log

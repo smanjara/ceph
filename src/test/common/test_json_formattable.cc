@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -336,13 +337,13 @@ TEST(formatable, encode_simple) {
 
 
 struct struct1 {
-  long i;
+  long long i;
   string s;
   bool b;
 
   struct1() {
     void *p = (void *)this;
-    i = (long)p;
+    i = (long long)p;
     char buf[32];
     snprintf(buf, sizeof(buf), "%p", p);
     s = buf;
@@ -363,12 +364,12 @@ struct struct1 {
 
   bool compare(const JSONFormattable& jf) const {
     bool ret = (s == (string)jf["s"] &&
-            i == (long)jf["i"] &&
+            i == (long long)jf["i"] &&
             b == (bool)jf["b"]);
 
     if (!ret) {
       cout << "failed comparison: s=" << s << " jf[s]=" << (string)jf["s"] << 
-        " i=" << i << " jf[i]=" << (long)jf["i"] << " b=" << b << " jf[b]=" << (bool)jf["b"] << std::endl;
+        " i=" << i << " jf[i]=" << (long long)jf["i"] << " b=" << b << " jf[b]=" << (bool)jf["b"] << std::endl;
       dumpf(jf);
     }
 
@@ -383,7 +384,7 @@ struct struct2 {
 
   struct2() {
     void *p = (void *)this;
-    long i = (long)p;
+    long long i = (long long)p;
     v.resize((i >> 16) % 16 + 1);
   }
 
@@ -449,5 +450,42 @@ TEST(formatable, encode_struct) {
 
   ASSERT_EQ((string)jf2["foo"], "bar");
   ASSERT_TRUE(s2.compare(jf2["s2"]));
+}
+
+// keep non-ASCII characters as UTF-8
+// escaping every byte of a multi-byte character on its own, would make a parser
+// read each byte back as a separate code point: "café" would come back as "cafÃ©"
+TEST(JSONObj, NonStringNodeKeepsUtf8)
+{
+  // the key and the value both hold a two-byte character
+  const string json = R"({"filter": {"café": "café"}, "list": ["café"], "n": 1})";
+  JSONParser p;
+  ASSERT_TRUE(p.parse(json.c_str(), json.size()));
+
+  auto* filter = p.find_obj("filter");
+  ASSERT_NE(filter, nullptr);
+  ASSERT_TRUE(filter->is_object());
+  const string text = filter->get_data();
+  EXPECT_NE(text.find("café"), string::npos) << text;
+  EXPECT_EQ(text.find("\\u00"), string::npos) << text;
+
+  // and the text parses back to the same key and value
+  JSONParser again;
+  ASSERT_TRUE(again.parse(text.c_str(), text.size()));
+  auto* key = again.find_obj("café");
+  ASSERT_NE(key, nullptr) << text;
+  EXPECT_EQ(key->get_data(), "café");
+
+  // the same for an array node
+  auto* list = p.find_obj("list");
+  ASSERT_NE(list, nullptr);
+  ASSERT_TRUE(list->is_array());
+  EXPECT_NE(list->get_data().find("café"), string::npos) << list->get_data();
+
+  // a string node is returned as is, and a number is unaffected
+  EXPECT_EQ(key->get_data(), "café");
+  auto* n = p.find_obj("n");
+  ASSERT_NE(n, nullptr);
+  EXPECT_EQ(n->get_data(), "1");
 }
 

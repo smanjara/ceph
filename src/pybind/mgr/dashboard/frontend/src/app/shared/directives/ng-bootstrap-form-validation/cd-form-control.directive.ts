@@ -25,8 +25,17 @@
  * Based on https://github.com/third774/ng-bootstrap-form-validation
  */
 
-import { Directive, Host, HostBinding, Input, Optional, SkipSelf } from '@angular/core';
-import { ControlContainer, FormControl } from '@angular/forms';
+import {
+  Directive,
+  ElementRef,
+  Host,
+  HostBinding,
+  HostListener,
+  Input,
+  Optional,
+  SkipSelf
+} from '@angular/core';
+import { ControlContainer, UntypedFormControl } from '@angular/forms';
 
 export function controlPath(name: string, parent: ControlContainer): string[] {
   // tslint:disable-next-line:no-non-null-assertion
@@ -35,7 +44,8 @@ export function controlPath(name: string, parent: ControlContainer): string[] {
 
 @Directive({
   // eslint-disable-next-line
-  selector: '.form-control,.form-check-input,.custom-control-input'
+  selector: '.form-control,.form-check-input,.custom-control-input',
+  standalone: false
 })
 export class CdFormControlDirective {
   @Input()
@@ -63,12 +73,26 @@ export class CdFormControlDirective {
     return controlPath(this.formControlName, this.parent);
   }
 
-  get control(): FormControl {
+  get control(): UntypedFormControl {
     return this.formDirective && this.formDirective.getControl(this);
   }
 
   get formDirective(): any {
     return this.parent ? this.parent.formDirective : null;
+  }
+
+  @HostListener('input')
+  @HostListener('blur')
+  onInput() {
+    if (!this.control) {
+      return;
+    }
+    const nativeElement = this.elRef.nativeElement as HTMLInputElement;
+    if (nativeElement?.validity?.badInput) {
+      const errors: Record<string, any> = { ...this.control.errors, pattern: true };
+      delete errors['required'];
+      this.control.setErrors(errors);
+    }
   }
 
   constructor(
@@ -77,6 +101,7 @@ export class CdFormControlDirective {
     @Optional()
     @Host()
     @SkipSelf()
-    private parent: ControlContainer
+    private parent: ControlContainer,
+    private elRef: ElementRef
   ) {}
 }

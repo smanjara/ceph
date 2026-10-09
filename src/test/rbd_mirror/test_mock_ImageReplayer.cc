@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "cls/journal/cls_journal_types.h"
 #include "librbd/journal/Types.h"
@@ -178,9 +178,11 @@ struct StateBuilder<librbd::MockTestImageCtx> {
   }
 
   MOCK_METHOD1(close, void(Context*));
-  MOCK_METHOD5(create_replayer, Replayer*(Threads<librbd::MockTestImageCtx>*,
+  MOCK_METHOD6(create_replayer, Replayer*(Threads<librbd::MockTestImageCtx>*,
                                           InstanceWatcher<librbd::MockTestImageCtx>*,
-                                          const std::string&, PoolMetaCache*,
+                                          const std::string&,
+                                          const std::string&,
+                                          PoolMetaCache*,
                                           ReplayerListener*));
 
   StateBuilder() {
@@ -312,8 +314,8 @@ public:
 
   void expect_create_replayer(MockStateBuilder& mock_state_builder,
                               MockReplayer& mock_replayer) {
-    EXPECT_CALL(mock_state_builder, create_replayer(_, _, _, _, _))
-      .WillOnce(WithArg<4>(
+    EXPECT_CALL(mock_state_builder, create_replayer(_, _, _, _, _, _))
+      .WillOnce(WithArg<5>(
         Invoke([&mock_replayer]
                (image_replayer::ReplayerListener* replayer_listener) {
           mock_replayer.replayer_listener = replayer_listener;
@@ -614,6 +616,45 @@ TEST_F(TestMockImageReplayer, BootstrapCancel) {
   EXPECT_CALL(mock_bootstrap_request, cancel());
 
   expect_mirror_image_status_exists(false);
+
+  C_SaferCond start_ctx;
+  m_image_replayer->start(&start_ctx);
+  ASSERT_EQ(-ECANCELED, start_ctx.wait());
+}
+
+TEST_F(TestMockImageReplayer, BootstrapRemoteDeletedCancel) {
+  create_local_image();
+  librbd::MockTestImageCtx mock_local_image_ctx(*m_local_image_ctx);
+
+  MockThreads mock_threads(m_threads);
+  expect_work_queue_repeatedly(mock_threads);
+  expect_add_event_after_repeatedly(mock_threads);
+
+  MockImageDeleter mock_image_deleter;
+
+  expect_set_mirror_image_status_repeatedly();
+
+  InSequence seq;
+
+  MockBootstrapRequest mock_bootstrap_request;
+  MockStateBuilder mock_state_builder;
+  EXPECT_CALL(mock_bootstrap_request, send())
+    .WillOnce(Invoke([this, &mock_bootstrap_request, &mock_state_builder,
+		      &mock_local_image_ctx]() {
+	mock_state_builder.local_image_id = mock_local_image_ctx.id;
+	mock_state_builder.remote_image_id = "";
+	*mock_bootstrap_request.state_builder = &mock_state_builder;
+        m_image_replayer->stop(nullptr);
+        mock_bootstrap_request.on_finish->complete(-ENOLINK);
+      }));
+  EXPECT_CALL(mock_bootstrap_request, cancel());
+
+  expect_close(mock_state_builder, 0);
+
+  expect_trash_move(mock_image_deleter, "global image id", false, 0);
+  expect_mirror_image_status_exists(false);
+
+  create_image_replayer(mock_threads);
 
   C_SaferCond start_ctx;
   m_image_replayer->start(&start_ctx);

@@ -39,7 +39,7 @@ Crashed ``radosgw`` process
 ===========================
 
 If the ``radosgw`` process dies, you will normally see a 500 error
-from the web server (apache, nginx, etc.).  In that situation, simply
+from the web server (Apache, NGINX, etc.).  In that situation, simply
 restarting radosgw will restore service.
 
 To diagnose the cause of the crash, check the log in ``/var/log/ceph``
@@ -165,8 +165,8 @@ Object Storage services, you can resolve this problem in a few ways:
 405 MethodNotAllowed
 --------------------
 
-If you receive an 405 error, check to see if you have the S3 subdomain set up correctly. 
-You will need to have a wild card setting in your DNS record for subdomain functionality
+If you receive a 405 error, check to see if you have the S3 subdomain set up correctly.
+You must have a wildcard in your DNS record for subdomain functionality
 to work properly.
 
 Also, check to ensure that the default site is disabled. ::

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -93,11 +94,11 @@ namespace {
       } // page_ix
     }
 
-    int size() { return pages.size(); }
+    int size() const { return pages.size(); }
 
     struct iovec* get_iovs() { return iovs; }
 
-    bool operator==(const ZPageSet& rhs) {
+    bool operator==(const ZPageSet& rhs) const {
       int n = size();
       for (int page_ix = 0; page_ix < n; ++page_ix) {
 	ZPage* p1 = pages[page_ix];

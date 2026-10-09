@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -23,30 +24,20 @@
 class KeyRing;
 
 class CephxClientHandler : public AuthClientHandler {
-  bool starting;
+  bool starting = false;
 
   /* envelope protocol parameters */
-  uint64_t server_challenge;
+  uint64_t server_challenge = 0;
 
   CephXTicketManager tickets;
-  CephXTicketHandler* ticket_handler;
+  CephXTicketHandler* ticket_handler = nullptr;
 
-  RotatingKeyRing* rotating_secrets;
-  KeyRing *keyring;
+  RotatingKeyRing* rotating_secrets = nullptr;
+  KeyRing *keyring = nullptr;
 
 public:
-  CephxClientHandler(CephContext *cct_,
-		     RotatingKeyRing *rsecrets)
-    : AuthClientHandler(cct_),
-      starting(false),
-      server_challenge(0),
-      tickets(cct_),
-      ticket_handler(NULL),
-      rotating_secrets(rsecrets),
-      keyring(rsecrets->get_keyring())
-  {
-    reset();
-  }
+  CephxClientHandler(CephContext *cct_, RotatingKeyRing *rsecrets);
+  ~CephxClientHandler();
 
   CephxClientHandler* clone() const override {
     return new CephxClientHandler(*this);
@@ -65,6 +56,8 @@ public:
   AuthAuthorizer *build_authorizer(uint32_t service_id) const override;
 
   bool need_tickets() override;
+
+  void invalidate_all_tickets() override;
 
   void set_global_id(uint64_t id) override {
     global_id = id;

@@ -65,16 +65,6 @@ ExtractDataFuncT = Callable[[int, Optional[RawImageCounterT], SumImageCounterT],
 
 
 class PerfHandler:
-    user_queries: Dict[PoolKeyT, Dict[str, Any]] = {}
-    image_cache: Dict[str, str] = {}
-
-    lock = Lock()
-    query_condition = Condition(lock)
-    refresh_condition = Condition(lock)
-    thread = None
-
-    image_name_cache: Dict[Tuple[int, str], Dict[str, str]] = {}
-    image_name_refresh_time = datetime.fromtimestamp(0)
 
     @classmethod
     def prepare_regex(cls, value: Any) -> str:
@@ -115,16 +105,37 @@ class PerfHandler:
                 and (pool_key[0] == search_key[0] or not search_key[0]))
 
     def __init__(self, module: Any) -> None:
+        self.user_queries: Dict[PoolKeyT, Dict[str, Any]] = {}
+        self.image_cache: Dict[str, str] = {}
+
+        self.lock = Lock()
+        self.query_condition = Condition(self.lock)
+        self.refresh_condition = Condition(self.lock)
+
+        self.image_name_cache: Dict[Tuple[int, str], Dict[str, str]] = {}
+        self.image_name_refresh_time = datetime.fromtimestamp(0)
+
         self.module = module
         self.log = module.log
 
+        self.stop_thread = False
         self.thread = Thread(target=self.run)
+
+    def setup(self) -> None:
         self.thread.start()
+
+    def shutdown(self) -> None:
+        self.log.info("PerfHandler: shutting down")
+        self.stop_thread = True
+        if self.thread.is_alive():
+            self.log.debug("PerfHandler: joining thread")
+            self.thread.join()
+        self.log.info("PerfHandler: shut down")
 
     def run(self) -> None:
         try:
             self.log.info("PerfHandler: starting")
-            while True:
+            while not self.stop_thread:
                 with self.lock:
                     self.scrub_expired_queries()
                     self.process_raw_osd_perf_counters()
@@ -135,6 +146,9 @@ class PerfHandler:
 
                 self.log.debug("PerfHandler: tick")
 
+        except (rados.ConnectionShutdown, rbd.ConnectionShutdown):
+            self.log.exception("PerfHandler: client blocklisted")
+            self.module.client_blocklisted.set()
         except Exception as ex:
             self.log.fatal("Fatal runtime error: {}\n{}".format(
                 ex, traceback.format_exc()))
@@ -151,15 +165,23 @@ class PerfHandler:
         for query_id in query[QUERY_IDS]:
             res = self.module.get_osd_perf_counters(query_id)
             for counter in res['counters']:
-                # replace pool id from object name if it exists
                 k = counter['k']
-                pool_id = int(k[2][0]) if k[2][0] else int(k[0][0])
+                data_pool_id = int(k[0][0])
                 namespace = k[1][0]
                 image_id = k[2][1]
+                # The metadata pool id is encoded in the object name
+                # for images with a separate data pool (e.g. EC).
+                pool_id = int(k[2][0]) if k[2][0] else data_pool_id
 
-                # ignore metrics from non-matching pools/namespaces
-                if pool_id not in pool_id_map:
+                # Filter by data pool (where I/O takes place)
+                if data_pool_id not in pool_id_map:
                     continue
+
+                # Ensure metadata pool is in pool_id_map for display
+                # and image name resolution
+                if pool_id not in pool_id_map:
+                    pool_id_map[pool_id] = self.module.rados.pool_reverse_lookup(
+                        pool_id)
                 if pool_key[1] is not None and pool_key[1] != namespace:
                     continue
 

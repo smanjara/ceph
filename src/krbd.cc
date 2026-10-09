@@ -30,12 +30,14 @@
 #include <utility>
 
 #include "auth/KeyRing.h"
+#include "common/ceph_context.h"
 #include "common/errno.h"
 #include "common/Formatter.h"
 #include "common/module.h"
 #include "common/run_cmd.h"
 #include "common/safe_io.h"
 #include "common/secret.h"
+#include "common/strtol.h" // for strict_strtoll()
 #include "common/TextTable.h"
 #include "common/Thread.h"
 #include "include/ceph_assert.h"
@@ -190,7 +192,8 @@ static int have_minor_attr(void)
 static int build_map_buf(CephContext *cct, const krbd_spec& spec,
                          const string& options, string *pbuf)
 {
-  bool msgr2 = false;
+  bool msgr2 = true;
+  bool ms_mode_specified = false;
   std::ostringstream oss;
   int r;
 
@@ -200,6 +203,7 @@ static int build_map_buf(CephContext *cct, const krbd_spec& spec,
     if (boost::starts_with(t, "ms_mode=")) {
       /* msgr2 unless ms_mode=legacy */
       msgr2 = t.compare(8, t.npos, "legacy");
+      ms_mode_specified = true;
     }
   }
 
@@ -234,13 +238,14 @@ static int build_map_buf(CephContext *cct, const krbd_spec& spec,
   auto auth_client_required =
     cct->_conf.get_val<std::string>("auth_client_required");
   if (auth_client_required != "none") {
-    r = keyring.from_ceph_context(cct);
+    std::ostringstream err;
+    r = keyring.from_ceph_context(cct, &err);
     auto keyfile = cct->_conf.get_val<std::string>("keyfile");
     auto key = cct->_conf.get_val<std::string>("key");
     if (r == -ENOENT && keyfile.empty() && key.empty())
       r = 0;
     if (r < 0) {
-      std::cerr << "rbd: failed to get secret" << std::endl;
+      std::cerr << "rbd: failed to lookup key: " << err.view() << std::endl;
       return r;
     }
   }
@@ -270,6 +275,12 @@ static int build_map_buf(CephContext *cct, const krbd_spec& spec,
 
   if (!options.empty())
     oss << "," << options;
+
+  /* setting default messenger: msgr2 in prefer-crc mode */
+  if (!ms_mode_specified) {
+    oss << ",ms_mode=prefer-crc";
+  }
+
   if (!spec.nspace_name.empty())
     oss << ",_pool_ns=" << spec.nspace_name;
 

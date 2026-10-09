@@ -6,8 +6,8 @@ import { RouterTestingModule } from '@angular/router/testing';
 
 import { NgbNavModule } from '@ng-bootstrap/ng-bootstrap';
 import moment from 'moment';
-import { NgxPipeFunctionModule } from 'ngx-pipe-function';
-import { ToastrModule } from 'ngx-toastr';
+import { PipesModule } from '~/app/shared/pipes/pipes.module';
+
 import { of } from 'rxjs';
 
 import { RbdService } from '~/app/shared/api/rbd.service';
@@ -35,8 +35,7 @@ describe('RbdTrashListComponent', () => {
       RouterTestingModule,
       SharedModule,
       NgbNavModule,
-      NgxPipeFunctionModule,
-      ToastrModule.forRoot()
+      PipesModule
     ],
     providers: [TaskListService]
   });
@@ -152,7 +151,7 @@ describe('RbdTrashListComponent', () => {
       };
       fixture.detectChanges();
 
-      const purge = fixture.debugElement.query(By.css('.table-actions button .fa-times'));
+      const purge = fixture.debugElement.query(By.css('.table-actions button'));
       expect(purge).not.toBeNull();
     });
 
@@ -165,7 +164,7 @@ describe('RbdTrashListComponent', () => {
       };
       fixture.detectChanges();
 
-      const purge = fixture.debugElement.query(By.css('.table-actions button .fa-times'));
+      const purge = fixture.debugElement.query(By.css('.table-actions button'));
       expect(purge).toBeNull();
     });
   });

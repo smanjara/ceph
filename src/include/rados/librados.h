@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -69,7 +70,7 @@ extern "C" {
  * Flags that can be set on a per-op basis via
  * rados_read_op_set_flags() and rados_write_op_set_flags().
  */
-enum {
+enum librados_op_flag {
   // fail a create operation if the object already exists
   LIBRADOS_OP_FLAG_EXCL               =  0x1,
   // allow the transaction to succeed even if the flagged op fails
@@ -98,7 +99,7 @@ enum {
  *
  * @{
  */
-enum {
+enum librados_cmpxattr_op {
 	LIBRADOS_CMPXATTR_OP_EQ  = 1,
 	LIBRADOS_CMPXATTR_OP_NE  = 2,
 	LIBRADOS_CMPXATTR_OP_GT  = 3,
@@ -115,7 +116,7 @@ enum {
  * See librados.hpp for details.
  * @{
  */
-enum {
+enum librados_operation {
   LIBRADOS_OPERATION_NOFLAG             = 0,
   LIBRADOS_OPERATION_BALANCE_READS      = 1,
   LIBRADOS_OPERATION_LOCALIZE_READS     = 2,
@@ -144,7 +145,7 @@ enum {
  * indicating future IO patterns.
  * @{
  */
-enum {
+enum librados_alloc_hint_flag {
   LIBRADOS_ALLOC_HINT_FLAG_SEQUENTIAL_WRITE = 1,
   LIBRADOS_ALLOC_HINT_FLAG_RANDOM_WRITE = 2,
   LIBRADOS_ALLOC_HINT_FLAG_SEQUENTIAL_READ = 4,
@@ -155,6 +156,7 @@ enum {
   LIBRADOS_ALLOC_HINT_FLAG_LONGLIVED = 128,
   LIBRADOS_ALLOC_HINT_FLAG_COMPRESSIBLE = 256,
   LIBRADOS_ALLOC_HINT_FLAG_INCOMPRESSIBLE = 512,
+  LIBRADOS_ALLOC_HINT_FLAG_LOG = 1024,
 };
 /** @} */
 
@@ -656,7 +658,7 @@ CEPH_RADOS_API int rados_cluster_stat(rados_t cluster,
  * @param cluster where to get the fsid
  * @param buf where to write the fsid
  * @param len the size of buf in bytes (should be 37)
- * @returns 0 on success, negative error code on failure
+ * @returns length of the string on success, negative error code on failure
  * @returns -ERANGE if the buffer is too short to contain the
  * fsid
  */
@@ -3225,6 +3227,22 @@ CEPH_RADOS_API int rados_aio_write_op_operate(rados_write_op_t write_op,
                                               const char *oid,
                                               time_t *mtime,
 			                      int flags);
+
+/**
+ * Perform a write operation asynchronously
+ * @param write_op operation to perform
+ * @param io the ioctx that the object is in
+ * @param completion what to do when operation has been attempted
+ * @param oid the object id
+ * @param mtime the time to set the mtime to, NULL for the current time
+ * @param flags flags to apply to the entire operation (LIBRADOS_OPERATION_*)
+ */
+CEPH_RADOS_API int rados_aio_write_op_operate2(rados_write_op_t write_op,
+                                               rados_ioctx_t io,
+                                               rados_completion_t completion,
+                                               const char *oid,
+                                               struct timespec *mtime,
+                                               int flags);
 
 /**
  * Create a new rados_read_op_t read operation. This will store all

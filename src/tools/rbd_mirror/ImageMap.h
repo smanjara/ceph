@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_RBD_MIRROR_IMAGE_MAP_H
 #define CEPH_RBD_MIRROR_IMAGE_MAP_H
@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "common/ceph_mutex.h"
+#include "common/Clock.h" // for ceph_clock_now()
 #include "include/Context.h"
 #include "common/AsyncOpTracker.h"
 #include "cls/rbd/cls_rbd_types.h"
@@ -40,7 +41,7 @@ public:
   void shut_down(Context *on_finish);
 
   // update (add/remove) images
-  void update_images(const std::string &peer_uuid,
+  void update_images(const std::string &mirror_uuid,
                      std::set<std::string> &&added_global_image_ids,
                      std::set<std::string> &&removed_global_image_ids);
 
@@ -156,11 +157,12 @@ private:
   void schedule_rebalance_task();
 
   void notify_listener_acquire_release_images(const Updates &acquire, const Updates &release);
-  void notify_listener_remove_images(const std::string &peer_uuid, const Updates &remove);
+  void notify_listener_remove_images(const std::string &mirror_uuid,
+                                     const Updates &remove);
 
-  void update_images_added(const std::string &peer_uuid,
+  void update_images_added(const std::string &mirror_uuid,
                            const std::set<std::string> &global_image_ids);
-  void update_images_removed(const std::string &peer_uuid,
+  void update_images_removed(const std::string &mirror_uuid,
                              const std::set<std::string> &global_image_ids);
 
   void filter_instance_ids(const std::vector<std::string> &instance_ids,

@@ -38,7 +38,8 @@ Enable RBD Shared Read-only Parent Image Cache
 ----------------------------------------------
 
 To enable RBD shared read-only parent image cache, the following Ceph settings
-need to added in the ``[client]`` `section`_ of your ``ceph.conf`` file::
+need to added in the ``[client]`` :ref:`section <ceph-conf-file>` of
+your ``ceph.conf`` file::
 
         rbd parent cache enabled = true
         rbd plugins = parent_cache
@@ -121,8 +122,8 @@ Running the Immutable Object Cache Daemon
 -----------------------------------------
 
 ``ceph-immutable-object-cache`` daemon should use a unique Ceph user ID.
-To `create a Ceph user`_, with ``ceph`` specify the ``auth get-or-create``
-command, user name, monitor caps, and OSD caps::
+To :ref:`create a Ceph user <rados_ops_adding_a_user>`, with ``ceph`` specify
+the ``auth get-or-create`` command, user name, monitor caps, and OSD caps::
 
   ceph auth get-or-create client.ceph-immutable-object-cache.{unique id} mon 'allow r' osd 'profile rbd-read-only'
 
@@ -150,7 +151,7 @@ The immutable object cache supports throttling, controlled by the following sett
 
 ``immutable_object_cache_qos_iops_limit``
 
-:Description: The desired immutable object cache IO operations limit per second.
+:Description: The desired immutable object cache I/O operations limit per second.
 :Type: Unsigned Integer
 :Required: No
 :Default: ``0``
@@ -158,7 +159,7 @@ The immutable object cache supports throttling, controlled by the following sett
 
 ``immutable_object_cache_qos_iops_burst``
 
-:Description: The desired burst limit of immutable object cache IO operations.
+:Description: The desired burst limit of immutable object cache I/O operations.
 :Type: Unsigned Integer
 :Required: No
 :Default: ``0``
@@ -166,7 +167,7 @@ The immutable object cache supports throttling, controlled by the following sett
 
 ``immutable_object_cache_qos_iops_burst_seconds``
 
-:Description: The desired burst duration in seconds of immutable object cache IO operations.
+:Description: The desired burst duration in seconds of immutable object cache I/O operations.
 :Type: Seconds
 :Required: No
 :Default: ``1``
@@ -174,7 +175,7 @@ The immutable object cache supports throttling, controlled by the following sett
 
 ``immutable_object_cache_qos_bps_limit``
 
-:Description: The desired immutable object cache IO bytes limit per second.
+:Description: The desired immutable object cache I/O bytes limit per second.
 :Type: Unsigned Integer
 :Required: No
 :Default: ``0``
@@ -182,7 +183,7 @@ The immutable object cache supports throttling, controlled by the following sett
 
 ``immutable_object_cache_qos_bps_burst``
 
-:Description: The desired burst limit of immutable object cache IO bytes.
+:Description: The desired burst limit of immutable object cache I/O bytes.
 :Type: Unsigned Integer
 :Required: No
 :Default: ``0``
@@ -190,12 +191,10 @@ The immutable object cache supports throttling, controlled by the following sett
 
 ``immutable_object_cache_qos_bps_burst_seconds``
 
-:Description: The desired burst duration in seconds of immutable object cache IO bytes.
+:Description: The desired burst duration in seconds of immutable object cache I/O bytes.
 :Type: Seconds
 :Required: No
 :Default: ``1``
 
 .. _Cloned RBD Images: ../rbd-snapshot/#layering
-.. _section: ../../rados/configuration/ceph-conf/#configuration-sections
-.. _create a Ceph user: ../../rados/operations/user-management#add-a-user
 

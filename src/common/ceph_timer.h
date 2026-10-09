@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -28,6 +29,7 @@
 #include "include/compat.h"
 
 #include "common/detail/construct_suspended.h"
+#include "common/Thread.h"
 
 namespace bi = boost::intrusive;
 namespace ceph {
@@ -52,7 +54,7 @@ class timer {
   using sh = bi::set_member_hook<bi::link_mode<bi::normal_link>>;
 
   struct event {
-    typename TC::time_point t = typename TC::time_point::min();
+    typename TC::time_point t = typename TC::zero();
     std::uint64_t id = 0;
     fu2::unique_function<void()> f;
 
@@ -97,6 +99,7 @@ class timer {
   std::thread thread;
 
   void timer_thread() {
+    ceph_pthread_setname("ceph_timer");
     std::unique_lock l(lock);
     while (!suspended) {
       auto now = TC::now();
@@ -104,8 +107,20 @@ class timer {
       while (!schedule.empty()) {
 	auto p = schedule.begin();
 	// Should we wait for the future?
-	if (p->t > now)
-	  break;
+        #if defined(_WIN32)
+        if (p->t - now > std::chrono::milliseconds(1)) {
+          // std::condition_variable::wait_for uses SleepConditionVariableSRW
+          // on Windows, which has millisecond precision. Deltas <1ms will
+          // lead to busy loops, which should be avoided. This situation is
+          // quite common since "wait_for" often returns ~1ms earlier than
+          // requested.
+          break;
+        }
+        #else // !_WIN32
+        if (p->t > now) {
+          break;
+        }
+        #endif
 
 	auto& e = *p;
 	schedule.erase(e);
@@ -142,7 +157,6 @@ class timer {
 public:
   timer() : suspended(false) {
     thread = std::thread(&timer::timer_thread, this);
-    ceph_pthread_setname(thread.native_handle(), "ceph_timer");
   }
 
   // Create a suspended timer, jobs will be executed in order when
@@ -196,8 +210,10 @@ public:
 			  Callable&& f, Args&&... args) {
     std::lock_guard l(lock);
     auto e = std::make_unique<event>(when, ++next_id,
-				     std::bind(std::forward<Callable>(f),
-					       std::forward<Args>(args)...));
+                                     [f = std::forward<Callable>(f),
+                                      ...args = std::forward<Args>(args)]() mutable {
+                                       std::invoke(std::move(f), std::move(args)...);
+                                     });
     auto id = e->id;
     auto i = schedule.insert(*e);
     events.insert(*(e.release()));

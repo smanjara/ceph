@@ -15,6 +15,9 @@ overrides:
       - \(OSD_FULL\)
       - \(MDS_READ_ONLY\)
       - \(POOL_FULL\)
+      - \(POOL_APP_NOT_ENABLED\)
+      - MDS_ALL_DOWN
+      - MDS_UP_LESS_THAN_MAX
 tasks:
 - install:
 - ceph:
@@ -25,3 +28,4 @@ tasks:
 - exec:
     client.0:
       - ceph_test_admin_socket_output --all
+      - sudo ceph tell osd.* injectfull none # Fixes https://tracker.ceph.com/issues/59380
