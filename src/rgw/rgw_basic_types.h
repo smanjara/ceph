@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -18,10 +18,10 @@
  * radosgw or OSD contexts (e.g., rgw_sal.h, rgw_common.h)
  */
 
-#ifndef CEPH_RGW_BASIC_TYPES_H
-#define CEPH_RGW_BASIC_TYPES_H
+#pragma once
 
 #include <string>
+#include <optional>
 #include <fmt/format.h>
 
 #include "include/types.h"
@@ -32,7 +32,9 @@
 #include "rgw_user_types.h"
 #include "rgw_bucket_types.h"
 #include "rgw_obj_types.h"
-#include "rgw_obj_manifest.h"
+#include "rgw_cksum.h"
+
+#include "driver/rados/rgw_obj_manifest.h" // FIXME: subclass dependency
 
 #include "common/Formatter.h"
 
@@ -66,13 +68,24 @@ struct rgw_zone_id {
   rgw_zone_id(std::string&& _id) : id(std::move(_id)) {}
 
   void encode(ceph::buffer::list& bl) const {
-    /* backward compatiblity, not using ENCODE_{START,END} macros */
+    /* backward compatibility, not using ENCODE_{START,END} macros */
     ceph::encode(id, bl);
   }
 
   void decode(ceph::buffer::list::const_iterator& bl) {
-    /* backward compatiblity, not using DECODE_{START,END} macros */
+    /* backward compatibility, not using DECODE_{START,END} macros */
     ceph::decode(id, bl);
+  }
+
+  void dump(ceph::Formatter *f) const {
+    f->dump_string("id", id);
+  }
+
+  static std::list<rgw_zone_id> generate_test_instances() {
+    std::list<rgw_zone_id> o;
+    o.emplace_back();
+    o.push_back(rgw_zone_id("id"));
+    return o;
   }
 
   void clear() {
@@ -132,10 +145,11 @@ extern void decode_json_obj(rgw_placement_rule& v, JSONObj *obj);
 namespace rgw {
 namespace auth {
 class Principal {
-  enum types { User, Role, Tenant, Wildcard, OidcProvider, AssumedRole };
+  enum types { User, Role, Account, Wildcard, OidcProvider, AssumedRole, Service };
   types t;
   rgw_user u;
   std::string idp_url;
+  std::string service_id;
 
   explicit Principal(types t)
     : t(t) {}
@@ -143,8 +157,8 @@ class Principal {
   Principal(types t, std::string&& n, std::string i)
     : t(t), u(std::move(n), std::move(i)) {}
 
-  Principal(std::string&& idp_url)
-    : t(OidcProvider), idp_url(std::move(idp_url)) {}
+  Principal(std::string&& account, std::string&& idp_url)
+    : t(OidcProvider), u(std::move(account), {}), idp_url(std::move(idp_url)) {}
 
 public:
 
@@ -160,16 +174,22 @@ public:
     return Principal(Role, std::move(t), std::move(u));
   }
 
-  static Principal tenant(std::string&& t) {
-    return Principal(Tenant, std::move(t), {});
+  static Principal account(std::string&& t) {
+    return Principal(Account, std::move(t), {});
   }
 
-  static Principal oidc_provider(std::string&& idp_url) {
-    return Principal(std::move(idp_url));
+  static Principal oidc_provider(std::string&& account, std::string&& idp_url) {
+    return Principal(std::move(account), std::move(idp_url));
   }
 
   static Principal assumed_role(std::string&& t, std::string&& u) {
     return Principal(AssumedRole, std::move(t), std::move(u));
+  }
+
+  static Principal service(std::string&& s) {
+    auto p = Principal(Service);
+    p.service_id = std::move(s);
+    return p;
   }
 
   bool is_wildcard() const {
@@ -184,8 +204,8 @@ public:
     return t == Role;
   }
 
-  bool is_tenant() const {
-    return t == Tenant;
+  bool is_account() const {
+    return t == Account;
   }
 
   bool is_oidc_provider() const {
@@ -196,32 +216,42 @@ public:
     return t == AssumedRole;
   }
 
-  const std::string& get_tenant() const {
+  bool is_service() const {
+    return t == Service;
+  }
+
+  std::string_view get_account() const {
     return u.tenant;
   }
 
-  const std::string& get_id() const {
+  std::string_view get_id() const {
     return u.id;
   }
 
-  const std::string& get_idp_url() const {
+  std::string_view get_idp_url() const {
     return idp_url;
   }
 
-  const std::string& get_role_session() const {
+  std::string_view get_role_session() const {
     return u.id;
   }
 
-  const std::string& get_role() const {
+  std::string_view get_role() const {
     return u.id;
+  }
+
+  std::string_view get_service() const {
+    return service_id;
   }
 
   bool operator ==(const Principal& o) const {
-    return (t == o.t) && (u == o.u);
+    return (t == o.t) && (u == o.u) && (idp_url == o.idp_url);
   }
 
   bool operator <(const Principal& o) const {
-    return (t < o.t) || ((t == o.t) && (u < o.u));
+    if (t != o.t) return t < o.t;
+    if (u != o.u) return u < o.u;
+    return idp_url < o.idp_url;
   }
 };
 
@@ -249,11 +279,16 @@ struct RGWUploadPartInfo {
   ceph::real_time modified;
   RGWObjManifest manifest;
   RGWCompressionInfo cs_info;
+  std::optional<rgw::cksum::Cksum> cksum;
+  std::string crypt_salt;  // per-UploadPart GCM salt (non-secret HMAC input)
+
+  // Previous part obj prefixes. Recorded here for later cleanup.
+  std::set<std::string> past_prefixes; 
 
   RGWUploadPartInfo() : num(0), size(0) {}
 
   void encode(bufferlist& bl) const {
-    ENCODE_START(4, 2, bl);
+    ENCODE_START(7, 2, bl);
     encode(num, bl);
     encode(size, bl);
     encode(etag, bl);
@@ -261,10 +296,13 @@ struct RGWUploadPartInfo {
     encode(manifest, bl);
     encode(cs_info, bl);
     encode(accounted_size, bl);
+    encode(past_prefixes, bl);
+    encode(cksum, bl);
+    encode(crypt_salt, bl);
     ENCODE_FINISH(bl);
   }
   void decode(bufferlist::const_iterator& bl) {
-    DECODE_START_LEGACY_COMPAT_LEN(4, 2, 2, bl);
+    DECODE_START_LEGACY_COMPAT_LEN(7, 2, 2, bl);
     decode(num, bl);
     decode(size, bl);
     decode(etag, bl);
@@ -277,11 +315,18 @@ struct RGWUploadPartInfo {
     } else {
       accounted_size = size;
     }
+    if (struct_v >= 5) {
+      decode(past_prefixes, bl);
+    }
+    if (struct_v >= 6) {
+      decode(cksum, bl);
+    }
+    if (struct_v >= 7) {
+      decode(crypt_salt, bl);
+    }
     DECODE_FINISH(bl);
   }
   void dump(Formatter *f) const;
-  static void generate_test_instances(std::list<RGWUploadPartInfo*>& o);
+  static std::list<RGWUploadPartInfo> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(RGWUploadPartInfo)
-
-#endif /* CEPH_RGW_BASIC_TYPES_H */

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -16,10 +17,15 @@
 #ifndef CEPH_MOSDOPREPLY_H
 #define CEPH_MOSDOPREPLY_H
 
+#include <ostream>
+#include <vector>
+
 #include "msg/Message.h"
 
 #include "MOSDOp.h"
 #include "common/errno.h"
+#include "include/errorcode32.h"
+#include "include/rados_encoder.h"
 
 /*
  * OSD op reply
@@ -183,7 +189,7 @@ public:
       head.flags = flags;
       head.osdmap_epoch = osdmap_epoch;
       head.reassert_version = bad_replay_version;
-      head.result = result;
+      head.result = result.get_host_to_wire();
       head.num_ops = ops.size();
       head.object_len = oid.name.length();
       encode(head, payload);
@@ -265,8 +271,9 @@ public:
       }
       ceph::decode_nohead(head.object_len, oid.name, p);
       pgid = pg_t(head.layout.ol_pgid);
-      result = (int32_t)head.result;
+      result.set_wire_to_host((int32_t)head.result);
       flags = head.flags;
+      bad_replay_version = head.reassert_version;
       replay_version = head.reassert_version;
       user_version = replay_version.version;
       osdmap_epoch = head.osdmap_epoch;

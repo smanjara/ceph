@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -16,6 +17,8 @@
 
 #include "include/compat.h"
 #include "common/errno.h"
+#include <cerrno>
+#include <tuple>
 #include "Event.h"
 
 #ifdef HAVE_DPDK
@@ -36,6 +39,10 @@
 #endif
 #endif
 
+#ifdef __linux__
+#include <sys/eventfd.h>
+#endif
+
 #define dout_subsys ceph_subsys_ms
 
 #undef dout_prefix
@@ -47,6 +54,10 @@ class C_handle_notify : public EventCallback {
  public:
   C_handle_notify(EventCenter *c, CephContext *cc): center(c), cct(cc) {}
   void do_request(uint64_t fd_or_id) override {
+#ifdef __linux__
+    eventfd_t value;
+    std::ignore = read(fd_or_id, &value, sizeof(value));
+#else
     char c[256];
     int r = 0;
     do {
@@ -60,6 +71,7 @@ class C_handle_notify : public EventCallback {
           ldout(cct, 1) << __func__ << " read notify pipe failed: " << cpp_strerror(ceph_sock_errno()) << dendl;
       }
     } while (r > 0);
+#endif
   }
 };
 
@@ -153,6 +165,16 @@ int EventCenter::init(int nevent, unsigned center_id, const std::string &type)
   if (!driver->need_wakeup())
     return 0;
 
+#ifdef __linux__
+  int efd = eventfd(0, EFD_NONBLOCK|EFD_CLOEXEC);
+  if (efd < 0) {
+    const int e = errno;
+    lderr(cct) << __func__ << " can't create eventfd: " << cpp_strerror(e) << dendl;
+    return -e;
+  }
+
+  notify_receive_fd = notify_send_fd = efd;
+#else
   int fds[2];
 
   #ifdef _WIN32
@@ -176,6 +198,7 @@ int EventCenter::init(int nevent, unsigned center_id, const std::string &type)
   if (r < 0) {
     return r;
   }
+#endif
 
   return r;
 }
@@ -184,20 +207,23 @@ EventCenter::~EventCenter()
 {
   {
     std::lock_guard<std::mutex> l(external_lock);
-    while (!external_events.empty()) {
-      EventCallbackRef e = external_events.front();
+    for (auto e : external_events) {
       if (e)
         e->do_request(0);
-      external_events.pop_front();
     }
+    external_events.clear();
   }
   time_events.clear();
   //assert(time_events.empty());
 
   if (notify_receive_fd >= 0)
     compat_closesocket(notify_receive_fd);
+#ifndef __linux__
+  /* on Linux, notify_receive_fd and notify_send_fd are the same
+     eventfd, therefore we close only one of them */
   if (notify_send_fd >= 0)
     compat_closesocket(notify_send_fd);
+#endif
 
   delete driver;
   if (notify_handler)
@@ -226,6 +252,7 @@ void EventCenter::set_owner()
 int EventCenter::create_file_event(int fd, int mask, EventCallbackRef ctxt)
 {
   ceph_assert(in_thread());
+  ceph_assert(fd >= 0);
   int r = 0;
   if (fd >= nevent) {
     int new_size = nevent << 2;
@@ -285,7 +312,10 @@ void EventCenter::delete_file_event(int fd, int mask)
     return ;
 
   int r = driver->del_event(fd, event->mask, mask);
-  if (r < 0) {
+  if (r < 0 && r != -ENOENT) {
+    // if the socket fd is closed by the underlying nic driver, the
+    // corresponding epoll item would be removed from the interest list, that'd
+    // lead to ENOENT when removing the fd from the list.
     // see create_file_event
     ceph_abort_msg("BUG!");
   }
@@ -343,7 +373,11 @@ void EventCenter::wakeup()
     return ;
 
   ldout(cct, 20) << __func__ << dendl;
-  char buf = 'c';
+#ifdef __linux__
+  static constexpr eventfd_t buf = 1;
+#else
+  static constexpr char buf = 'c';
+#endif
   // wake up "event_wait"
   #ifdef _WIN32
   int n = send(notify_send_fd, &buf, sizeof(buf), 0);
@@ -400,6 +434,8 @@ int EventCenter::process_events(unsigned timeout_microseconds,  ceph::timespan *
 
     if (end_time > now) {
       timeout_microseconds = std::chrono::duration_cast<std::chrono::microseconds>(end_time - now).count();
+      timeout_microseconds = std::max<unsigned>(timeout_microseconds,
+                                                cct->_conf->ms_time_events_min_wait_interval);
     } else {
       timeout_microseconds = 0;
     }
@@ -412,7 +448,9 @@ int EventCenter::process_events(unsigned timeout_microseconds,  ceph::timespan *
   tv.tv_usec = timeout_microseconds % 1000000;
 
   ldout(cct, 30) << __func__ << " wait second " << tv.tv_sec << " usec " << tv.tv_usec << dendl;
-  std::vector<FiredFileEvent> fired_events;
+  // The Poll and Select drivers push_back() into this, so it must start
+  // empty.  clear() keeps the capacity from the previous pass.
+  fired_events.clear();
   numevents = driver->event_wait(fired_events, &tv);
   auto working_start = ceph::mono_clock::now();
   for (int event_id = 0; event_id < numevents; event_id++) {
@@ -446,17 +484,19 @@ int EventCenter::process_events(unsigned timeout_microseconds,  ceph::timespan *
 
   if (external_num_events.load()) {
     external_lock.lock();
-    std::deque<EventCallbackRef> cur_process;
-    cur_process.swap(external_events);
+    // The two vectors trade buffers: external_events_process was cleared
+    // at the end of the last pass, so external_events is left empty but
+    // with that buffer's capacity, and neither has to reallocate.
+    external_events_process.swap(external_events);
     external_num_events.store(0);
     external_lock.unlock();
-    numevents += cur_process.size();
-    while (!cur_process.empty()) {
-      EventCallbackRef e = cur_process.front();
+    numevents += external_events_process.size();
+    for (auto e : external_events_process) {
       ldout(cct, 30) << __func__ << " do " << e << dendl;
       e->do_request(0);
-      cur_process.pop_front();
     }
+    // Drop the entries but keep the capacity for the next swap().
+    external_events_process.clear();
   }
 
   if (!numevents && !blocking) {

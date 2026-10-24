@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "test/librados_test_stub/TestWatchNotify.h"
 #include "include/Context.h"
@@ -402,7 +402,16 @@ void TestWatchNotify::blocklist(uint32_t nonce) {
     auto &watcher = file_it->second;
     for (auto w_it = watcher->watch_handles.begin();
          w_it != watcher->watch_handles.end();) {
-      if (w_it->second.nonce == nonce) {
+      auto& watch_handle = w_it->second;
+      if (watch_handle.nonce == nonce) {
+        auto handle = watch_handle.handle;
+        auto watch_ctx2 = watch_handle.watch_ctx2;
+        if (watch_ctx2 != nullptr) {
+          auto ctx = new LambdaContext([handle, watch_ctx2](int) {
+              watch_ctx2->handle_error(handle, -ENOTCONN);
+            });
+          watch_handle.rados_client->get_aio_finisher()->queue(ctx);
+        }
         w_it = watcher->watch_handles.erase(w_it);
       } else {
         ++w_it;

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include <string>
 #include <vector>
@@ -16,6 +16,7 @@
 
 #include "rgw_common.h"
 #include "rgw_keystone.h"
+#include "rgw_keystone_scope.h"
 #include "rgw_auth_keystone.h"
 #include "rgw_rest_s3.h"
 #include "rgw_auth_s3.h"
@@ -38,12 +39,19 @@ TokenEngine::is_applicable(const std::string& token) const noexcept
 }
 
 boost::optional<TokenEngine::token_envelope_t>
-TokenEngine::get_from_keystone(const DoutPrefixProvider* dpp, const std::string& token, bool allow_expired) const
+TokenEngine::get_from_keystone(const DoutPrefixProvider* dpp,
+                               const std::string& token,
+                               bool allow_expired,
+                               optional_yield y) const
 {
   /* Unfortunately, we can't use the short form of "using" here. It's because
    * we're aliasing a class' member, not namespace. */
   using RGWValidateKeystoneToken = \
     rgw::keystone::Service::RGWValidateKeystoneToken;
+
+  bool admin_token_retried = false;
+
+admin_token_retry:
 
   /* The container for plain response obtained from Keystone. It will be
    * parsed token_envelope_t::parse method. */
@@ -55,34 +63,33 @@ TokenEngine::get_from_keystone(const DoutPrefixProvider* dpp, const std::string&
     throw -EINVAL;
   }
 
-  const auto keystone_version = config.get_api_version();
-  if (keystone_version == rgw::keystone::ApiVersion::VER_2) {
-    url.append("v2.0/tokens/" + token);
-  } else if (keystone_version == rgw::keystone::ApiVersion::VER_3) {
-    url.append("v3/auth/tokens");
+  url.append("v3/auth/tokens");
 
-    if (allow_expired) {
-      url.append("?allow_expired=1");
-    }
-
-    validate.append_header("X-Subject-Token", token);
+  if (allow_expired) {
+    url.append("?allow_expired=1");
   }
 
+  validate.append_header("X-Subject-Token", token);
+
   std::string admin_token;
-  if (rgw::keystone::Service::get_admin_token(dpp, cct, token_cache, config,
-                                              admin_token) < 0) {
+  bool admin_token_cached = false;
+  int ret = rgw::keystone::Service::get_admin_token(dpp, token_cache, config,
+                                                    y, admin_token, admin_token_cached);
+  if (ret < 0) {
     throw -EINVAL;
   }
 
-  validate.append_header("X-Auth-Token", admin_token);
+  if (allow_expired) {
+    validate.append_header("X-Auth-Token", admin_token);
+  } else {
+    validate.append_header("X-Auth-Token", token);
+  }
+
   validate.set_send_length(0);
 
   validate.set_url(url);
 
-  int ret = validate.process(null_yield);
-  if (ret < 0) {
-    throw ret;
-  }
+  ret = validate.process(dpp, y);
 
   /* NULL terminate for debug output. */
   token_body_bl.append(static_cast<char>(0));
@@ -91,22 +98,40 @@ TokenEngine::get_from_keystone(const DoutPrefixProvider* dpp, const std::string&
    * Although failure at the parsing phase doesn't impose a threat,
    * this allows to return proper error code (EACCESS instead of EINVAL
    * or similar) and thus improves logging. */
-  if (validate.get_http_status() ==
-          /* Most likely: wrong admin credentials or admin token. */
-          RGWValidateKeystoneToken::HTTP_STATUS_UNAUTHORIZED ||
-      validate.get_http_status() ==
-          /* Most likely: non-existent token supplied by the client. */
-          RGWValidateKeystoneToken::HTTP_STATUS_NOTFOUND) {
+
+  /* If admin token is invalid we should expire it from the cache and
+     try one last time without the cache. */
+  bool admin_token_unauthorized = (validate.get_http_status() ==
+    RGWValidateKeystoneToken::HTTP_STATUS_UNAUTHORIZED);
+
+  if (admin_token_unauthorized && admin_token_cached) {
+    ldpp_dout(dpp, 20) << "invalidating admin_token cache due to 401" << dendl;
+    token_cache.invalidate_admin(dpp);
+
+    if (!admin_token_retried) {
+      ldpp_dout(dpp, 20) << "retrying with uncached admin_token" << dendl;
+      admin_token_retried = true;
+      goto admin_token_retry;
+    }
+  }
+
+  /* If admin token is invalid or token supplied by client is non-existent. */
+  if (admin_token_unauthorized || validate.get_http_status() ==
+        RGWValidateKeystoneToken::HTTP_STATUS_NOTFOUND) {
     ldpp_dout(dpp, 5) << "Failed keystone auth from " << url << " with "
                   << validate.get_http_status() << dendl;
     return boost::none;
+  }
+  // throw any other http or connection errors
+  if (ret < 0) {
+    throw ret;
   }
 
   ldpp_dout(dpp, 20) << "received response status=" << validate.get_http_status()
                  << ", body=" << token_body_bl.c_str() << dendl;
 
   TokenEngine::token_envelope_t token_body;
-  ret = token_body.parse(dpp, cct, token, token_body_bl, config.get_api_version());
+  ret = token_body.parse(dpp, token, token_body_bl);
   if (ret < 0) {
     throw ret;
   }
@@ -115,34 +140,46 @@ TokenEngine::get_from_keystone(const DoutPrefixProvider* dpp, const std::string&
 }
 
 TokenEngine::auth_info_t
-TokenEngine::get_creds_info(const TokenEngine::token_envelope_t& token,
-                            const std::vector<std::string>& admin_roles
+TokenEngine::get_creds_info(const TokenEngine::token_envelope_t& token
                            ) const noexcept
 {
   using acct_privilege_t = rgw::auth::RemoteApplier::AuthInfo::acct_privilege_t;
+  std::vector<std::string> role_names;
 
   /* Check whether the user has an admin status. */
   acct_privilege_t level = acct_privilege_t::IS_PLAIN_ACCT;
-  for (const auto& admin_role : admin_roles) {
-    if (token.has_role(admin_role)) {
+  for (const auto& role : token.roles) {
+    role_names.push_back(role.name);
+    if (role.is_admin && !role.is_system_reader) {
       level = acct_privilege_t::IS_ADMIN_ACCT;
-      break;
     }
   }
+
+  /* Role-tier cap: read-only when every granting role is a
+   * project_reader, no implicit permissions at all when every granting
+   * role is implicit_deny, full control otherwise. */
+  const uint32_t perm_mask = token.effective_perm_mask();
+
+  /* Build keystone scope info if ops logging is enabled */
+  auto keystone_scope = rgw::keystone::build_scope_info(cct, token);
 
   return auth_info_t {
     /* Suggested account name for the authenticated user. */
     rgw_user(token.get_project_id()),
     /* User's display name (aka real name). */
     token.get_project_name(),
-    /* Keystone doesn't support RGW's subuser concept, so we cannot cut down
-     * the access rights through the perm_mask. At least at this layer. */
-    RGW_PERM_FULL_CONTROL,
+    /* Keystone doesn't support RGW's subuser concept, so perm_mask is FULL_CONTROL for
+     * regular users. The project_reader cap above is the sole exception. */
+    perm_mask,
     level,
     rgw::auth::RemoteApplier::AuthInfo::NO_ACCESS_KEY,
     rgw::auth::RemoteApplier::AuthInfo::NO_SUBUSER,
-    TYPE_KEYSTONE
-};
+    token.get_user_name(),
+    TYPE_KEYSTONE,
+    std::move(keystone_scope),
+    std::move(role_names),
+    token.get_user_id()
+  };
 }
 
 static inline const std::string
@@ -175,7 +212,7 @@ TokenEngine::get_acl_strategy(const TokenEngine::token_envelope_t& token) const
   };
 
   /* Lambda will obtain a copy of (not a reference to!) allowed_items. */
-  return [allowed_items](const rgw::auth::Identity::aclspec_t& aclspec) {
+  return [allowed_items, token_roles=token.roles](const rgw::auth::Identity::aclspec_t& aclspec) {
     uint32_t perm = 0;
 
     for (const auto& allowed_item : allowed_items) {
@@ -183,6 +220,18 @@ TokenEngine::get_acl_strategy(const TokenEngine::token_envelope_t& token) const
 
       if (std::end(aclspec) != iter) {
         perm |= iter->second;
+      }
+    }
+
+    for (const auto& r : token_roles) {
+      if (r.is_system_reader) {
+        if (r.is_admin) {    /* system scope reader persona */
+          /*
+           * Because system reader defeats permissions,
+           * we don't even look at the aclspec.
+           */
+          perm |= RGW_OP_TYPE_READ;
+        }
       }
     }
 
@@ -194,7 +243,8 @@ TokenEngine::result_t
 TokenEngine::authenticate(const DoutPrefixProvider* dpp,
                           const std::string& token,
                           const std::string& service_token,
-                          const req_state* const s) const
+                          const req_state* const s,
+                          optional_yield y) const
 {
   bool allow_expired = false;
   boost::optional<TokenEngine::token_envelope_t> t;
@@ -205,13 +255,20 @@ TokenEngine::authenticate(const DoutPrefixProvider* dpp,
     explicit RolesCacher(CephContext* const cct) {
       get_str_vec(cct->_conf->rgw_keystone_accepted_roles, plain);
       get_str_vec(cct->_conf->rgw_keystone_accepted_admin_roles, admin);
+      get_str_vec(cct->_conf->rgw_keystone_accepted_reader_roles, system_reader);
+      get_str_vec(cct->_conf->rgw_keystone_accepted_project_reader_roles, project_reader);
+      get_str_vec(cct->_conf->rgw_keystone_implicit_deny_roles, implicit_deny);
 
-      /* Let's suppose that having an admin role implies also a regular one. */
       plain.insert(std::end(plain), std::begin(admin), std::end(admin));
+      plain.insert(std::end(plain), std::begin(project_reader), std::end(project_reader));
+      plain.insert(std::end(plain), std::begin(implicit_deny), std::end(implicit_deny));
     }
 
     std::vector<std::string> plain;
     std::vector<std::string> admin;
+    std::vector<std::string> system_reader;
+    std::vector<std::string> project_reader;
+    std::vector<std::string> implicit_deny;
   } roles(cct);
 
   static const struct ServiceTokenRolesCacher {
@@ -239,7 +296,7 @@ TokenEngine::authenticate(const DoutPrefixProvider* dpp,
     ldpp_dout(dpp, 20) << "cached token.project.id=" << t->get_project_id()
                    << dendl;
     auto apl = apl_factory->create_apl_remote(cct, s, get_acl_strategy(*t),
-                                              get_creds_info(*t, roles.admin));
+                                              get_creds_info(*t));
     return result_t::grant(std::move(apl));
   }
 
@@ -269,7 +326,7 @@ TokenEngine::authenticate(const DoutPrefixProvider* dpp,
       /* Service token was not found in cache. Go to Keystone for validating
        * the token. The allow_expired here must always be false. */
       ceph_assert(allow_expired == false);
-      st = get_from_keystone(dpp, service_token, allow_expired);
+      st = get_from_keystone(dpp, service_token, allow_expired, y);
 
       if (! st) {
         return result_t::deny(-EACCES);
@@ -309,11 +366,12 @@ TokenEngine::authenticate(const DoutPrefixProvider* dpp,
   /* Token not in cache. Go to the Keystone for validation. This happens even
    * for the legacy PKI/PKIz token types. That's it, after the PKI/PKIz
    * RadosGW-side validation has been removed, we always ask Keystone. */
-  t = get_from_keystone(dpp, token, allow_expired);
-
+  t = get_from_keystone(dpp, token, allow_expired, y);
   if (! t) {
     return result_t::deny(-EACCES);
   }
+  t->update_roles(roles.plain, roles.admin, roles.system_reader,
+                  roles.project_reader, roles.implicit_deny);
 
   /* Verify expiration. */
   if (t->expired()) {
@@ -330,35 +388,36 @@ TokenEngine::authenticate(const DoutPrefixProvider* dpp,
     }
   }
 
-  /* Check for necessary roles. */
-  for (const auto& role : roles.plain) {
-    if (t->has_role(role) == true) {
-      /* If this token was an allowed expired token because we got a
-       * service token we need to update the expiration before we cache it. */
-      if (allow_expired) {
-        time_t now = ceph_clock_now().sec();
-        time_t new_expires = now + g_conf()->rgw_keystone_expired_token_cache_expiration;
-        ldpp_dout(dpp, 20) << "updating expiration of allowed expired token"
-                           << " from old " << t->get_expires() << " to now " << now << " + "
-                           << g_conf()->rgw_keystone_expired_token_cache_expiration
-                           << " secs = "
-                           << new_expires << dendl;
-        t->set_expires(new_expires);
-      }
-      ldpp_dout(dpp, 0) << "validated token: " << t->get_project_name()
-                    << ":" << t->get_user_name()
-                    << " expires: " << t->get_expires() << dendl;
-      token_cache.add(token_id, *t);
-      auto apl = apl_factory->create_apl_remote(cct, s, get_acl_strategy(*t),
-                                            get_creds_info(*t, roles.admin));
-      return result_t::grant(std::move(apl));
-    }
+
+  /**
+   * Reject a token that holds no accepted role. Admission was computed in
+   * update_roles().
+   */
+  if(!t->admitted()) {
+    ldpp_dout(dpp, 0) << "user does not hold a matching role; required roles: "
+                 << g_conf()->rgw_keystone_accepted_roles << dendl;
+    return result_t::deny(-EPERM);
   }
 
-  ldpp_dout(dpp, 0) << "user does not hold a matching role; required roles: "
-                << g_conf()->rgw_keystone_accepted_roles << dendl;
-
-  return result_t::deny(-EPERM);
+  /* If this token was an allowed expired token because we got a
+    * service token we need to update the expiration before we cache it. */
+  if (allow_expired) {
+    time_t now = ceph_clock_now().sec();
+    time_t new_expires = now + g_conf()->rgw_keystone_expired_token_cache_expiration;
+    ldpp_dout(dpp, 20) << "updating expiration of allowed expired token"
+                        << " from old " << t->get_expires() << " to now " << now << " + "
+                        << g_conf()->rgw_keystone_expired_token_cache_expiration
+                        << " secs = "
+                        << new_expires << dendl;
+    t->set_expires(new_expires);
+  }
+  ldpp_dout(dpp, 0) << "validated token: " << t->get_project_name()
+            << ":" << t->get_user_name()
+            << " expires: " << t->get_expires() << dendl;
+  token_cache.add(token_id, *t);
+  auto apl = apl_factory->create_apl_remote(cct, s, get_acl_strategy(*t),
+                                                get_creds_info(*t));
+  return result_t::grant(std::move(apl));
 }
 
 
@@ -368,7 +427,8 @@ TokenEngine::authenticate(const DoutPrefixProvider* dpp,
 std::pair<boost::optional<rgw::keystone::TokenEnvelope>, int>
 EC2Engine::get_from_keystone(const DoutPrefixProvider* dpp, const std::string_view& access_key_id,
                              const std::string& string_to_sign,
-                             const std::string_view& signature) const
+                             const std::string_view& signature,
+                             optional_yield y) const
 {
   /* prepare keystone url */
   std::string keystone_url = config.get_endpoint_url();
@@ -376,17 +436,13 @@ EC2Engine::get_from_keystone(const DoutPrefixProvider* dpp, const std::string_vi
     throw -EINVAL;
   }
 
-  const auto api_version = config.get_api_version();
-  if (api_version == rgw::keystone::ApiVersion::VER_3) {
-    keystone_url.append("v3/s3tokens");
-  } else {
-    keystone_url.append("v2.0/s3tokens");
-  }
+  keystone_url.append("v3/s3tokens");
 
   /* get authentication token for Keystone. */
   std::string admin_token;
-  int ret = rgw::keystone::Service::get_admin_token(dpp, cct, token_cache, config,
-                                                    admin_token);
+  bool admin_token_cached = false;
+  int ret = rgw::keystone::Service::get_admin_token(dpp, token_cache, config,
+                                                    y, admin_token, admin_token_cached);
   if (ret < 0) {
     ldpp_dout(dpp, 2) << "s3 keystone: cannot get token for keystone access"
                   << dendl;
@@ -424,12 +480,7 @@ EC2Engine::get_from_keystone(const DoutPrefixProvider* dpp, const std::string_vi
   validate.set_send_length(os.str().length());
 
   /* send request */
-  ret = validate.process(null_yield);
-  if (ret < 0) {
-    ldpp_dout(dpp, 2) << "s3 keystone: token validation ERROR: "
-                  << token_body_bl.c_str() << dendl;
-    throw ret;
-  }
+  ret = validate.process(dpp, y);
 
   /* if the supplied signature is wrong, we will get 401 from Keystone */
   if (validate.get_http_status() ==
@@ -439,10 +490,16 @@ EC2Engine::get_from_keystone(const DoutPrefixProvider* dpp, const std::string_vi
           decltype(validate)::HTTP_STATUS_NOTFOUND) {
     return std::make_pair(boost::none, -ERR_INVALID_ACCESS_KEY);
   }
+  // throw any other http or connection errors
+  if (ret < 0) {
+    ldpp_dout(dpp, 2) << "s3 keystone: token validation ERROR: "
+                  << token_body_bl.c_str() << dendl;
+    throw ret;
+  }
 
   /* now parse response */
   rgw::keystone::TokenEnvelope token_envelope;
-  ret = token_envelope.parse(dpp, cct, std::string(), token_body_bl, api_version);
+  ret = token_envelope.parse(dpp, std::string(), token_body_bl);
   if (ret < 0) {
     ldpp_dout(dpp, 2) << "s3 keystone: token parsing failed, ret=0" << ret
                   << dendl;
@@ -452,9 +509,11 @@ EC2Engine::get_from_keystone(const DoutPrefixProvider* dpp, const std::string_vi
   return std::make_pair(std::move(token_envelope), 0);
 }
 
-std::pair<boost::optional<std::string>, int> EC2Engine::get_secret_from_keystone(const DoutPrefixProvider* dpp,
-                                                                                 const std::string& user_id,
-                                                                                 const std::string_view& access_key_id) const
+auto EC2Engine::get_secret_from_keystone(const DoutPrefixProvider* dpp,
+                                         const std::string& user_id,
+                                         const std::string_view& access_key_id,
+                                         optional_yield y) const
+    -> std::pair<boost::optional<std::string>, int>
 {
   /*  Fetch from /users/{USER_ID}/credentials/OS-EC2/{ACCESS_KEY_ID} */
   /* Should return json with response key "credential" which contains entry "secret"*/
@@ -465,12 +524,7 @@ std::pair<boost::optional<std::string>, int> EC2Engine::get_secret_from_keystone
     return make_pair(boost::none, -EINVAL);
   }
 
-  const auto api_version = config.get_api_version();
-  if (api_version == rgw::keystone::ApiVersion::VER_3) {
-    keystone_url.append("v3/");
-  } else {
-    keystone_url.append("v2.0/");
-  }
+  keystone_url.append("v3/");
   keystone_url.append("users/");
   keystone_url.append(user_id);
   keystone_url.append("/credentials/OS-EC2/");
@@ -478,8 +532,9 @@ std::pair<boost::optional<std::string>, int> EC2Engine::get_secret_from_keystone
 
   /* get authentication token for Keystone. */
   std::string admin_token;
-  int ret = rgw::keystone::Service::get_admin_token(dpp, cct, token_cache, config,
-                                                    admin_token);
+  bool admin_token_cached = false;
+  int ret = rgw::keystone::Service::get_admin_token(dpp, token_cache, config,
+                                                    y, admin_token, admin_token_cached);
   if (ret < 0) {
     ldpp_dout(dpp, 2) << "s3 keystone: cannot get token for keystone access"
                   << dendl;
@@ -500,17 +555,18 @@ std::pair<boost::optional<std::string>, int> EC2Engine::get_secret_from_keystone
   secret.set_verify_ssl(cct->_conf->rgw_keystone_verify_ssl);
 
   /* send request */
-  ret = secret.process(null_yield);
+  ret = secret.process(dpp, y);
+
+  /* if the supplied access key isn't found, we will get 404 from Keystone */
+  if (secret.get_http_status() ==
+          decltype(secret)::HTTP_STATUS_NOTFOUND) {
+    return make_pair(boost::none, -ERR_INVALID_ACCESS_KEY);
+  }
+  // return any other http or connection errors
   if (ret < 0) {
     ldpp_dout(dpp, 2) << "s3 keystone: secret fetching error: "
                   << token_body_bl.c_str() << dendl;
     return make_pair(boost::none, ret);
-  }
-
-  /* if the supplied signature is wrong, we will get 401 from Keystone */
-  if (secret.get_http_status() ==
-          decltype(secret)::HTTP_STATUS_NOTFOUND) {
-    return make_pair(boost::none, -EINVAL);
   }
 
   /* now parse response */
@@ -542,15 +598,18 @@ std::pair<boost::optional<std::string>, int> EC2Engine::get_secret_from_keystone
 /*
  * Try to get a token for S3 authentication, using a secret cache if available
  */
-std::pair<boost::optional<rgw::keystone::TokenEnvelope>, int>
-EC2Engine::get_access_token(const DoutPrefixProvider* dpp,
-			    const std::string_view& access_key_id,
-                            const std::string& string_to_sign,
-                            const std::string_view& signature,
-			    const signature_factory_t& signature_factory) const
+auto EC2Engine::get_access_token(const DoutPrefixProvider* dpp,
+                                 const std::string_view& access_key_id,
+                                 const std::string& string_to_sign,
+                                 const std::string_view& signature,
+                                 const signature_factory_t& signature_factory,
+                                 bool ignore_signature,
+                                 optional_yield y) const
+    -> access_token_result
 {
   using server_signature_t = VersionAbstractor::server_signature_t;
   boost::optional<rgw::keystone::TokenEnvelope> token;
+  boost::optional<std::string> secret;
   int failure_reason;
 
   /* Get a token from the cache if one has already been stored */
@@ -559,24 +618,32 @@ EC2Engine::get_access_token(const DoutPrefixProvider* dpp,
 
   /* Check that credentials can correctly be used to sign data */
   if (t) {
-    std::string sig(signature);
-    server_signature_t server_signature = signature_factory(cct, t->get<1>(), string_to_sign);
-    if (sig.compare(server_signature) == 0) {
-      return std::make_pair(t->get<0>(), 0);
+    /* We should ignore checking signature in cache if caller tells us to which
+     * means we're handling a HTTP OPTIONS call. */
+    if (ignore_signature) {
+      ldpp_dout(dpp, 20) << "ignore_signature set and found in cache" << dendl;
+      return {t->get<0>(), t->get<1>(), 0};
     } else {
-      ldpp_dout(dpp, 0) << "Secret string does not correctly sign payload, cache miss" << dendl;
+      std::string sig(signature);
+      server_signature_t server_signature = signature_factory(cct, t->get<1>(), string_to_sign);
+      if (sig.compare(server_signature) == 0) {
+        return {t->get<0>(), t->get<1>(), 0};
+      } else {
+        ldpp_dout(dpp, 0) << "Secret string does not correctly sign payload, cache miss" << dendl;
+      }
     }
   } else {
     ldpp_dout(dpp, 0) << "No stored secret string, cache miss" << dendl;
   }
 
   /* No cached token, token expired, or secret invalid: fall back to keystone */
-  std::tie(token, failure_reason) = get_from_keystone(dpp, access_key_id, string_to_sign, signature);
+  std::tie(token, failure_reason) =
+      get_from_keystone(dpp, access_key_id, string_to_sign, signature, y);
 
   if (token) {
     /* Fetch secret from keystone for the access_key_id */
-    boost::optional<std::string> secret;
-    std::tie(secret, failure_reason) = get_secret_from_keystone(dpp, token->get_user_id(), access_key_id);
+    std::tie(secret, failure_reason) =
+        get_secret_from_keystone(dpp, token->get_user_id(), access_key_id, y);
 
     if (secret) {
       /* Add token, secret pair to cache, and set timeout */
@@ -584,7 +651,7 @@ EC2Engine::get_access_token(const DoutPrefixProvider* dpp,
     }
   }
 
-  return std::make_pair(token, failure_reason);
+  return {token, secret, failure_reason};
 }
 
 EC2Engine::acl_strategy_t
@@ -597,20 +664,33 @@ EC2Engine::get_acl_strategy(const EC2Engine::token_envelope_t&) const
 
 EC2Engine::auth_info_t
 EC2Engine::get_creds_info(const EC2Engine::token_envelope_t& token,
-                          const std::vector<std::string>& admin_roles,
                           const std::string& access_key_id
                          ) const noexcept
 {
   using acct_privilege_t = \
     rgw::auth::RemoteApplier::AuthInfo::acct_privilege_t;
 
-  /* Check whether the user has an admin status. */
+  /* Check whether the user has an admin status. is_admin is set by
+   * update_roles() from the accepted-admin-roles list. */
   acct_privilege_t level = acct_privilege_t::IS_PLAIN_ACCT;
-  for (const auto& admin_role : admin_roles) {
-    if (token.has_role(admin_role)) {
+  for (const auto& role : token.roles) {
+    if (role.is_admin) {
       level = acct_privilege_t::IS_ADMIN_ACCT;
       break;
     }
+  }
+
+  /* Role-tier cap: read-only when every granting role is a
+   * project_reader, no implicit permissions at all when every granting
+   * role is implicit_deny, full control otherwise. */
+  const uint32_t perm_mask = token.effective_perm_mask();
+
+  /* Build keystone scope info if ops logging is enabled */
+  auto keystone_scope = rgw::keystone::build_scope_info(cct, token);
+
+  std::vector<std::string> role_names;
+  for (const auto& role : token.roles) {
+    role_names.push_back(role.name);
   }
 
   return auth_info_t {
@@ -618,13 +698,17 @@ EC2Engine::get_creds_info(const EC2Engine::token_envelope_t& token,
     rgw_user(token.get_project_id()),
     /* User's display name (aka real name). */
     token.get_project_name(),
-    /* Keystone doesn't support RGW's subuser concept, so we cannot cut down
-     * the access rights through the perm_mask. At least at this layer. */
-    RGW_PERM_FULL_CONTROL,
+    /* Keystone doesn't support RGW's subuser concept,perm_mask is FULL_CONTROL for
+     * regular users. The project_reader cap above is the sole exception. */
+    perm_mask,
     level,
     access_key_id,
     rgw::auth::RemoteApplier::AuthInfo::NO_SUBUSER,
-    TYPE_KEYSTONE
+    token.get_user_name(),
+    TYPE_KEYSTONE,
+    std::move(keystone_scope),
+    std::move(role_names),
+    token.get_user_id()
   };
 }
 
@@ -636,7 +720,6 @@ rgw::auth::Engine::result_t EC2Engine::authenticate(
   const string_to_sign_t& string_to_sign,
   const signature_factory_t& signature_factory,
   const completer_factory_t& completer_factory,
-  /* Passthorugh only! */
   const req_state* s,
   optional_yield y) const
 {
@@ -646,20 +729,40 @@ rgw::auth::Engine::result_t EC2Engine::authenticate(
     explicit RolesCacher(CephContext* const cct) {
       get_str_vec(cct->_conf->rgw_keystone_accepted_roles, plain);
       get_str_vec(cct->_conf->rgw_keystone_accepted_admin_roles, admin);
+      get_str_vec(cct->_conf->rgw_keystone_accepted_reader_roles, system_reader);
+      get_str_vec(cct->_conf->rgw_keystone_accepted_project_reader_roles, project_reader);
+      get_str_vec(cct->_conf->rgw_keystone_implicit_deny_roles, implicit_deny);
 
-      /* Let's suppose that having an admin role implies also a regular one. */
+      /* Admit the project-reader and implicit-deny tiers on their own, the
+       * same way an admin role is admitted. A user whose only role is one of
+       * these is still accepted, and its role flag caps what it may do.
+       * system_reader is not merged here: it grants cross-cluster read and
+       * also needs an admin role. */
       plain.insert(std::end(plain), std::begin(admin), std::end(admin));
+      plain.insert(std::end(plain), std::begin(project_reader), std::end(project_reader));
+      plain.insert(std::end(plain), std::begin(implicit_deny), std::end(implicit_deny));
     }
 
     std::vector<std::string> plain;
     std::vector<std::string> admin;
+    std::vector<std::string> system_reader;
+    std::vector<std::string> project_reader;
+    std::vector<std::string> implicit_deny;
   } accepted_roles(cct);
 
-  boost::optional<token_envelope_t> t;
-  int failure_reason;
-  std::tie(t, failure_reason) = \
-    get_access_token(dpp, access_key_id, string_to_sign, signature, signature_factory);
+  /* When we handle a HTTP OPTIONS call we must ignore the signature */
+  bool ignore_signature = (s->op_type == RGW_OP_OPTIONS_CORS);
+
+  auto [t, secret_key, failure_reason] =
+    get_access_token(dpp, access_key_id, string_to_sign,
+                     signature, signature_factory, ignore_signature, y);
   if (! t) {
+    if (failure_reason == -ERR_SIGNATURE_NO_MATCH) {
+      // we looked up a secret but it didn't generate the same signature as
+      // the client. since we found this access key in keystone, we should
+      // reject the request instead of trying other engines
+      return result_t::reject(failure_reason);
+    }
     return result_t::deny(failure_reason);
   }
 
@@ -671,30 +774,29 @@ rgw::auth::Engine::result_t EC2Engine::authenticate(
     return result_t::deny();
   }
 
-  /* check if we have a valid role */
-  bool found = false;
-  for (const auto& role : accepted_roles.plain) {
-    if (t->has_role(role) == true) {
-      found = true;
-      break;
-    }
-  }
+  /* Classify roles first, then admit on the result rather than rescanning
+   * the config lists. */
+  t->update_roles(accepted_roles.plain,
+                  accepted_roles.admin,
+                  accepted_roles.system_reader,
+                  accepted_roles.project_reader,
+                  accepted_roles.implicit_deny);
 
-  if (! found) {
+  if (! t->admitted()) {
     ldpp_dout(dpp, 5) << "s3 keystone: user does not hold a matching role;"
                      " required roles: "
                   << cct->_conf->rgw_keystone_accepted_roles << dendl;
     return result_t::deny();
-  } else {
-    /* everything seems fine, continue with this user */
-    ldpp_dout(dpp, 5) << "s3 keystone: validated token: " << t->get_project_name()
-                  << ":" << t->get_user_name()
-                  << " expires: " << t->get_expires() << dendl;
-
-    auto apl = apl_factory->create_apl_remote(cct, s, get_acl_strategy(*t),
-                                              get_creds_info(*t, accepted_roles.admin, std::string(access_key_id)));
-    return result_t::grant(std::move(apl), completer_factory(boost::none));
   }
+
+  /* everything seems fine, continue with this user */
+  ldpp_dout(dpp, 5) << "s3 keystone: validated token: " << t->get_project_name()
+                << ":" << t->get_user_name()
+                << " expires: " << t->get_expires() << dendl;
+
+  auto apl = apl_factory->create_apl_remote(cct, s, get_acl_strategy(*t),
+                                            get_creds_info(*t, std::string(access_key_id)));
+  return result_t::grant(std::move(apl), completer_factory(secret_key));
 }
 
 bool SecretCache::find(const std::string& token_id,

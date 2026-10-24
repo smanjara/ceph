@@ -1,8 +1,10 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
+#include <ranges>
+#include <type_traits>
 #include <seastar/core/reactor.hh>
 #include <seastar/core/sharded.hh>
 #include "common/config.h"
@@ -12,6 +14,11 @@
 
 namespace ceph {
 class Formatter;
+}
+
+namespace ceph::global {
+int g_conf_set_val(const std::string& key, const std::string& s);
+int g_conf_rm_val(const std::string& key);
 }
 
 namespace crimson::common {
@@ -42,47 +49,73 @@ class ConfigProxy : public seastar::peering_sharded_service<ConfigProxy>
   // apply changes to all shards
   // @param func a functor which accepts @c "ConfigValues&"
   template<typename Func>
-  seastar::future<> do_change(Func&& func) {
+  auto do_change(Func&& func) {
+    using T = std::invoke_result_t<Func, ConfigValues&>;
     return container().invoke_on(values.get_owner_shard(),
                                  [func = std::move(func)](ConfigProxy& owner) {
       // apply the changes to a copy of the values
       auto new_values = seastar::make_lw_shared(*owner.values);
       new_values->changed.clear();
-      func(*new_values);
 
       // always apply the new settings synchronously on the owner shard, to
       // avoid racings with other do_change() calls in parallel.
-      ObserverMgr<ConfigObserver>::rev_obs_map rev_obs;
-      owner.values.reset(new_values);
-      owner.obs_mgr.for_each_change(owner.values->changed, owner,
-                                    [&rev_obs](ConfigObserver *obs,
-                                               const std::string &key) {
-                                      rev_obs[obs].insert(key);
-                                    }, nullptr);
-      for (auto& [obs, keys] : rev_obs) {
-        obs->handle_conf_change(owner, keys);
-      }
+      auto apply_and_propagate = [&owner, new_values]() {
+        ObserverMgr<ConfigObserver>::rev_obs_map rev_obs;
+        owner.values.reset(new_values);
+        std::map<std::string, bool> changes_present;
+        for (const auto& change : owner.values->changed) {
+          std::string dummy;
+          changes_present[change] = owner.get_val(change, &dummy);
+        }
+        owner.obs_mgr.for_each_change(changes_present,
+                                      [&rev_obs](auto obs,
+                                                 const std::string &key) {
+                                        rev_obs[obs].insert(key);
+                                      }, nullptr);
+        for (auto& [obs, keys] : rev_obs) {
+          (*obs)->handle_conf_change(owner, keys);
+        }
 
-      return seastar::parallel_for_each(boost::irange(1u, seastar::smp::count),
-                                        [&owner, new_values] (auto cpu) {
-        return owner.container().invoke_on(cpu,
-          [foreign_values = seastar::make_foreign(new_values)](ConfigProxy& proxy) mutable {
-            proxy.values.reset();
-            proxy.values = std::move(foreign_values);
+        return seastar::parallel_for_each(std::views::iota(1u, seastar::this_smp_shard_count()),
+                                          [&owner, new_values] (auto cpu) {
+          return owner.container().invoke_on(cpu,
+            [foreign_values = seastar::make_foreign(new_values)](ConfigProxy& proxy) mutable {
+              proxy.values.reset();
+              proxy.values = std::move(foreign_values);
 
-            ObserverMgr<ConfigObserver>::rev_obs_map rev_obs;
-            proxy.obs_mgr.for_each_change(proxy.values->changed, proxy,
-              [&rev_obs](ConfigObserver *obs, const std::string& key) {
-                rev_obs[obs].insert(key);
-              }, nullptr);
-            for (auto& obs_keys : rev_obs) {
-              obs_keys.first->handle_conf_change(proxy, obs_keys.second);
-            }
+              std::map<std::string, bool> changes_present;
+              for (const auto& change : proxy.values->changed) {
+                std::string dummy;
+                changes_present[change] = proxy.get_val(change, &dummy);
+              }
+
+              ObserverMgr<ConfigObserver>::rev_obs_map rev_obs;
+              proxy.obs_mgr.for_each_change(changes_present,
+                [&rev_obs](auto obs, const std::string& key) {
+                  rev_obs[obs].insert(key);
+                }, nullptr);
+              for (auto& [obs, keys] : rev_obs) {
+                (*obs)->handle_conf_change(proxy, keys);
+              }
+            });
+          }).finally([new_values] {
+            new_values->changed.clear();
           });
-        }).finally([new_values] {
-          new_values->changed.clear();
-        });
-      });
+      };
+
+      // Construct the functor result directly so T need not be
+      // default-constructible or assignable.
+      if constexpr (std::is_void_v<T>) {
+        func(*new_values);
+        return apply_and_propagate();
+      } else {
+        auto result = func(*new_values);
+        return apply_and_propagate().then(
+          [result = std::move(result)]() mutable {
+            return std::move(result);
+          });
+      }
+    });
   }
 public:
   ConfigProxy(const EntityName& name, std::string_view cluster);
@@ -96,8 +129,17 @@ public:
     return values.get();
   }
 
-  // required by sharded<>
+  void get_config_bl(uint64_t have_version,
+		     ceph::buffer::list *bl,
+		     uint64_t *got_version) {
+    get_config().get_config_bl(get_config_values(), have_version,
+                               bl, got_version);
+  }
+  void get_defaults_bl(ceph::buffer::list *bl) {
+    get_config().get_defaults_bl(get_config_values(), bl);
+  }
   seastar::future<> start();
+  // required by sharded<>
   seastar::future<> stop() {
     return seastar::make_ready_future<>();
   }
@@ -108,6 +150,7 @@ public:
     obs_mgr.remove_observer(obs);
   }
   seastar::future<> rm_val(const std::string& key) {
+    ceph::global::g_conf_rm_val(key);
     return do_change([key, this](ConfigValues& values) {
       auto ret = get_config().rm_val(values, key);
       if (ret < 0) {
@@ -117,6 +160,7 @@ public:
   }
   seastar::future<> set_val(const std::string& key,
 			    const std::string& val) {
+    ceph::global::g_conf_set_val(key, val);
     return do_change([key, val, this](ConfigValues& values) {
       std::stringstream err;
       auto ret = get_config().set_val(values, obs_mgr, key, val, &err);
@@ -165,17 +209,14 @@ public:
   }
   void show_config(ceph::Formatter* f) const;
 
-  seastar::future<> parse_argv(std::vector<const char*>& argv) {
-    // we could pass whatever is unparsed to seastar, but seastar::app_template
-    // is used for driving the seastar application, and
-    // crimson::common::ConfigProxy is not available until seastar engine is up
-    // and running, so we have to feed the command line args to app_template
-    // first, then pass them to ConfigProxy.
-    return do_change([&argv, this](ConfigValues& values) {
-      get_config().parse_argv(values,
-			      obs_mgr,
-			      argv,
-			      CONF_CMDLINE);
+  seastar::future<std::vector<std::string>>
+  parse_argv(std::vector<std::string> args) {
+    // Take args by value so the lambda can safely be invoked on another shard
+    return do_change([args = std::move(args), this](ConfigValues& values) {
+      auto argv_view = args | std::views::transform(&std::string::c_str);
+      std::vector<const char*> argv(argv_view.begin(), argv_view.end());
+      get_config().parse_argv(values, obs_mgr, argv, CONF_CMDLINE);
+      return std::vector<std::string>(argv.begin(), argv.end());
     });
   }
 

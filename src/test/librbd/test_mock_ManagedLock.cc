@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "test/librbd/test_mock_fixture.h"
 #include "test/librbd/test_support.h"
@@ -192,6 +192,11 @@ public:
     expect_get_watch_handle(watcher);
     EXPECT_CALL(acquire_request, send())
                   .WillOnce(QueueRequest(&acquire_request, r, work_queue));
+  }
+
+  void expect_is_blocklisted(MockImageWatcher &watcher,
+                             bool blocklisted) {
+    EXPECT_CALL(watcher, is_blocklisted()).WillOnce(Return(blocklisted));
   }
 
   void expect_release_lock(asio::ContextWQ *work_queue,
@@ -393,6 +398,26 @@ TEST_F(TestMockManagedLock, AcquireLockBlocklist) {
   ASSERT_EQ(0, when_shut_down(managed_lock));
 }
 
+TEST_F(TestMockManagedLock, AcquireLockBlocklistedWatch) {
+  librbd::ImageCtx *ictx;
+  ASSERT_EQ(0, open_image(m_image_name, &ictx));
+
+  MockManagedLockImageCtx mock_image_ctx(*ictx);
+  MockManagedLock managed_lock(ictx->md_ctx, *ictx->asio_engine,
+                               ictx->header_oid, mock_image_ctx.image_watcher,
+                               librbd::managed_lock::EXCLUSIVE, true, 0);
+
+  InSequence seq;
+
+  expect_get_watch_handle(*mock_image_ctx.image_watcher, 0);
+  expect_is_blocklisted(*mock_image_ctx.image_watcher, true);
+
+  ASSERT_EQ(-EBLOCKLISTED, when_acquire_lock(managed_lock));
+  ASSERT_FALSE(is_lock_owner(managed_lock));
+
+  ASSERT_EQ(0, when_shut_down(managed_lock));
+}
+
 TEST_F(TestMockManagedLock, ReleaseLockUnlockedState) {
   librbd::ImageCtx *ictx;
   ASSERT_EQ(0, open_image(m_image_name, &ictx));
@@ -563,6 +588,7 @@ TEST_F(TestMockManagedLock, AttemptReacquireBlocklistedLock) {
   expect_release_lock(ictx->op_work_queue, request_release, 0);
 
   expect_get_watch_handle(*mock_image_ctx.image_watcher, 0);
+  expect_is_blocklisted(*mock_image_ctx.image_watcher, false);
 
   managed_lock.reacquire_lock(nullptr);
 
@@ -684,12 +710,13 @@ TEST_F(TestMockManagedLock, ShutDownWhileWaiting) {
   InSequence seq;
 
   expect_get_watch_handle(*mock_image_ctx.image_watcher, 0);
+  expect_is_blocklisted(*mock_image_ctx.image_watcher, false);
 
   C_SaferCond acquire_ctx;
   managed_lock.acquire_lock(&acquire_ctx);
 
   ASSERT_EQ(0, when_shut_down(managed_lock));
-  ASSERT_EQ(-ESHUTDOWN, acquire_ctx.wait());
+  ASSERT_EQ(-ERESTART, acquire_ctx.wait());
   ASSERT_FALSE(is_lock_owner(managed_lock));
 }
 

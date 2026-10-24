@@ -4,6 +4,13 @@ import { RouterModule } from '@angular/router';
 
 import { NgbDropdownModule } from '@ng-bootstrap/ng-bootstrap';
 import { BlockUIModule } from 'ng-block-ui';
+import {
+  PlaceholderModule,
+  IconModule,
+  ThemeModule,
+  ButtonModule,
+  TagModule
+} from 'carbon-components-angular';
 
 import { ContextComponent } from '~/app/core/context/context.component';
 import { SharedModule } from '~/app/shared/shared.module';
@@ -20,11 +27,16 @@ import { NavigationModule } from './navigation/navigation.module';
     NavigationModule,
     NgbDropdownModule,
     RouterModule,
-    SharedModule
+    SharedModule,
+    PlaceholderModule,
+    IconModule,
+    ThemeModule,
+    ButtonModule,
+    TagModule,
+    ContextComponent
   ],
-  exports: [NavigationModule],
+  exports: [NavigationModule, ContextComponent],
   declarations: [
-    ContextComponent,
     WorkbenchLayoutComponent,
     BlankLayoutComponent,
     LoginLayoutComponent,

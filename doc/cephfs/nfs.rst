@@ -8,8 +8,8 @@ CephFS namespaces can be exported over NFS protocol using the `NFS-Ganesha NFS
 server`_.  This document provides information on configuring NFS-Ganesha
 clusters manually.  The simplest and preferred way of managing NFS-Ganesha
 clusters and CephFS exports is using ``ceph nfs ...`` commands. See
-:doc:`/mgr/nfs` for more details. As the deployment is done using cephadm or
-rook.
+:ref:`mgr-nfs` for more details. As the deployment is done using cephadm or
+Rook.
 
 Requirements
 ============
@@ -21,7 +21,7 @@ Requirements
 
 .. note::
    It is recommended to use 3.5 or later stable version of NFS-Ganesha
-   packages with pacific (16.2.x) or later stable version of Ceph packages.
+   packages with Pacific (16.2.x) or later stable version of Ceph packages.
 
 Configuring NFS-Ganesha to export CephFS
 ========================================
@@ -56,12 +56,24 @@ in the sample conf. There are options to do the following:
 - enable read delegations (need at least v13.0.1 ``libcephfs2`` package
   and v2.6.0 stable ``nfs-ganesha`` and ``nfs-ganesha-ceph`` packages)
 
+.. important::
+
+   Under certain conditions, NFS access using the CephFS FSAL fails. This
+   causes an error to be thrown that reads "Input/output error". Under these
+   circumstances, the application metadata must be set for the CephFS metadata
+   and data pools. Do this by running the following command:
+
+   .. prompt:: bash $
+
+      ceph osd pool application set <cephfs_metadata_pool> cephfs <cephfs_data_pool> cephfs
+
+
 Configuration for libcephfs clients
 -----------------------------------
 
 ``ceph.conf`` for libcephfs clients includes a ``[client]`` section with
 ``mon_host`` option set to let the clients connect to the Ceph cluster's
-monitors, usually generated via ``ceph config generate-minimal-conf``.
+Monitors, usually generated via ``ceph config generate-minimal-conf``.
 For example::
 
     [client]

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -17,11 +17,12 @@
 #include "common/strtol.h"
 #include "rgw_rest.h"
 #include "rgw_op.h"
-#include "rgw_rados.h"
 #include "rgw_rest_s3.h"
 #include "rgw_rest_config.h"
 #include "rgw_client_io.h"
-#include "rgw_sal_rados.h"
+#ifdef WITH_RADOSGW_RADOS
+#include "driver/rados/rgw_sal_rados.h"
+#endif
 #include "common/errno.h"
 #include "include/ceph_assert.h"
 
@@ -33,6 +34,7 @@
 using namespace std;
 
 void RGWOp_ZoneConfig_Get::send_response() {
+#ifdef WITH_RADOSGW_RADOS
   const RGWZoneParams& zone_params = static_cast<rgw::sal::RadosStore*>(driver)->svc()->zone->get_zone_params();
 
   set_req_state_err(s, op_ret);
@@ -44,6 +46,12 @@ void RGWOp_ZoneConfig_Get::send_response() {
 
   encode_json("zone_params", zone_params, s->formatter);
   flusher.flush();
+#else
+  // zone params live in the RADOS zone service; not available standalone
+  set_req_state_err(s, -ENOTSUP);
+  dump_errno(s);
+  end_header(s);
+#endif
 }
 
 RGWOp* RGWHandler_Config::op_get() {

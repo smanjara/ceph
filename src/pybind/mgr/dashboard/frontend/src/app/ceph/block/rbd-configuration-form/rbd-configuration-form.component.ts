@@ -1,5 +1,5 @@
 import { Component, EventEmitter, Input, OnInit, Output } from '@angular/core';
-import { FormControl, Validators } from '@angular/forms';
+import { UntypedFormControl, Validators } from '@angular/forms';
 
 import _ from 'lodash';
 import { ReplaySubject } from 'rxjs';
@@ -17,7 +17,8 @@ import { RbdConfigurationService } from '~/app/shared/services/rbd-configuration
 @Component({
   selector: 'cd-rbd-configuration-form',
   templateUrl: './rbd-configuration-form.component.html',
-  styleUrls: ['./rbd-configuration-form.component.scss']
+  styleUrls: ['./rbd-configuration-form.component.scss'],
+  standalone: false
 })
 export class RbdConfigurationFormComponent implements OnInit {
   @Input()
@@ -69,7 +70,7 @@ export class RbdConfigurationFormComponent implements OnInit {
 
     this.rbdConfigurationService
       .getWritableSections()
-      .forEach((section) => (this.sectionVisibility[section.class] = false));
+      .forEach((section) => (this.sectionVisibility[section.class] = true));
   }
 
   getDirtyValues(includeLocalValues = false, localFieldType?: RbdConfigurationSourceField) {
@@ -113,7 +114,7 @@ export class RbdConfigurationFormComponent implements OnInit {
     const configFormGroup = new CdFormGroup({});
 
     this.rbdConfigurationService.getWritableOptionFields().forEach((c) => {
-      let control: FormControl;
+      let control: UntypedFormControl;
       if (
         c.type === RbdConfigurationType.milliseconds ||
         c.type === RbdConfigurationType.iops ||
@@ -125,7 +126,7 @@ export class RbdConfigurationFormComponent implements OnInit {
             initialValue = configList['value'];
           }
         });
-        control = new FormControl(initialValue, Validators.min(0));
+        control = new UntypedFormControl(initialValue, Validators.min(0));
       } else {
         throw new Error(
           `Type ${c.type} is unknown, you may need to add it to RbdConfiguration class`

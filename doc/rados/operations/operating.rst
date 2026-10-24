@@ -6,50 +6,53 @@
 
 
 Running Ceph with systemd
-==========================
+=========================
 
-For all distributions that support systemd (CentOS 7, Fedora, Debian
-Jessie 8 and later, SUSE), ceph daemons are now managed using native
-systemd files instead of the legacy sysvinit scripts.  For example:
+In deployments managed by systemd, Ceph daemons behave like any other
+services controlled by the ``systemctl`` command, as in
+the following examples. Note that this applies to Podman-based container
+deployments. Docker-based deployments do not integrate with systemd in the
+same way and might require different management commands.
 
 .. prompt:: bash $
 
    sudo systemctl start ceph.target       # start all daemons
    sudo systemctl status ceph-osd@12      # check status of osd.12
 
-To list the Ceph systemd units on a node, execute:
+To list all of the Ceph systemd units on a node, run the following command:
 
 .. prompt:: bash $
 
    sudo systemctl status ceph\*.service ceph\*.target
 
-Starting all Daemons
+
+Starting all daemons
 --------------------
 
-To start all daemons on a Ceph Node (irrespective of type), execute the
-following:
+To start all of the daemons on a Ceph node (regardless of their type), run the
+following command:
 
 .. prompt:: bash $
 
    sudo systemctl start ceph.target
 
 
-Stopping all Daemons
+Stopping all daemons
 --------------------
 
-To stop all daemons on a Ceph Node (irrespective of type), execute the
-following:
+To stop all of the daemons on a Ceph node (regardless of their type), run the
+following command:
 
 .. prompt:: bash $
 
    sudo systemctl stop ceph\*.service ceph\*.target
 
 
-Starting all Daemons by Type
+Starting all daemons by type
 ----------------------------
 
-To start all daemons of a particular type on a Ceph Node, execute one of the
-following:
+To start all of the daemons of a particular type on a Ceph node, run one of the
+following commands:
 
 .. prompt:: bash $
 
@@ -58,24 +61,24 @@ following:
    sudo systemctl start ceph-mds.target
 
 
-Stopping all Daemons by Type
+Stopping all daemons by type
 ----------------------------
 
-To stop all daemons of a particular type on a Ceph Node, execute one of the
-following:
+To stop all of the daemons of a particular type on a Ceph node, run one of the
+following commands:
 
 .. prompt:: bash $
 
-   sudo systemctl stop ceph-mon\*.service ceph-mon.target
    sudo systemctl stop ceph-osd\*.service ceph-osd.target
+   sudo systemctl stop ceph-mon\*.service ceph-mon.target
    sudo systemctl stop ceph-mds\*.service ceph-mds.target
 
 
-Starting a Daemon
+Starting a daemon
 -----------------
 
-To start a specific daemon instance on a Ceph Node, execute one of the
-following:
+To start a specific daemon instance on a Ceph node, run one of the
+following commands:
 
 .. prompt:: bash $
 
@@ -92,11 +95,11 @@ For example:
    sudo systemctl start ceph-mds@ceph-server
 
 
-Stopping a Daemon
+Stopping a daemon
 -----------------
 
-To stop a specific daemon instance on a Ceph Node, execute one of the
-following:
+To stop a specific daemon instance on a Ceph node, run one of the
+following commands:
 
 .. prompt:: bash $
 
@@ -113,64 +116,4 @@ For example:
    sudo systemctl stop ceph-mds@ceph-server
 
 
-.. index:: sysvinit; operating a cluster
-
-Running Ceph with sysvinit
-==========================
-
-Each time you to **start**, **restart**, and  **stop** Ceph daemons (or your
-entire cluster) you must specify at least one option and one command. You may
-also specify a daemon type or a daemon instance. ::
-
-	{commandline} [options] [commands] [daemons]
-
-
-The ``ceph`` options include:
-
-+-----------------+----------+-------------------------------------------------+
-| Option          | Shortcut | Description                                     |
-+=================+==========+=================================================+
-| ``--verbose``   |  ``-v``  | Use verbose logging.                            |
-+-----------------+----------+-------------------------------------------------+
-| ``--valgrind``  | ``N/A``  | (Dev and QA only) Use `Valgrind`_ debugging.    |
-+-----------------+----------+-------------------------------------------------+
-| ``--allhosts``  |  ``-a``  | Execute on all nodes in ``ceph.conf.``          |
-|                 |          | Otherwise, it only executes on ``localhost``.   |
-+-----------------+----------+-------------------------------------------------+
-| ``--restart``   | ``N/A``  | Automatically restart daemon if it core dumps.  |
-+-----------------+----------+-------------------------------------------------+
-| ``--norestart`` | ``N/A``  | Don't restart a daemon if it core dumps.        |
-+-----------------+----------+-------------------------------------------------+
-| ``--conf``      |  ``-c``  | Use an alternate configuration file.            |
-+-----------------+----------+-------------------------------------------------+
-
-The ``ceph`` commands include:
-
-+------------------+------------------------------------------------------------+
-| Command          | Description                                                |
-+==================+============================================================+
-|    ``start``     | Start the daemon(s).                                       |
-+------------------+------------------------------------------------------------+
-|    ``stop``      | Stop the daemon(s).                                        |
-+------------------+------------------------------------------------------------+
-|  ``forcestop``   | Force the daemon(s) to stop. Same as ``kill -9``           |
-+------------------+------------------------------------------------------------+
-|   ``killall``    | Kill all daemons of a particular type.                     | 
-+------------------+------------------------------------------------------------+
-|  ``cleanlogs``   | Cleans out the log directory.                              |
-+------------------+------------------------------------------------------------+
-| ``cleanalllogs`` | Cleans out **everything** in the log directory.            |
-+------------------+------------------------------------------------------------+
-
-For subsystem operations, the ``ceph`` service can target specific daemon types
-by adding a particular daemon type for the ``[daemons]`` option. Daemon types
-include: 
-
-- ``mon``
-- ``osd``
-- ``mds``
-
-
-
-.. _Valgrind: http://www.valgrind.org/
-.. _initctl: http://manpages.ubuntu.com/manpages/raring/en/man8/initctl.8.html
+.. _Valgrind: https://www.valgrind.org/

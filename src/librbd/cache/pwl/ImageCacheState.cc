@@ -1,15 +1,19 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "librbd/cache/Types.h"
 #include "librbd/cache/Utils.h"
 #include "librbd/cache/pwl/ImageCacheState.h"
 #include "librbd/ImageCtx.h"
 #include "librbd/Operations.h"
+#include "common/Clock.h" // for ceph_clock_now()
 #include "common/config_proxy.h"
+#include "common/debug.h"
 #include "common/environment.h"
 #include "common/hostname.h"
 #include "librbd/plugin/Api.h"
+
+#include <shared_mutex> // for std::shared_lock
 
 #undef dout_subsys
 #define dout_subsys ceph_subsys_rbd_pwl
@@ -125,7 +129,7 @@ ImageCacheState<I>* ImageCacheState<I>::create_image_cache_state(
   if (!dirty_cache && !cache_desired) {
     ldout(image_ctx->cct, 20) << "Do not desire to use image cache." << dendl;
   } else if (dirty_cache && !cache_desired) {
-    lderr(image_ctx->cct) << "There's a dirty cache, but RWL cache is disabled."
+    lderr(image_ctx->cct) << "There's a dirty cache, but PWL cache is disabled."
                           << dendl;
     r = -EINVAL;
   }else if ((!dirty_cache || cache_state_str.empty()) && cache_desired) {
@@ -180,7 +184,7 @@ bool ImageCacheState<I>::is_valid() {
     if (this->clean) {
       cleanstring = "clean";
     }
-    lderr(m_image_ctx->cct) << "An image cache (RWL) remains on another host "
+    lderr(m_image_ctx->cct) << "An image cache (PWL) remains on another host "
                             << host << " which is " << cleanstring
                             << ". Flush/close the image there to remove the "
                             << "image cache" << dendl;

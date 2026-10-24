@@ -4,3 +4,7 @@ base-branch:
   - "(octopus)"
   - "(pacific)"
   - "(quincy)"
+  - "(reef)"
+  - "(squid)"
+  - "(tentacle)"
+  - "(umbrella)"

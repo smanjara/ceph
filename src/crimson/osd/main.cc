@@ -1,11 +1,12 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <sys/types.h>
 #include <unistd.h>
 
 #include <iostream>
 #include <fstream>
+#include <limits>
 #include <random>
 
 #include <seastar/core/app-template.hh>
@@ -17,6 +18,7 @@
 #include <seastar/util/closeable.hh>
 #include <seastar/util/defer.hh>
 #include <seastar/util/std-compat.hh>
+#include <seastar/core/signal.hh>
 
 #include "auth/KeyRing.h"
 #include "common/ceph_argparse.h"
@@ -24,12 +26,15 @@
 #include "crimson/common/buffer_io.h"
 #include "crimson/common/config_proxy.h"
 #include "crimson/common/fatal_signal.h"
+#include "crimson/common/perf_counters_collection.h"
 #include "crimson/mon/MonClient.h"
 #include "crimson/net/Messenger.h"
 #include "crimson/osd/stop_signal.h"
 #include "crimson/osd/main_config_bootstrap_helpers.h"
 #include "global/pidfile.h"
 #include "osd.h"
+
+SET_SUBSYS(osd);
 
 using namespace std::literals;
 namespace bpo = boost::program_options;
@@ -56,7 +61,7 @@ seastar::future<> make_keyring()
       return seastar::now();
     } else {
       CephContext temp_cct{};
-      auth.key.create(&temp_cct, CEPH_CRYPTO_AES);
+      auth.key.create(&temp_cct, CEPH_CRYPTO_AES256KRB5);
       keyring.add(name, auth);
       bufferlist bl;
       keyring.encode_plaintext(bl);
@@ -70,23 +75,12 @@ seastar::future<> make_keyring()
   });
 }
 
-static std::ofstream maybe_set_logger()
-{
-  std::ofstream log_file_stream;
-  if (auto log_file = local_conf()->log_file; !log_file.empty()) {
-    log_file_stream.open(log_file, std::ios::app | std::ios::out);
-    try {
-      seastar::throw_system_error_on(log_file_stream.fail());
-    } catch (const std::system_error& e) {
-      ceph_abort_msg(fmt::format("unable to open log file: {}", e.what()));
-    }
-    logger().set_ostream(log_file_stream);
-  }
-  return log_file_stream;
-}
 
 int main(int argc, const char* argv[])
 {
+  LOG_PREFIX(OSD::main);
+
+  INFO("parsing early config");
   auto early_config_result = crimson::osd::get_early_config(argc, argv);
   if (!early_config_result.has_value()) {
     int r = early_config_result.error();
@@ -94,14 +88,18 @@ int main(int argc, const char* argv[])
     return r;
   }
   auto &early_config = early_config_result.value();
+  INFO("early config parsed successfully");
 
   auto seastar_n_early_args = early_config.get_early_args();
-  auto config_proxy_args = early_config.get_ceph_args();
+  auto config_proxy_args = early_config.ceph_args;
 
+  INFO("initializing seastar app_template");
   seastar::app_template::config app_cfg;
   app_cfg.name = "Crimson";
   app_cfg.auto_handle_sigint_sigterm = false;
   seastar::app_template app(std::move(app_cfg));
+
+  INFO("registering CLI options");
   app.add_options()
     ("mkkey", "generate a new secret key. "
               "This is normally used in combination with --mkfs")
@@ -109,15 +107,10 @@ int main(int argc, const char* argv[])
     ("debug", "enable debug output on all loggers")
     ("trace", "enable trace output on all loggers")
     ("osdspec-affinity", bpo::value<std::string>()->default_value(std::string{}),
-     "set affinity to an osdspec")
-    ("prometheus_port", bpo::value<uint16_t>()->default_value(0),
-     "Prometheus port. Set to zero to disable")
-    ("prometheus_address", bpo::value<std::string>()->default_value("0.0.0.0"),
-     "Prometheus listening address")
-    ("prometheus_prefix", bpo::value<std::string>()->default_value("osd"),
-     "Prometheus metrics prefix");
+     "set affinity to an osdspec");
 
   try {
+    INFO("entering seastar runtime");
     return app.run(
       seastar_n_early_args.size(),
       const_cast<char**>(seastar_n_early_args.data()),
@@ -125,31 +118,60 @@ int main(int argc, const char* argv[])
       auto& config = app.configuration();
       return seastar::async([&] {
         try {
+          INFO("seastar runtime started");
+
           FatalSignal fatal_signal;
           seastar_apps_lib::stop_signal should_stop;
+
           if (config.count("debug")) {
+            INFO("enabling debug logging");
             seastar::global_logger_registry().set_all_loggers_level(
               seastar::log_level::debug
             );
           }
           if (config.count("trace")) {
+            INFO("enabling trace logging");
             seastar::global_logger_registry().set_all_loggers_level(
               seastar::log_level::trace
             );
           }
+
+          DEBUG("starting sharded config service");
           sharded_conf().start(
 	    early_config.init_params.name, early_config.cluster_name).get();
           local_conf().start().get();
           auto stop_conf = seastar::deferred_stop(sharded_conf());
+
+          DEBUG("starting performance counters");
           sharded_perf_coll().start().get();
           auto stop_perf_coll = seastar::deferred_stop(sharded_perf_coll());
+
+          DEBUG("parsing config files");
           local_conf().parse_config_files(early_config.conf_file_list).get();
           local_conf().parse_env().get();
-          local_conf().parse_argv(config_proxy_args).get();
-          auto log_file_stream = maybe_set_logger();
+          local_conf().parse_argv(std::move(config_proxy_args)).get();
+
+          DEBUG("initializing logger output");
+          std::ofstream log_file_stream;
+          if (auto log_file = local_conf()->log_file; !log_file.empty()) {
+            // seastar::logger::do_log() writes to _out from every shard's thread
+            // with no lock. std::cerr is safe because it is unbuffered; a buffered
+            // ofstream is not. Disable buffering so each write() is a single syscall,
+            // matching cerr's thread-safety guarantee.
+            log_file_stream.rdbuf()->pubsetbuf(nullptr, 0);
+            log_file_stream.open(log_file, std::ios::app | std::ios::out);
+            try {
+              seastar::throw_system_error_on(log_file_stream.fail());
+            } catch (const std::system_error& e) {
+              ceph_abort_msg(fmt::format("unable to open log file: {}", e.what()));
+            }
+            logger().set_ostream(log_file_stream);
+          }
           auto reset_logger = seastar::defer([] {
             logger().set_ostream(std::cerr);
           });
+
+          DEBUG("writing pidfile");
           if (const auto ret = pidfile_write(local_conf()->pid_file);
               ret == -EACCES || ret == -EAGAIN) {
             ceph_abort_msg(
@@ -158,46 +180,43 @@ int main(int argc, const char* argv[])
             ceph_abort_msg(fmt::format("pidfile_write failed with {} {}",
                                        ret, cpp_strerror(-ret)));
           }
+
+          DEBUG("setting ignore SIGHUP");
           // just ignore SIGHUP, we don't reread settings. keep in mind signals
           // handled by S* must be blocked for alien threads (see AlienStore).
-          seastar::engine().handle_signal(SIGHUP, [] {});
+          seastar::handle_signal(SIGHUP, [] {});
 
-          // start prometheus API server
+          // Declared here so the socket stays up through osd.stop(). The
+          // listen itself happens after the monitor config is applied.
           seastar::httpd::http_server_control prom_server;
           std::any stop_prometheus;
-          if (uint16_t prom_port = config["prometheus_port"].as<uint16_t>();
-              prom_port != 0) {
-            prom_server.start("prometheus").get();
-            stop_prometheus = seastar::make_shared(seastar::deferred_stop(prom_server));
 
-            seastar::prometheus::config prom_config;
-            prom_config.prefix = config["prometheus_prefix"].as<std::string>();
-            seastar::prometheus::start(prom_server, prom_config).get();
-            seastar::net::inet_address prom_addr(config["prometheus_address"].as<std::string>());
-            prom_server.listen(seastar::socket_address{prom_addr, prom_port})
-              .handle_exception([=] (auto ep) {
-              std::cerr << seastar::format("Could not start Prometheus API server on {}:{}: {}\n",
-                                           prom_addr, prom_port, ep);
-              return seastar::make_exception_future(ep);
-            }).get();
-          }
-
+          DEBUG("creating messengers");
           const int whoami = std::stoi(local_conf()->name.get_id());
           const auto nonce = crimson::osd::get_nonce();
           crimson::net::MessengerRef cluster_msgr, client_msgr;
           crimson::net::MessengerRef hb_front_msgr, hb_back_msgr;
-          for (auto [msgr, name] : {make_pair(std::ref(cluster_msgr), "cluster"s),
-                                    make_pair(std::ref(client_msgr), "client"s),
-                                    make_pair(std::ref(hb_front_msgr), "hb_front"s),
+          for (auto [msgr, name] : {make_pair(std::ref(client_msgr), "client"s),
+                                    make_pair(std::ref(cluster_msgr), "cluster"s)}) {
+            msgr = crimson::net::Messenger::create(entity_name_t::OSD(whoami),
+                                                   name,
+                                                   nonce,
+                                                   false);
+          }
+          for (auto [msgr, name] : {make_pair(std::ref(hb_front_msgr), "hb_front"s),
                                     make_pair(std::ref(hb_back_msgr), "hb_back"s)}) {
             msgr = crimson::net::Messenger::create(entity_name_t::OSD(whoami),
                                                    name,
-                                                   nonce);
+                                                   nonce,
+                                                   true);
           }
+
+          DEBUG("creating object store");
           auto store = crimson::os::FuturizedStore::create(
             local_conf().get_val<std::string>("osd_objectstore"),
             local_conf().get_val<std::string>("osd_data"),
-            local_conf().get_config_values()).get();
+            local_conf().get_config_values());
+          INFO("passed objectstore is {}", local_conf().get_val<std::string>("osd_objectstore"));
 
           crimson::osd::OSD osd(
             whoami, nonce, std::ref(should_stop.abort_source()),
@@ -205,16 +224,21 @@ int main(int argc, const char* argv[])
 	    hb_front_msgr, hb_back_msgr);
 
           if (config.count("mkkey")) {
+            DEBUG("generating keyring");
             make_keyring().get();
           }
+
           if (local_conf()->no_mon_config) {
-            logger().info("bypassing the config fetch due to --no-mon-config");
+            INFO("bypassing the config fetch due to --no-mon-config");
           } else {
+            DEBUG("fetching config from monitors");
             crimson::osd::populate_config_from_mon().get();
           }
           if (config.count("mkfs")) {
+            DEBUG("running mkfs");
             auto osd_uuid = local_conf().get_val<uuid_d>("osd_uuid");
             if (osd_uuid.is_zero()) {
+              DEBUG("uuid not specified, generating random osd uuid");
               // use a random osd uuid if not specified
               osd_uuid.generate_random();
             }
@@ -226,20 +250,64 @@ int main(int argc, const char* argv[])
               config["osdspec-affinity"].as<std::string>()).get();
           }
           if (config.count("mkkey") || config.count("mkfs")) {
+            DEBUG("exiting, mkkey {}, mkfs {}", config.count("mkkey"), config.count("mkfs"));
             return EXIT_SUCCESS;
           } else {
+            const uint64_t prom_base = local_conf().get_val<uint64_t>(
+              "crimson_prometheus_port_base");
+            if (prom_base != 0) {
+              if (whoami < 0) {
+                ERROR("osd id {} must be non-negative to bind the Prometheus endpoint",
+                      whoami);
+                ceph_abort_msg(
+                  "osd id must be non-negative to bind the Prometheus endpoint");
+              }
+              const uint64_t prom_port64 =
+                prom_base + static_cast<uint64_t>(whoami);
+              if (prom_port64 > std::numeric_limits<uint16_t>::max()) {
+                ERROR("crimson_prometheus_port_base {} + osd id {} exceeds 65535",
+                      prom_base, whoami);
+                ceph_abort_msg(fmt::format(
+                  "crimson_prometheus_port_base {} + osd id {} exceeds 65535",
+                  prom_base, whoami));
+              }
+              const uint16_t prom_port = static_cast<uint16_t>(prom_port64);
+              const auto prom_addr_str = local_conf().get_val<std::string>(
+                "crimson_prometheus_address");
+              seastar::net::inet_address prom_addr(prom_addr_str);
+              INFO("starting prometheus server on {}:{} "
+                   "(crimson_prometheus_port_base {} + osd id {})",
+                   prom_addr_str, prom_port, prom_base, whoami);
+              prom_server.start("prometheus").get();
+              stop_prometheus = seastar::make_shared(
+                seastar::deferred_stop(prom_server));
+
+              seastar::prometheus::config prom_config;
+              prom_config.prefix = local_conf().get_val<std::string>(
+                "crimson_prometheus_prefix");
+              seastar::prometheus::start(prom_server, prom_config).get();
+              prom_server.listen(seastar::socket_address{prom_addr, prom_port})
+                .handle_exception([=] (auto ep) {
+                std::cerr << seastar::format(
+                  "Could not start Prometheus API server on {}:{}: {}\n",
+                  prom_addr, prom_port, ep);
+                return seastar::make_exception_future(ep);
+              }).get();
+            }
+
+            DEBUG("starting OSD services");
             osd.start().get();
           }
-          logger().info("crimson startup completed");
+          INFO("crimson startup completed");
+
           should_stop.wait().get();
-          logger().info("crimson shutting down");
+          INFO("crimson shutting down");
           osd.stop().get();
-          // stop()s registered using defer() are called here
         } catch (...) {
           logger().error("startup failed: {}", std::current_exception());
           return EXIT_FAILURE;
         }
-        logger().info("crimson shutdown complete");
+        INFO("crimson shutdown complete");
         return EXIT_SUCCESS;
       });
     });

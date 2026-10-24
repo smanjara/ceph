@@ -1,4 +1,5 @@
 import { AuthStorageService } from './auth-storage.service';
+import { LocalStorage } from '~/app/shared/enum/local-storage-enum';
 
 describe('AuthStorageService', () => {
   let service: AuthStorageService;
@@ -14,13 +15,13 @@ describe('AuthStorageService', () => {
 
   it('should store username', () => {
     service.set(username, '');
-    expect(localStorage.getItem('dashboard_username')).toBe(username);
+    expect(localStorage.getItem(LocalStorage.DASHBOARD_USERNAME)).toBe(username);
   });
 
   it('should remove username', () => {
     service.set(username, '');
     service.remove();
-    expect(localStorage.getItem('dashboard_username')).toBe(null);
+    expect(localStorage.getItem(LocalStorage.DASHBOARD_USERNAME)).toBe(null);
   });
 
   it('should be loggedIn', () => {
@@ -35,13 +36,13 @@ describe('AuthStorageService', () => {
 
   it('should be SSO', () => {
     service.set(username, {}, true);
-    expect(localStorage.getItem('sso')).toBe('true');
+    expect(localStorage.getItem(LocalStorage.SSO)).toBe('true');
     expect(service.isSSO()).toBe(true);
   });
 
   it('should not be SSO', () => {
     service.set(username);
-    expect(localStorage.getItem('sso')).toBe('false');
+    expect(localStorage.getItem(LocalStorage.SSO)).toBe('false');
     expect(service.isSSO()).toBe(false);
   });
 });

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_IO_QOS_IMAGE_DISPATCH_H
 #define CEPH_LIBRBD_IO_QOS_IMAGE_DISPATCH_H
@@ -62,28 +62,27 @@ public:
       Context* on_dispatched) override;
   bool write(
       AioCompletion* aio_comp, Extents &&image_extents, bufferlist &&bl,
-      IOContext io_context, int op_flags, const ZTracer::Trace &parent_trace,
+      int op_flags, const ZTracer::Trace &parent_trace,
       uint64_t tid, std::atomic<uint32_t>* image_dispatch_flags,
       DispatchResult* dispatch_result, Context** on_finish,
       Context* on_dispatched) override;
   bool discard(
       AioCompletion* aio_comp, Extents &&image_extents,
-      uint32_t discard_granularity_bytes, IOContext io_context,
-      const ZTracer::Trace &parent_trace, uint64_t tid,
-      std::atomic<uint32_t>* image_dispatch_flags,
+      uint32_t discard_granularity_bytes, const ZTracer::Trace &parent_trace,
+      uint64_t tid, std::atomic<uint32_t>* image_dispatch_flags,
       DispatchResult* dispatch_result, Context** on_finish,
       Context* on_dispatched) override;
   bool write_same(
       AioCompletion* aio_comp, Extents &&image_extents, bufferlist &&bl,
-      IOContext io_context, int op_flags, const ZTracer::Trace &parent_trace,
+      int op_flags, const ZTracer::Trace &parent_trace,
       uint64_t tid, std::atomic<uint32_t>* image_dispatch_flags,
       DispatchResult* dispatch_result, Context** on_finish,
       Context* on_dispatched) override;
   bool compare_and_write(
-      AioCompletion* aio_comp, Extents &&image_extents, bufferlist &&cmp_bl,
-      bufferlist &&bl, uint64_t *mismatch_offset, IOContext io_context,
-      int op_flags, const ZTracer::Trace &parent_trace, uint64_t tid,
-      std::atomic<uint32_t>* image_dispatch_flags,
+      AioCompletion* aio_comp, Extents &&image_extents,
+      bufferlist &&cmp_bl, bufferlist &&bl, uint64_t *mismatch_offset,
+      int op_flags, const ZTracer::Trace &parent_trace,
+      uint64_t tid, std::atomic<uint32_t>* image_dispatch_flags,
       DispatchResult* dispatch_result, Context** on_finish,
       Context* on_dispatched) override;
   bool flush(
@@ -118,8 +117,8 @@ private:
 
   void handle_finished(int r, uint64_t tid);
 
-  bool set_throttle_flag(std::atomic<uint32_t>* image_dispatch_flags,
-                         uint32_t flag);
+  bool set_throttle_flags(std::atomic<uint32_t>* image_dispatch_flags,
+                          uint32_t flags);
   bool needs_throttle(bool read_op, const Extents& image_extents, uint64_t tid,
                       std::atomic<uint32_t>* image_dispatch_flags,
                       DispatchResult* dispatch_result, Context** on_finish,

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "librbd/io/Utils.h"
 #include "common/dout.h"
@@ -14,6 +14,8 @@
 #include "librbd/io/ImageDispatcherInterface.h"
 #include "osd/osd_types.h"
 #include "osdc/Striper.h"
+
+#include <shared_mutex> // for std::shared_lock
 
 #define dout_subsys ceph_subsys_rbd
 #undef dout_prefix
@@ -117,16 +119,6 @@ void read_parent(I *image_ctx, uint64_t object_no, ReadExtents* read_extents,
 
   ldout(cct, 20) << dendl;
 
-  ceph::bufferlist* parent_read_bl;
-  if (read_extents->size() > 1) {
-    auto parent_comp = new ReadResult::C_ObjectReadMergedExtents(
-        cct, read_extents, on_finish);
-    parent_read_bl = &parent_comp->bl;
-    on_finish = parent_comp;
-  } else {
-    parent_read_bl = &read_extents->front().bl;
-  }
-
   auto comp = AioCompletion::create_and_start(on_finish, image_ctx->parent,
                                               AIO_TYPE_READ);
   ldout(cct, 20) << "completion=" << comp
@@ -134,7 +126,7 @@ void read_parent(I *image_ctx, uint64_t object_no, ReadExtents* read_extents,
                  << " area=" << area << dendl;
   auto req = io::ImageDispatchSpec::create_read(
     *image_ctx->parent, io::IMAGE_DISPATCH_LAYER_INTERNAL_START, comp,
-    std::move(parent_extents), area, ReadResult{parent_read_bl},
+    std::move(parent_extents), area, ReadResult{read_extents},
     image_ctx->parent->get_data_io_context(), 0, 0, trace);
   req->send();
 }
@@ -153,6 +145,21 @@ int clip_request(I* image_ctx, Extents* image_extents, ImageArea area) {
     image_extent.second = clip_len;
   }
   return 0;
+}
+
+void prune_extents(Extents& extents, uint64_t size) {
+  // drop extents completely beyond size
+  while (!extents.empty() && extents.back().first >= size) {
+    extents.pop_back();
+  }
+
+  if (!extents.empty()) {
+    // trim final overlapping extent
+    auto& last_extent = extents.back();
+    if (last_extent.first + last_extent.second > size) {
+      last_extent.second = size - last_extent.first;
+    }
+  }
 }
 
 void unsparsify(CephContext* cct, ceph::bufferlist* bl,
@@ -187,12 +194,9 @@ template <typename I>
 void area_to_object_extents(I* image_ctx, uint64_t offset, uint64_t length,
                             ImageArea area, uint64_t buffer_offset,
                             striper::LightweightObjectExtents* object_extents) {
-  Extents extents = {{offset, length}};
-  image_ctx->io_image_dispatcher->remap_to_physical(extents, area);
-  for (auto [off, len] : extents) {
-    Striper::file_to_extents(image_ctx->cct, &image_ctx->layout, off, len, 0,
-                             buffer_offset, object_extents);
-  }
+  offset = area_to_raw_offset(*image_ctx, offset, area);
+  Striper::file_to_extents(image_ctx->cct, &image_ctx->layout, offset, length,
+                           0, buffer_offset, object_extents);
 }
 
 template <typename I>
@@ -203,24 +207,50 @@ std::pair<Extents, ImageArea> object_to_area_extents(
     Striper::extent_to_file(image_ctx->cct, &image_ctx->layout, object_no, off,
                             len, extents);
   }
-  auto area = image_ctx->io_image_dispatcher->remap_to_logical(extents);
+
+  auto area = ImageArea::DATA;
+  uint64_t data_offset = image_ctx->get_data_offset();
+  bool saw_data = false;
+  bool saw_crypto_header = false;
+  for (auto& [off, _] : extents) {
+    if (off >= data_offset) {
+      off -= data_offset;
+      saw_data = true;
+    } else {
+      saw_crypto_header = true;
+    }
+  }
+  if (saw_crypto_header) {
+    ceph_assert(!saw_data);
+    area = ImageArea::CRYPTO_HEADER;
+  }
+
   return {std::move(extents), area};
 }
 
 template <typename I>
 uint64_t area_to_raw_offset(const I& image_ctx, uint64_t offset,
                             ImageArea area) {
-  Extents extents = {{offset, 0}};
-  image_ctx.io_image_dispatcher->remap_to_physical(extents, area);
-  return extents[0].first;
+  switch (area) {
+  case ImageArea::DATA:
+    return offset + image_ctx.get_data_offset();
+  case ImageArea::CRYPTO_HEADER:
+    // direct mapping
+    ceph_assert(image_ctx.get_data_offset() != 0);
+    return offset;
+  default:
+    ceph_abort();
+  }
 }
 
 template <typename I>
 std::pair<uint64_t, ImageArea> raw_to_area_offset(const I& image_ctx,
                                                   uint64_t offset) {
-  Extents extents = {{offset, 0}};
-  auto area = image_ctx.io_image_dispatcher->remap_to_logical(extents);
-  return {extents[0].first, area};
+  uint64_t data_offset = image_ctx.get_data_offset();
+  if (offset >= data_offset) {
+    return {offset - data_offset, ImageArea::DATA};
+  }
+  return {offset, ImageArea::CRYPTO_HEADER};
 }
 
 } // namespace util

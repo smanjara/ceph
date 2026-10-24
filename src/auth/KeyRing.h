@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -26,7 +27,7 @@ public:
   void decode_plaintext(ceph::buffer::list::const_iterator& bl);
   /* Create a KeyRing from a Ceph context.
    * We will use the configuration stored inside the context. */
-  int from_ceph_context(CephContext *cct);
+  int from_ceph_context(CephContext* cct, std::ostream* os);
 
   std::map<EntityName, EntityAuth>& get_keys() { return keys; }  // yuck
 
@@ -89,7 +90,7 @@ public:
   void remove(const EntityName& name) {
     keys.erase(name);
   }
-  void set_caps(EntityName& name, std::map<std::string, ceph::buffer::list>& caps) {
+  void set_caps(const EntityName& name, std::map<std::string, ceph::buffer::list>& caps) {
     keys[name].caps = caps;
   }
   void set_key(EntityName& ename, CryptoKey& key) {

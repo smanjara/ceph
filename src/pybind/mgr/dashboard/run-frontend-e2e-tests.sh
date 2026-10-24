@@ -33,13 +33,27 @@ start_ceph() {
     # Set SSL verify to False
     ceph_all dashboard set-rgw-api-ssl-verify False
 
-    CYPRESS_BASE_URL=$(ceph mgr services | jq -r .dashboard)
+    # Set test_orchestrator as orch backend
+    ceph mgr module enable test_orchestrator
+    ceph orch set backend test_orchestrator
+
+    CYPRESS_BASE_URL=""
+    retry=0
+    while [[ -z "${CYPRESS_BASE_URL}" || "${CYPRESS_BASE_URL}" == "null" ]]; do
+        CYPRESS_BASE_URL=$(ceph mgr services | jq -r .dashboard)
+        if [ $retry -eq 10 ]; then
+            echo "ERROR: Could not get the dashboard URL"
+            stop 1
+        fi
+        retry=$((retry + 1))
+        sleep 1
+    done
     CYPRESS_CEPH2_URL=$(ceph2 mgr services | jq -r .dashboard)
 
     # start rbd-mirror daemon in the cluster
     KEY=$(ceph auth get client.admin --format=json | jq -r .[0].key)
     MON_CLUSTER_1=$(grep "mon host" ${FULL_PATH_BUILD_DIR}/run/1/ceph.conf | awk '{print $4}')
-    ${FULL_PATH_BUILD_DIR}/bin/rbd-mirror --mon_host $MON_CLUSTER_1 --key $KEY -c ${FULL_PATH_BUILD_DIR}/run/1/ceph.conf &
+    ${FULL_PATH_BUILD_DIR}/bin/rbd-mirror --mon_host $MON_CLUSTER_1 --key $KEY -c ${FULL_PATH_BUILD_DIR}/run/1/ceph.conf
 
     set +x
 }
@@ -50,6 +64,11 @@ stop() {
         for cluster in ${CLUSTERS[@]}; do
             ../src/mstop.sh $cluster
         done
+        pids=$(pgrep rbd-mirror)
+        if [ -n "$pids" ]; then
+            echo Killing rbd-mirror processes: $pids
+            kill -9 $pids
+        fi
     fi
     exit $1
 }
@@ -60,9 +79,6 @@ check_device_available() {
     if [ "$DEVICE" == "docker" ]; then
         [ -x "$(command -v docker)" ] || failed=true
     else
-        cd $DASH_DIR/frontend
-        npx cypress verify
-
         case "$DEVICE" in
             chrome)
                 [ -x "$(command -v chrome)" ] || [ -x "$(command -v google-chrome)" ] ||
@@ -105,19 +121,22 @@ DASH_DIR=`pwd`
 cd ../../../../${BUILD_DIR}
 FULL_PATH_BUILD_DIR=`pwd`
 
-[[ "$(command -v npm)" == '' ]] && . ${FULL_PATH_BUILD_DIR}/src/pybind/mgr/dashboard/frontend/node-env/bin/activate
-
-: ${CYPRESS_CACHE_FOLDER:="${FULL_PATH_BUILD_DIR}/src/pybind/mgr/dashboard/cypress"}
-
-export CYPRESS_BASE_URL CYPRESS_CACHE_FOLDER CYPRESS_LOGIN_USER CYPRESS_LOGIN_PWD NO_COLOR CYPRESS_CEPH2_URL
-
 check_device_available
 
 if [ "$CYPRESS_BASE_URL" == "" ]; then
     start_ceph
 fi
 
+# node-env is used for all frontend related actions like npm, npx etc.
+[[ "$(command -v npm)" == '' ]] && . ${FULL_PATH_BUILD_DIR}/src/pybind/mgr/dashboard/frontend/node-env/bin/activate
+
+: ${CYPRESS_CACHE_FOLDER:="${FULL_PATH_BUILD_DIR}/src/pybind/mgr/dashboard/cypress"}
+
+export CYPRESS_BASE_URL CYPRESS_CACHE_FOLDER CYPRESS_LOGIN_USER CYPRESS_LOGIN_PWD NO_COLOR CYPRESS_CEPH2_URL
+
+# Verify Cypress installation
 cd $DASH_DIR/frontend
+npx cypress verify
 
 # Remove existing XML results
 rm -f cypress/reports/results-*.xml || true

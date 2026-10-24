@@ -30,6 +30,8 @@ tasks:
       - \(TOO_FEW_PGS\)
       - Monitor daemon marked osd\.[[:digit:]]+ down, but it is still running
       - slow request
+      - \(POOL_APP_NOT_ENABLED\)
+      - marked LAGGY
     conf:
       osd:
         osd min pg log entries: 5

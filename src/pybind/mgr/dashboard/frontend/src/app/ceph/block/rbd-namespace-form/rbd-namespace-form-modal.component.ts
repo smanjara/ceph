@@ -2,12 +2,12 @@ import { Component, OnInit } from '@angular/core';
 import {
   AbstractControl,
   AsyncValidatorFn,
-  FormControl,
+  UntypedFormControl,
   ValidationErrors,
   ValidatorFn
 } from '@angular/forms';
 
-import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap';
+import { BaseModal, ModalService } from 'carbon-components-angular';
 import { Subject } from 'rxjs';
 
 import { Pool } from '~/app/ceph/pool/pool';
@@ -24,9 +24,10 @@ import { NotificationService } from '~/app/shared/services/notification.service'
 @Component({
   selector: 'cd-rbd-namespace-form-modal',
   templateUrl: './rbd-namespace-form-modal.component.html',
-  styleUrls: ['./rbd-namespace-form-modal.component.scss']
+  styleUrls: ['./rbd-namespace-form-modal.component.scss'],
+  standalone: false
 })
-export class RbdNamespaceFormModalComponent implements OnInit {
+export class RbdNamespaceFormModalComponent extends BaseModal implements OnInit {
   poolPermission: Permission;
   pools: Array<Pool> = null;
   pool: string;
@@ -36,16 +37,17 @@ export class RbdNamespaceFormModalComponent implements OnInit {
 
   editing = false;
 
-  public onSubmit: Subject<void>;
+  public onSubmit: Subject<void> = new Subject();
 
   constructor(
-    public activeModal: NgbActiveModal,
     public actionLabels: ActionLabelsI18n,
     private authStorageService: AuthStorageService,
     private notificationService: NotificationService,
     private poolService: PoolService,
-    private rbdService: RbdService
+    private rbdService: RbdService,
+    protected modalService: ModalService
   ) {
+    super();
     this.poolPermission = this.authStorageService.getPermissions().pool;
     this.createForm();
   }
@@ -53,8 +55,8 @@ export class RbdNamespaceFormModalComponent implements OnInit {
   createForm() {
     this.namespaceForm = new CdFormGroup(
       {
-        pool: new FormControl(''),
-        namespace: new FormControl('')
+        pool: new UntypedFormControl(''),
+        namespace: new UntypedFormControl('')
       },
       this.validator(),
       this.asyncValidator()
@@ -98,8 +100,6 @@ export class RbdNamespaceFormModalComponent implements OnInit {
   }
 
   ngOnInit() {
-    this.onSubmit = new Subject();
-
     if (this.poolPermission.read) {
       this.poolService.list(['pool_name', 'type', 'application_metadata']).then((resp) => {
         const pools: Pool[] = [];
@@ -130,11 +130,11 @@ export class RbdNamespaceFormModalComponent implements OnInit {
       .createNamespace(pool, namespace)
       .toPromise()
       .then(() => {
+        this.modalService.destroy();
         this.notificationService.show(
           NotificationType.success,
           $localize`Created namespace '${pool}/${namespace}'`
         );
-        this.activeModal.close();
         this.onSubmit.next();
       })
       .catch(() => {

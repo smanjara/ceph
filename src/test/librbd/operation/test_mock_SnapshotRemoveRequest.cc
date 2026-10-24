@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "test/librbd/test_mock_fixture.h"
 #include "test/librbd/test_support.h"
@@ -14,6 +14,8 @@
 #include "librbd/operation/SnapshotRemoveRequest.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+
+#include <shared_mutex> // for std::shared_lock
 
 namespace librbd {
 namespace image {
@@ -119,7 +121,7 @@ public:
     }
 
     auto &expect = EXPECT_CALL(get_mock_io_ctx(mock_image_ctx.md_ctx),
-                               exec(mock_image_ctx.header_oid, _, StrEq("rbd"),
+                               exec_internal(mock_image_ctx.header_oid, _, StrEq("rbd"),
                                StrEq("snapshot_trash_add"),
                                _, _, _, _));
     if (r < 0) {
@@ -137,7 +139,7 @@ public:
 
     using ceph::encode;
     EXPECT_CALL(get_mock_io_ctx(mock_image_ctx.md_ctx),
-                exec(mock_image_ctx.header_oid, _, StrEq("rbd"),
+                exec_internal(mock_image_ctx.header_oid, _, StrEq("rbd"),
                      StrEq("snapshot_get"), _, _, _, _))
       .WillOnce(WithArg<5>(Invoke([snap_info, r](bufferlist* bl) {
                              encode(snap_info, *bl);
@@ -153,7 +155,7 @@ public:
 
     using ceph::encode;
     EXPECT_CALL(get_mock_io_ctx(mock_image_ctx.md_ctx),
-                exec(mock_image_ctx.header_oid, _, StrEq("rbd"),
+                exec_internal(mock_image_ctx.header_oid, _, StrEq("rbd"),
                      StrEq("children_list"), _, _, _, _))
       .WillOnce(WithArg<5>(Invoke([child_images, r](bufferlist* bl) {
                              encode(child_images, *bl);
@@ -169,7 +171,7 @@ public:
     encode(cls::rbd::ChildImageSpec{mock_image_ctx.md_ctx.get_id(), "",
                                     mock_image_ctx.id}, bl);
     EXPECT_CALL(get_mock_io_ctx(mock_image_ctx.md_ctx),
-                exec(util::header_name(parent_spec.image_id),
+                exec_internal(util::header_name(parent_spec.image_id),
                      _, StrEq("rbd"), StrEq("child_detach"), ContentsEqual(bl),
                      _, _, _))
       .WillOnce(Return(r));
@@ -214,7 +216,7 @@ public:
 
   void expect_snap_remove(MockImageCtx &mock_image_ctx, int r) {
     auto &expect = EXPECT_CALL(get_mock_io_ctx(mock_image_ctx.md_ctx),
-                               exec(mock_image_ctx.header_oid, _, StrEq("rbd"),
+                               exec_internal(mock_image_ctx.header_oid, _, StrEq("rbd"),
                                StrEq(mock_image_ctx.old_format ? "snap_remove" :
                                                                   "snapshot_remove"),
                                 _, _, _, _));
@@ -512,9 +514,10 @@ TEST_F(TestMockOperationSnapshotRemoveRequest, MirrorSnapshot) {
   expect_snapshot_trash_add(mock_image_ctx, 0);
 
   uint64_t snap_id = ictx->snap_info.rbegin()->first;
+  cls::rbd::MirrorSnapshotNamespace ns{
+    cls::rbd::MIRROR_SNAPSHOT_STATE_NON_PRIMARY, {}, "mirror uuid", 123};
   expect_snapshot_get(mock_image_ctx,
-                      {snap_id, {cls::rbd::MirrorSnapshotNamespace{}},
-                       "mirror", 123, {}, 0}, 0);
+                      {snap_id, {ns}, "mirror", 456, {}, 0}, 0);
 
   expect_get_parent_spec(mock_image_ctx, 0);
   expect_object_map_snap_remove(mock_image_ctx, 0);
@@ -526,8 +529,55 @@ TEST_F(TestMockOperationSnapshotRemoveRequest, MirrorSnapshot) {
 
   C_SaferCond cond_ctx;
   MockSnapshotRemoveRequest *req = new MockSnapshotRemoveRequest(
-    mock_image_ctx, &cond_ctx, cls::rbd::MirrorSnapshotNamespace(),
-    "mirror", snap_id);
+    mock_image_ctx, &cond_ctx, ns, "mirror", snap_id);
+  {
+    std::shared_lock owner_locker{mock_image_ctx.owner_lock};
+    req->send();
+  }
+  ASSERT_EQ(0, cond_ctx.wait());
+}
+
+TEST_F(TestMockOperationSnapshotRemoveRequest, MirrorSnapshotOrphan) {
+  REQUIRE_FORMAT_V2();
+
+  librbd::ImageCtx *ictx;
+  ASSERT_EQ(0, open_image(m_image_name, &ictx));
+  ASSERT_EQ(0, snap_create(*ictx, "snap1"));
+  ASSERT_EQ(0, ictx->state->refresh_if_required());
+
+  MockImageCtx mock_image_ctx(*ictx);
+
+  MockExclusiveLock mock_exclusive_lock;
+  if (ictx->test_features(RBD_FEATURE_EXCLUSIVE_LOCK)) {
+    mock_image_ctx.exclusive_lock = &mock_exclusive_lock;
+  }
+
+  MockObjectMap mock_object_map;
+  if (ictx->test_features(RBD_FEATURE_OBJECT_MAP)) {
+    mock_image_ctx.object_map = &mock_object_map;
+  }
+
+  expect_op_work_queue(mock_image_ctx);
+
+  ::testing::InSequence seq;
+  expect_snapshot_trash_add(mock_image_ctx, 0);
+
+  uint64_t snap_id = ictx->snap_info.rbegin()->first;
+  cls::rbd::MirrorSnapshotNamespace ns{
+    cls::rbd::MIRROR_SNAPSHOT_STATE_NON_PRIMARY, {}, "", CEPH_NOSNAP};
+  expect_snapshot_get(mock_image_ctx,
+                      {snap_id, {ns}, "mirror", 456, {}, 0}, 0);
+
+  expect_get_parent_spec(mock_image_ctx, 0);
+  expect_object_map_snap_remove(mock_image_ctx, 0);
+  MockRemoveImageStateRequest mock_remove_image_state_request;
+  expect_release_snap_id(mock_image_ctx);
+  expect_snap_remove(mock_image_ctx, 0);
+  expect_rm_snap(mock_image_ctx);
+
+  C_SaferCond cond_ctx;
+  MockSnapshotRemoveRequest *req = new MockSnapshotRemoveRequest(
+    mock_image_ctx, &cond_ctx, ns, "mirror", snap_id);
   {
     std::shared_lock owner_locker{mock_image_ctx.owner_lock};
     req->send();
@@ -724,8 +774,7 @@ TEST_F(TestMockOperationSnapshotRemoveRequest, RemoveChildError) {
   librbd::ImageCtx *ictx;
   ASSERT_EQ(0, open_image(clone_name, &ictx));
   if (ictx->test_features(RBD_FEATURE_DEEP_FLATTEN)) {
-    std::cout << "SKIPPING" << std::endl;
-    return SUCCEED();
+    GTEST_SKIP() << "Skipping due to enabled deep-flatten";
   }
 
   ASSERT_EQ(0, snap_create(*ictx, "snap1"));

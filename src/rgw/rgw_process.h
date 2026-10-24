@@ -1,12 +1,11 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
-#ifndef RGW_PROCESS_H
-#define RGW_PROCESS_H
+#pragma once
 
 #include "rgw_common.h"
 #include "rgw_acl.h"
-#include "rgw_user.h"
+#include "driver/rados/rgw_user.h"
 #include "rgw_rest.h"
 #include "include/ceph_assert.h"
 
@@ -89,7 +88,7 @@ public:
 	     ceph::make_timespan(g_conf()->rgw_op_thread_suicide_timeout),
 	     &m_tp) {
   }
-  
+
   virtual ~RGWProcess() = default;
 
   const RGWProcessEnv& get_env() const { return env; }
@@ -158,5 +157,3 @@ extern int rgw_process_authenticated(RGWHandler_REST* handler,
                                      bool skip_retarget = false);
 
 #undef dout_context
-
-#endif /* RGW_PROCESS_H */

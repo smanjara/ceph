@@ -23,14 +23,13 @@ Synopsis
 Description
 ===========
 
-:program:`ceph-volume` is a single purpose command line tool to deploy logical
-volumes as OSDs, trying to maintain a similar API to ``ceph-disk`` when
-preparing, activating, and creating OSDs.
+:program:`ceph-volume` is a single-purpose command line tool to deploy logical
+volumes as OSDs. It maintains an API similar to that of the older ``ceph-disk``
+tool when preparing, activating, and creating OSDs.
 
-It deviates from ``ceph-disk`` by not interacting or relying on the udev rules
-that come installed for Ceph. These rules allow automatic detection of
-previously setup devices that are in turn fed into ``ceph-disk`` to activate
-them.
+Unlike ``ceph-disk``, it does not interact with or rely on udev rules. Those
+rules allowed automatic detection of previously set up devices, which were in
+turn fed into ``ceph-disk`` to activate them.
 
 
 Commands
@@ -70,7 +69,7 @@ lvm
 .. program:: ceph-volume lvm
 
 By making use of LVM tags, the ``lvm`` sub-command is able to store and later
-re-discover and query devices associated with OSDs so that they can later
+re-discover and query devices associated with OSDs so that they can later be
 activated.
 
 Subcommands:
@@ -80,9 +79,8 @@ batch
 
 .. program:: ceph-volume lvm batch
 
-Creates OSDs from a list of devices using a ``filestore``
-or ``bluestore`` (default) setup. It will create all necessary volume groups
-and logical volumes required to have a working OSD.
+Creates OSDs from a list of devices using a ``bluestore`` (default) setup. 
+It will create all necessary volume groups and logical volumes required to have a working OSD.
 
 Example usage with three devices::
 
@@ -97,10 +95,6 @@ Optional arguments:
 .. option:: --bluestore
 
    Use the bluestore objectstore (default)
-
-.. option:: --filestore
-
-   Use the filestore objectstore
 
 .. option:: --yes
 
@@ -179,10 +173,6 @@ Optional Arguments:
 
    bluestore objectstore (default)
 
-.. option:: --filestore
-
-   filestore objectstore
-
 .. option:: --all
 
    Activate all OSDs found in the system
@@ -202,13 +192,12 @@ prepare
 
 .. program:: ceph-volume lvm prepare
 
-Prepares a logical volume to be used as an OSD and journal using a ``filestore``
-or ``bluestore`` (default) setup. It will not create or modify the logical volumes
-except for adding extra metadata.
+Prepares a logical volume to be used as an OSD and journal using a ``bluestore`` (default) setup. 
+It will not create or modify the logical volumes except for adding extra metadata.
 
 Usage::
 
-    ceph-volume lvm prepare --filestore --data <data lv> --journal <journal device>
+    ceph-volume lvm prepare --bluestore --data <data lv> --journal <journal device>
 
 Optional arguments:
 
@@ -231,10 +220,6 @@ Optional arguments:
 .. option:: --block.db
 
    Path to a bluestore block.db logical volume or partition
-
-.. option:: --filestore
-
-   Use the filestore objectstore
 
 .. option:: --dmcrypt
 
@@ -265,7 +250,7 @@ For encrypting an OSD, the ``--dmcrypt`` flag must be added when preparing
 create
 ^^^^^^
 
-Wraps the two-step process to provision a new osd (calling ``prepare`` first
+Wraps the two-step process to provision a new OSD (calling ``prepare`` first
 and then ``activate``) into a single one. The reason to prefer ``prepare`` and
 then ``activate`` is to gradually introduce new OSDs into a cluster, and
 avoiding large amounts of data being rebalanced.
@@ -433,7 +418,7 @@ case it is attached to the OSD replacing one of the source devices. Following
 replacement rules apply (in the order of precedence, stop on the first match):
 
     - if source list has DB volume - target device replaces it.
-    - if source list has WAL volume - target device replace it.
+    - if source list has WAL volume - target device replaces it.
     - if source list has slow volume only - operation is not permitted,
       requires explicit allocation via new-db/new-wal command.
 
@@ -492,10 +477,6 @@ Optional Arguments:
 .. option:: --bluestore
 
    bluestore objectstore (default)
-
-.. option:: --filestore
-
-   filestore objectstore
 
 .. note::
 
@@ -578,10 +559,10 @@ Availability
 ============
 
 :program:`ceph-volume` is part of Ceph, a massively scalable, open-source, distributed storage system. Please refer to
-the documentation at http://docs.ceph.com/ for more information.
+the documentation at https://docs.ceph.com/ for more information.
 
 
 See also
 ========
 
-:doc:`ceph-osd <ceph-osd>`\(8),
+:doc:`ceph-osd <ceph-osd>`\(8)

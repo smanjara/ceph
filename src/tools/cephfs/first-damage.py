@@ -23,9 +23,19 @@
 #
 #    cephfs-journal-tool --rank=<fs_name>:0 event recover_dentries summary
 #
+#    NOTE: Large journal sizes can cause the tool's Resident Set Size (RSS) to
+#          spike significantly. To prevent excessive memory consumption, use the
+#          `--max-rss <bytes>` flag to cap the RSS. 
+#
+#          Avoid setting this value too low, as it will severely degrade runtime
+#          performance and prolong recovery. It is best practice to maintain a memory
+#          buffer of at least 30% of the tool's total budget. For example, if 100 GiB
+#          is to be allotted to the tool, cap the RSS at 70 GiB
+#          (`--max-rss 75161927680`).
+#
 # 4b) If all good so far, reset the journal:
 #
-#    cephfs-journal-tool --rank=<fs_name>:0 journal reset
+#    cephfs-journal-tool --rank=<fs_name>:0 journal reset --yes-i-really-really-mean-it
 #
 # 5) Run this tool to see list of damaged dentries:
 #
@@ -56,18 +66,23 @@ MEMO = None
 REMOVE = False
 POOL = None
 NEXT_SNAP = None
-CONF = os.environ.get('CEPH_CONF')
+CONF = os.environ.get('CEPH_CONF', '/etc/ceph/ceph.conf')
 REPAIR_NOSNAP = None
 
-CEPH_NOSNAP = 0xfffffffe # int32 -2
+CEPH_NOSNAP = 0xfffffffffffffffe # int64 -2
+ROOT_INODE  = "1.00000000"
+LOST_FOUND_INODE  = "4.00000000"
 
 DIR_PATTERN = re.compile(r'[0-9a-fA-F]{8,}\.[0-9a-fA-F]+')
+STRAY_DIR_PATTERN = re.compile(r'6[0-9a-fA-F]{2,}\.[0-9a-fA-F]+')
 
 CACHE = set()
 
 def traverse(MEMO, ioctx):
     for o in ioctx.list_objects():
-        if not DIR_PATTERN.fullmatch(o.key):
+        if (not DIR_PATTERN.fullmatch(o.key) and
+            not STRAY_DIR_PATTERN.fullmatch(o.key)
+            and o.key not in [ROOT_INODE, LOST_FOUND_INODE]):
             log.debug("skipping %s", o.key)
             continue
         elif o.key in CACHE:
@@ -76,26 +91,33 @@ def traverse(MEMO, ioctx):
         log.info("examining: %s", o.key)
 
         with rados.ReadOpCtx() as rctx:
-            it = ioctx.get_omap_vals(rctx, None, None, 100000)[0]
-            ioctx.operate_read_op(rctx, o.key)
-            for (dnk, val) in it:
-                log.debug('\t%s: val size %d', dnk, len(val))
-                (first,) = struct.unpack('<I', val[:4])
-                if first > NEXT_SNAP:
-                    log.warning(f"found {o.key}:{dnk} first (0x{first:x}) > NEXT_SNAP (0x{NEXT_SNAP:x})")
-                    if REPAIR_NOSNAP and dnk.endswith("_head") and first == CEPH_NOSNAP:
-                        log.warning(f"repairing first==CEPH_NOSNAP damage, setting to NEXT_SNAP (0x{NEXT_SNAP:x})")
-                        first = NEXT_SNAP
-                        nval = bytearray(val)
-                        struct.pack_into("<I", nval, 0, NEXT_SNAP)
-                        with rados.WriteOpCtx() as wctx:
-                            ioctx.set_omap(wctx, (dnk,), (bytes(nval),))
-                            ioctx.operate_write_op(wctx, o.key)
-                    elif REMOVE:
-                        log.warning(f"removing {o.key}:{dnk}")
-                        with rados.WriteOpCtx() as wctx:
-                            ioctx.remove_omap_keys(wctx, [dnk])
-                            ioctx.operate_write_op(wctx, o.key)
+            nkey = None
+            while True:
+                it = ioctx.get_omap_vals(rctx, nkey, None, 100, omap_key_type=bytes)[0]
+                ioctx.operate_read_op(rctx, o.key)
+                nkey = None
+                for (dnk, val) in it:
+                    log.debug(f'\t{dnk}: val size {len(val)}')
+                    (first,) = struct.unpack('<Q', val[:8])
+                    log.debug(f'\t{dnk}: first {first}')
+                    if first > NEXT_SNAP:
+                        log.warning(f"found {o.key}:{dnk} first (0x{first:x}) > NEXT_SNAP (0x{NEXT_SNAP:x})")
+                        if REPAIR_NOSNAP and dnk.endswith(b"_head") and first == CEPH_NOSNAP:
+                            log.warning(f"repairing first==CEPH_NOSNAP damage, setting to NEXT_SNAP (0x{NEXT_SNAP:x})")
+                            first = NEXT_SNAP
+                            nval = bytearray(val)
+                            struct.pack_into("<Q", nval, 0, NEXT_SNAP)
+                            with rados.WriteOpCtx() as wctx:
+                                ioctx.set_omap(wctx, (dnk,), (bytes(nval),))
+                                ioctx.operate_write_op(wctx, o.key)
+                        elif REMOVE:
+                            log.warning(f"removing {o.key}:{dnk}")
+                            with rados.WriteOpCtx() as wctx:
+                                ioctx.remove_omap_keys(wctx, [dnk])
+                                ioctx.operate_write_op(wctx, o.key)
+                    nkey = dnk
+                if nkey is None:
+                    break
         MEMO.write(f"{o.key}\n")
 
 if __name__ == '__main__':

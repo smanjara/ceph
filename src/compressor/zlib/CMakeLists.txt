@@ -1,6 +1,7 @@
 # zlib
 
 if(HAVE_INTEL_SSE4_1 AND HAVE_NASM_X64_AVX2 AND (NOT APPLE))
+  set(have_isal ON)
   set(CMAKE_ASM_FLAGS "-i ${PROJECT_SOURCE_DIR}/src/isa-l/igzip/ -i ${PROJECT_SOURCE_DIR}/src/isa-l/include/ ${CMAKE_ASM_FLAGS}")
   set(zlib_sources
     CompressionPluginZlib.cc
@@ -43,6 +44,7 @@ if(HAVE_INTEL_SSE4_1 AND HAVE_NASM_X64_AVX2 AND (NOT APPLE))
     ${CMAKE_SOURCE_DIR}/src/isa-l/igzip/igzip_set_long_icf_fg_06.asm
   )
 elseif(HAVE_ARMV8_SIMD)
+  set(have_isal ON)
   set(zlib_asm_sources
     ${CMAKE_SOURCE_DIR}/src/isa-l/igzip/aarch64/igzip_inflate_multibinary_arm64.S
     ${CMAKE_SOURCE_DIR}/src/isa-l/igzip/aarch64/igzip_multibinary_arm64.S
@@ -82,6 +84,37 @@ elseif(HAVE_ARMV8_SIMD)
     COMPILE_DEFINITIONS "__ASSEMBLY__"
     INCLUDE_DIRECTORIES "${PROJECT_SOURCE_DIR}/src/isa-l/igzip;${PROJECT_SOURCE_DIR}/src/isa-l/igzip/aarch64"
   )
+elseif(HAVE_RISCV_RVV)
+  set(have_isal ON)
+  set(zlib_asm_sources
+    ${CMAKE_SOURCE_DIR}/src/isa-l/igzip/riscv64/igzip_multibinary_riscv64.S
+    ${CMAKE_SOURCE_DIR}/src/isa-l/igzip/riscv64/igzip_isal_adler32_rvv.S
+    ${CMAKE_SOURCE_DIR}/src/isa-l/igzip/riscv64/igzip_isal_adler32_rvv128.S
+  )
+  set(zlib_sources
+    CompressionPluginZlib.cc
+    ZlibCompressor.cc
+    ${CMAKE_SOURCE_DIR}/src/isa-l/igzip/igzip.c
+    ${CMAKE_SOURCE_DIR}/src/isa-l/igzip/hufftables_c.c
+    ${CMAKE_SOURCE_DIR}/src/isa-l/igzip/igzip_base.c
+    ${CMAKE_SOURCE_DIR}/src/isa-l/igzip/igzip_icf_base.c
+    ${CMAKE_SOURCE_DIR}/src/isa-l/igzip/adler32_base.c
+    ${CMAKE_SOURCE_DIR}/src/isa-l/igzip/flatten_ll.c
+    ${CMAKE_SOURCE_DIR}/src/isa-l/igzip/encode_df.c
+    ${CMAKE_SOURCE_DIR}/src/isa-l/igzip/igzip_icf_body.c
+    ${CMAKE_SOURCE_DIR}/src/isa-l/igzip/igzip_inflate.c
+    ${CMAKE_SOURCE_DIR}/src/isa-l/igzip/huff_codes.c
+    ${CMAKE_SOURCE_DIR}/src/isa-l/igzip/proc_heap_base.c
+    ${CMAKE_SOURCE_DIR}/src/isa-l/igzip/riscv64/igzip_multibinary_riscv64_dispatcher.c
+    ${CMAKE_SOURCE_DIR}/src/isa-l/crc/crc_base_aliases.c
+    ${CMAKE_SOURCE_DIR}/src/isa-l/crc/crc_base.c
+    ${CMAKE_SOURCE_DIR}/src/isa-l/crc/crc64_base.c
+    ${zlib_asm_sources}
+  )
+  set_source_files_properties(${zlib_asm_sources} PROPERTIES
+    COMPILE_DEFINITIONS "__ASSEMBLY__"
+    INCLUDE_DIRECTORIES "${PROJECT_SOURCE_DIR}/src/isa-l/igzip;${PROJECT_SOURCE_DIR}/src/isa-l/igzip/riscv64"
+  )
 else()
   set(zlib_sources
     CompressionPluginZlib.cc
@@ -90,8 +123,19 @@ else()
 endif()
 
 add_library(ceph_zlib SHARED ${zlib_sources})
+if(have_isal)
+  # Only the branches above compile the ISA-L sources, so this is what
+  # decides whether the isal_* entry points exist.
+  target_compile_definitions(ceph_zlib PRIVATE HAVE_ISAL)
+endif()
 target_link_libraries(ceph_zlib ZLIB::ZLIB compressor $<$<PLATFORM_ID:Windows>:ceph-common>)
-target_include_directories(ceph_zlib SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/src/isa-l/include")
+if(HAVE_QATZIP AND HAVE_QAT)
+  target_link_libraries(ceph_zlib qat_compressor)
+endif()
+if(HAVE_UADK)
+  target_link_libraries(ceph_zlib uadk_compressor)
+endif()
+target_include_directories(ceph_zlib SYSTEM PRIVATE "${CMAKE_SOURCE_DIR}/src/isa-l/include" "${CMAKE_SOURCE_DIR}/src/isa-l")
 set_target_properties(ceph_zlib PROPERTIES
   VERSION 2.0.0
   SOVERSION 2

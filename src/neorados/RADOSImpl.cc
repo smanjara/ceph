@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -12,20 +13,18 @@
  *
  */
 
+#include "RADOSImpl.h"
 
 #include <boost/system/system_error.hpp>
 
-#include "common/common_init.h"
-
-#include "global/global_init.h"
-
-#include "RADOSImpl.h"
+#include "msg/Messenger.h"
 
 namespace neorados {
 namespace detail {
 
 RADOS::RADOS(boost::asio::io_context& ioctx,
-	     boost::intrusive_ptr<CephContext> cct)
+             boost::intrusive_ptr<CephContext> cct,
+             const std::optional<std::string>& objecter_admin_socket_name)
   : Dispatcher(cct.get()),
     ioctx(ioctx),
     cct(cct),
@@ -45,7 +44,9 @@ RADOS::RADOS(boost::asio::io_context& ioctx,
   messenger->set_default_policy(
     Messenger::Policy::lossy_client(CEPH_FEATURE_OSDREPLYMUX));
 
-  objecter = std::make_unique<Objecter>(cct.get(), messenger.get(), &monclient, ioctx);
+  objecter = std::make_unique<Objecter>(cct.get(), messenger.get(), &monclient,
+					ioctx,
+					objecter_admin_socket_name.value_or(""));
 
   objecter->set_balanced_budget();
   monclient.set_messenger(messenger.get());
@@ -84,17 +85,7 @@ RADOS::RADOS(boost::asio::io_context& ioctx,
 }
 
 RADOS::~RADOS() {
-  if (objecter && objecter->initialized) {
-    objecter->shutdown();
-  }
-
-  mgrclient.shutdown();
-  monclient.shutdown();
-
-  if (messenger) {
-    messenger->shutdown();
-    messenger->wait();
-  }
+  shutdown();
 }
 
 bool RADOS::ms_dispatch(Message *m)
@@ -117,5 +108,19 @@ bool RADOS::ms_handle_refused(Connection *con) {
   return false;
 }
 
+void RADOS::shutdown() {
+  if (objecter && objecter->initialized) {
+    objecter->shutdown();
+  }
+
+  // These shutdowns are idempotent
+  mgrclient.shutdown();
+  monclient.shutdown();
+
+  if (messenger) {
+    messenger->shutdown();
+    messenger->wait();
+  }
+}
 } // namespace detail
 } // namespace neorados

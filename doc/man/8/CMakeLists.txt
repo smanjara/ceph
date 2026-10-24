@@ -59,8 +59,11 @@ if(WITH_RADOSGW)
 	radosgw.rst
 	radosgw-admin.rst
 	rgw-orphan-list.rst
+	rgw-gap-list.rst
 	rgw-policy-check.rst
-	ceph-diff-sorted.rst)
+	rgw-policy-test.rst
+	ceph-diff-sorted.rst
+	rgw-restore-bucket-index.rst)
 endif()
 
 if(WITH_RBD)

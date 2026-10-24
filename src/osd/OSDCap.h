@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -29,13 +30,14 @@
 #include <ostream>
 using std::ostream;
 
-#include "include/types.h"
-#include "OpRequest.h"
-
 #include <list>
 #include <vector>
 #include <boost/optional.hpp>
 #include <boost/fusion/include/adapt_struct.hpp>
+
+#include "include/types.h"
+#include "osd/osd_op_util.h"
+
 
 static const __u8 OSD_CAP_R     = (1 << 1);      // read
 static const __u8 OSD_CAP_W     = (1 << 2);      // write
@@ -138,6 +140,8 @@ struct OSDCapMatch {
     : pool_tag(app, key, val) {}
   OSDCapMatch(const std::string& ns, const OSDCapPoolTag& pt)
     : pool_namespace("", ns), pool_tag(pt) {}
+  OSDCapMatch(const OSDCapPoolNamespace& pns, const OSDCapPoolTag& pt)
+    : pool_namespace(pns), pool_tag(pt) {}
 
   /**
    * check if given request parameters match our constraints
@@ -216,6 +220,7 @@ struct OSDCapGrant {
                   std::vector<bool>* class_allowed) const;
 
   void expand_profile();
+  std::string to_string();
 };
 
 ostream& operator<<(ostream& out, const OSDCapGrant& g);
@@ -230,6 +235,8 @@ struct OSDCap {
   bool allow_all() const;
   void set_allow_all();
   bool parse(const std::string& str, ostream *err=NULL);
+  bool merge(OSDCap newcap);
+  std::string to_string();
 
   /**
    * check if we are capable of something

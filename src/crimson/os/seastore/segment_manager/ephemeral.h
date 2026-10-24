@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -34,15 +34,22 @@ struct ephemeral_config_t {
 constexpr ephemeral_config_t DEFAULT_TEST_EPHEMERAL = {
   1 << 30,
   4 << 10,
-  8 << 20
+  16 << 20
 };
 
 std::ostream &operator<<(std::ostream &, const ephemeral_config_t &);
 
-EphemeralSegmentManagerRef create_test_ephemeral();
+EphemeralSegmentManagerRef create_test_ephemeral(
+  device_id_t id,
+  device_type_t dtype);
 
+device_spec_t get_ephemeral_device_spec(
+  device_id_t id, bool is_cache, bool is_cold);
 device_config_t get_ephemeral_device_config(
-    std::size_t index, std::size_t num_devices);
+  device_id_t id,
+  device_set_t cache_devices,
+  device_set_t data_devices,
+  bool is_major_device);
 
 class EphemeralSegment final : public Segment {
   friend class EphemeralSegmentManager;
@@ -52,12 +59,12 @@ class EphemeralSegment final : public Segment {
 public:
   EphemeralSegment(EphemeralSegmentManager &manager, segment_id_t id);
 
-  segment_id_t get_segment_id() const final { return id; }
-  segment_off_t get_write_capacity() const final;
-  segment_off_t get_write_ptr() const final { return write_pointer; }
-  close_ertr::future<> close() final;
-  write_ertr::future<> write(segment_off_t offset, ceph::bufferlist bl) final;
-  write_ertr::future<> advance_wp(segment_off_t offset) final;
+  segment_id_t get_segment_id() const override { return id; }
+  segment_off_t get_write_capacity() const override;
+  segment_off_t get_write_ptr() const override { return write_pointer; }
+  close_ertr::future<> close() override;
+  write_ertr::future<> write(segment_off_t offset, ceph::bufferlist bl) override;
+  write_ertr::future<> advance_wp(segment_off_t offset) override;
 
   ~EphemeralSegment() {}
 };
@@ -83,58 +90,64 @@ class EphemeralSegmentManager final : public SegmentManager {
 
 public:
   EphemeralSegmentManager(
+    device_id_t id,
+    device_type_t dtype,
     ephemeral_config_t config)
-    : config(config) {
+    : SegmentManager(std::string(), dtype, id),
+      config(config) {
     config.validate();
   }
 
   ~EphemeralSegmentManager();
 
-  close_ertr::future<> close() final {
+  close_ertr::future<> close() override {
     return close_ertr::now();
   }
 
-  device_id_t get_device_id() const final {
-    assert(device_config);
-    return device_config->spec.id;
-  }
-
-  mount_ret mount() final {
+  mount_ret mount() override {
     return mount_ertr::now();
   }
 
-  mkfs_ret mkfs(device_config_t) final;
+  mkfs_ret mkfs(device_config_t) override;
 
-  open_ertr::future<SegmentRef> open(segment_id_t id) final;
+  open_ertr::future<SegmentRef> open(segment_id_t id) override;
 
-  release_ertr::future<> release(segment_id_t id) final;
+  release_ertr::future<> release(segment_id_t id) override;
 
   read_ertr::future<> read(
     paddr_t addr,
     size_t len,
-    ceph::bufferptr &out) final;
+    ceph::bufferptr &out) override;
 
-  size_t get_available_size() const final {
+  read_ertr::future<> readv(
+    paddr_t addr,
+    std::vector<bufferptr> ptr) override;
+
+  size_t get_available_size() const override {
     return config.size;
   }
-  extent_len_t get_block_size() const final {
+  extent_len_t get_block_size() const override {
     return config.block_size;
   }
-  segment_off_t get_segment_size() const final {
+  segment_off_t get_segment_size() const override {
     return config.segment_size;
   }
 
-  const seastore_meta_t &get_meta() const final {
+  const seastore_meta_t &get_meta() const override {
     assert(device_config);
     return device_config->meta;
   }
 
-  secondary_device_set_t& get_secondary_devices() final {
+  device_set_t& get_cache_devices() override {
     assert(device_config);
-    return device_config->secondary_devices;
+    return device_config->cache_devices;
   }
 
-  magic_t get_magic() const final {
+  device_set_t& get_data_devices() override {
+    return device_config->data_devices;
+  }
+
+  magic_t get_magic() const override {
     return device_config->spec.magic;
   }
 

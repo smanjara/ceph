@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -32,6 +32,10 @@ static int signal_fd[2] = {0, 0};
 
 namespace rgw {
 namespace signal {
+
+void sig_handler_noop(int signum) {
+  /* NOP */
+} /* sig_handler_noop */
 
 void sighup_handler(int signum) {
     if (rgw::AppMain::ops_log_file != nullptr) {

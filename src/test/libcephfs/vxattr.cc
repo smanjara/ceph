@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,6 +16,7 @@
 #include "include/compat.h"
 #include "gtest/gtest.h"
 #include "include/cephfs/libcephfs.h"
+#include "include/fs_types.h"
 #include "mds/mdstypes.h"
 #include "include/stat.h"
 #include <errno.h>
@@ -25,8 +27,11 @@
 #include <dirent.h>
 #include <sys/uio.h>
 #include <sys/time.h>
-#include <sys/resource.h>
 #include <string.h>
+
+#ifndef _WIN32
+#include <sys/resource.h>
+#endif
 
 #include "common/Clock.h"
 #include "common/ceph_json.h"
@@ -42,10 +47,6 @@
 #include <thread>
 #include <regex>
 #include <string>
-
-#ifndef ALLPERMS
-#define ALLPERMS (S_ISUID|S_ISGID|S_ISVTX|S_IRWXU|S_IRWXG|S_IRWXO)
-#endif
 
 using namespace std;
 
@@ -381,5 +382,192 @@ TEST(LibCephFS, GetAndSetDirRandom) {
   ASSERT_EQ(0, ceph_rmdir(cmount, "test/d3"));
   ASSERT_EQ(0, ceph_rmdir(cmount, "test"));
 
+  ceph_shutdown(cmount);
+}
+
+TEST(LibCephFS, FsCrypt) {
+  struct ceph_mount_info *cmount;
+  ASSERT_EQ(ceph_create(&cmount, NULL), 0);
+  ASSERT_EQ(ceph_conf_read_file(cmount, NULL), 0);
+  ASSERT_EQ(0, ceph_conf_parse_env(cmount, NULL));
+  ASSERT_EQ(ceph_mount(cmount, NULL), 0);
+
+  char test_xattr_file[NAME_MAX];
+  sprintf(test_xattr_file, "test_fscrypt_%d", getpid());
+  int fd = ceph_open(cmount, test_xattr_file, O_RDWR|O_CREAT, 0666);
+  ASSERT_GT(fd, 0);
+
+  uint64_t size = 64;
+  ASSERT_EQ(0, ceph_fsetxattr(cmount, fd, "ceph.fscrypt.auth", "foo", 3, XATTR_CREATE));
+  ASSERT_EQ(0, ceph_fsetxattr(cmount, fd, "ceph.fscrypt.file", &size, sizeof(size), XATTR_CREATE));
+
+  char buf[64];
+  ASSERT_EQ(3, ceph_fgetxattr(cmount, fd, "ceph.fscrypt.auth", buf, sizeof(buf)));
+  ASSERT_EQ(sizeof(size), ceph_fgetxattr(cmount, fd, "ceph.fscrypt.file", buf, sizeof(buf)));
+  ASSERT_EQ(0, ceph_close(cmount, fd));
+
+  ASSERT_EQ(0, ceph_unmount(cmount));
+  ASSERT_EQ(0, ceph_mount(cmount, NULL));
+
+  fd = ceph_open(cmount, test_xattr_file, O_RDWR, 0666);
+  ASSERT_GT(fd, 0);
+  ASSERT_EQ(3, ceph_fgetxattr(cmount, fd, "ceph.fscrypt.auth", buf, sizeof(buf)));
+  ASSERT_EQ(sizeof(size), ceph_fgetxattr(cmount, fd, "ceph.fscrypt.file", buf, sizeof(buf)));
+
+  ASSERT_EQ(0, ceph_close(cmount, fd));
+  ASSERT_EQ(0, ceph_unmount(cmount));
+  ceph_shutdown(cmount);
+}
+
+#define ACL_EA_ACCESS  "system.posix_acl_access"
+#define ACL_EA_DEFAULT "system.posix_acl_default"
+
+TEST(LibCephFS, Removexattr) {
+  struct ceph_mount_info *cmount;
+  ASSERT_EQ(ceph_create(&cmount, NULL), 0);
+  ASSERT_EQ(ceph_conf_read_file(cmount, NULL), 0);
+  ASSERT_EQ(0, ceph_conf_parse_env(cmount, NULL));
+  ASSERT_EQ(ceph_mount(cmount, NULL), 0);
+
+  char test_xattr_file[NAME_MAX];
+  sprintf(test_xattr_file, "test_removexattr_%d", getpid());
+  int fd = ceph_open(cmount, test_xattr_file, O_RDWR|O_CREAT, 0666);
+  ASSERT_GT(fd, 0);
+
+  // remove xattr
+  ASSERT_EQ(-ENODATA, ceph_fremovexattr(cmount, fd, "user.remove.xattr"));
+  ASSERT_EQ(0, ceph_fsetxattr(cmount, fd, "user.remove.xattr", "foo", 3, XATTR_CREATE));
+  ASSERT_EQ(0, ceph_fremovexattr(cmount, fd, "user.remove.xattr"));
+
+  // remove xattr via setxattr & XATTR_REPLACE
+  ASSERT_EQ(-ENODATA, ceph_fsetxattr(cmount, fd, "user.remove.xattr", nullptr, 0, XATTR_REPLACE));
+  ASSERT_EQ(0, ceph_fsetxattr(cmount, fd, "user.remove.xattr", "foo", 3, XATTR_CREATE));
+  ASSERT_EQ(0, ceph_fsetxattr(cmount, fd, "user.remove.xattr", nullptr, 0, XATTR_REPLACE));
+
+  // ACL_EA_ACCESS and ACL_EA_DEFAULT are special and will always return success.
+  // If the corresponding attributes exist already the first one will remove it
+  // and the second one will remove the non-existing acl attributes.
+  ASSERT_EQ(0, ceph_fremovexattr(cmount, fd, ACL_EA_ACCESS));
+  ASSERT_EQ(0, ceph_fremovexattr(cmount, fd, ACL_EA_ACCESS));
+  ASSERT_EQ(0, ceph_fremovexattr(cmount, fd, ACL_EA_DEFAULT));
+  ASSERT_EQ(0, ceph_fremovexattr(cmount, fd, ACL_EA_DEFAULT));
+
+  ASSERT_EQ(0, ceph_close(cmount, fd));
+  ASSERT_EQ(0, ceph_unmount(cmount));
+  ceph_shutdown(cmount);
+}
+
+TEST(LibCephFS, MksnapSubvolumeSnapshotVisibility) {
+  struct ceph_mount_info *cmount;
+  ASSERT_EQ(0, ceph_create(&cmount, NULL));
+  ASSERT_EQ(0, ceph_conf_read_file(cmount, NULL));
+  ASSERT_EQ(0, ceph_conf_parse_env(cmount, NULL));
+  ASSERT_EQ(0, ceph_mount(cmount, "/"));
+  
+  const char* SNAPSHOT_VISIBILITY_CONFIG = 
+  "client_respect_subvolume_snapshot_visibility";
+  const char* SNAPSHOT_VISIBILITY_VXATTR =
+  "ceph.dir.subvolume.snaps.visible";
+
+  // client should respect subvolume snapshot visibility
+  ASSERT_EQ(0, ceph_conf_set(cmount, SNAPSHOT_VISIBILITY_CONFIG, "true"));
+
+  const char *subvol_path = "subvol_test_mksnap";
+  ASSERT_EQ(0, ceph_mkdir(cmount, subvol_path, 0777));
+
+  // set the subvolume vxattr on the subvol_path
+  ASSERT_EQ(0, ceph_setxattr(cmount, subvol_path, "ceph.dir.subvolume",
+    (void*)"1", 1, XATTR_CREATE));
+  
+  // try mksnap
+  ASSERT_EQ(0, ceph_mksnap(cmount, subvol_path, "snap1", 0777, nullptr, 0));
+
+  // disable snapshot visibility
+  ASSERT_EQ(0, ceph_setxattr(cmount, subvol_path, SNAPSHOT_VISIBILITY_VXATTR,
+    (void*)"0", 1, XATTR_CREATE));
+
+  // should not be able to create snap2
+  ASSERT_EQ(-1, ceph_mksnap(cmount, subvol_path, "snap2", 0777, nullptr, 0));
+
+  // enable snapshot visibility
+  ASSERT_EQ(0, ceph_setxattr(cmount, subvol_path, SNAPSHOT_VISIBILITY_VXATTR,
+    (void*)"1", 1, XATTR_CREATE));
+  
+  // now snap2 should get created
+  ASSERT_EQ(0, ceph_mksnap(cmount, subvol_path, "snap2", 0777, nullptr, 0));
+
+  // setting to false (FYI, default config value is false)
+  ASSERT_EQ(0, ceph_conf_set(cmount, SNAPSHOT_VISIBILITY_CONFIG, "false"));
+  // since client doesn't respect subvolume's snapshot visibility, mksnap
+  // should go through irrespective of ceph.dir.subvolume.snaps.visible
+  // set to 0.
+  ASSERT_EQ(0, ceph_setxattr(cmount, subvol_path, SNAPSHOT_VISIBILITY_VXATTR,
+    (void*)"0", 1, XATTR_CREATE));
+  
+  // snap3 should get created
+  ASSERT_EQ(0, ceph_mksnap(cmount, subvol_path, "snap3", 0777, nullptr, 0));
+
+  // cleanup
+  ASSERT_EQ(0, ceph_rmsnap(cmount, subvol_path, "snap1"));
+  ASSERT_EQ(0, ceph_rmsnap(cmount, subvol_path, "snap2"));
+  ASSERT_EQ(0, ceph_rmsnap(cmount, subvol_path, "snap3"));
+  ASSERT_EQ(0, ceph_rmdir(cmount, subvol_path));
+  ceph_shutdown(cmount);
+}
+
+TEST(LibCephFS, RmsnapSubvolumeSnapshotVisibility) {
+  struct ceph_mount_info *cmount;
+  ASSERT_EQ(0, ceph_create(&cmount, NULL));
+  ASSERT_EQ(0, ceph_conf_read_file(cmount, NULL));
+  ASSERT_EQ(0, ceph_conf_parse_env(cmount, NULL));
+  ASSERT_EQ(0, ceph_mount(cmount, "/"));
+
+  const char* SNAPSHOT_VISIBILITY_CONFIG =
+  "client_respect_subvolume_snapshot_visibility";
+  const char* SNAPSHOT_VISIBILITY_VXATTR =
+  "ceph.dir.subvolume.snaps.visible";
+
+  // client should respect subvolume snapshot visibility
+  ASSERT_EQ(0, ceph_conf_set(cmount, SNAPSHOT_VISIBILITY_CONFIG, "true"));
+
+  const char *subvol_path = "subvol_test_rmsnap";
+  ASSERT_EQ(0, ceph_mkdir(cmount, subvol_path, 0777));
+
+  // set the subvolume vxattr on the subvol_path
+  ASSERT_EQ(0, ceph_setxattr(cmount, subvol_path, "ceph.dir.subvolume",
+    (void*)"1", 1, XATTR_CREATE));
+  
+  ASSERT_EQ(0, ceph_mksnap(cmount, subvol_path, "snap1", 0777, nullptr, 0));
+  ASSERT_EQ(0, ceph_mksnap(cmount, subvol_path, "snap2", 0777, nullptr, 0));
+  ASSERT_EQ(0, ceph_mksnap(cmount, subvol_path, "snap3", 0777, nullptr, 0));
+
+  // disable snapshot visibility
+  ASSERT_EQ(0, ceph_setxattr(cmount, subvol_path, SNAPSHOT_VISIBILITY_VXATTR,
+    (void*)"0", 1, XATTR_CREATE));
+
+  // should not be able to remove snaps
+  ASSERT_EQ(-1, ceph_rmsnap(cmount, subvol_path, "snap1"));
+  ASSERT_EQ(-1, ceph_rmsnap(cmount, subvol_path, "snap2"));
+
+  // enable snapshot visibility
+  ASSERT_EQ(0, ceph_setxattr(cmount, subvol_path, SNAPSHOT_VISIBILITY_VXATTR,
+    (void*)"1", 1, XATTR_CREATE));
+
+  // should be able to remove snaps
+  ASSERT_EQ(0, ceph_rmsnap(cmount, subvol_path, "snap1"));
+  ASSERT_EQ(0, ceph_rmsnap(cmount, subvol_path, "snap2"));
+
+  // setting to false (FYI, default config value is false)
+  ASSERT_EQ(0, ceph_conf_set(cmount, SNAPSHOT_VISIBILITY_CONFIG, "false"));
+  // since client doesn't respect subvolume's snapshot visibility, rmsnap
+  // should go through irrespective of ceph.dir.subvolume.snaps.visible
+  // set to 0.
+  ASSERT_EQ(0, ceph_setxattr(cmount, subvol_path, SNAPSHOT_VISIBILITY_VXATTR,
+    (void*)"0", 1, XATTR_CREATE));
+  // rmsnap should go through
+  ASSERT_EQ(0, ceph_rmsnap(cmount, subvol_path, "snap3"));
+
+  // cleanup
+  ASSERT_EQ(0, ceph_rmdir(cmount, subvol_path));
   ceph_shutdown(cmount);
 }

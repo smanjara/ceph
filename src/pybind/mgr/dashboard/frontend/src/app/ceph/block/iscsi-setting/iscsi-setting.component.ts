@@ -6,7 +6,8 @@ import { CdFormGroup } from '~/app/shared/forms/cd-form-group';
 @Component({
   selector: 'cd-iscsi-setting',
   templateUrl: './iscsi-setting.component.html',
-  styleUrls: ['./iscsi-setting.component.scss']
+  styleUrls: ['./iscsi-setting.component.scss'],
+  standalone: false
 })
 export class IscsiSettingComponent implements OnInit {
   @Input()
@@ -21,10 +22,10 @@ export class IscsiSettingComponent implements OnInit {
   ngOnInit() {
     const validators: ValidatorFn[] = [];
     if ('min' in this.limits) {
-      validators.push(Validators.min(this.limits['min']));
+      validators.push(Validators.min(Number(this.limits['min'])));
     }
     if ('max' in this.limits) {
-      validators.push(Validators.max(this.limits['max']));
+      validators.push(Validators.max(Number(this.limits['max'])));
     }
     this.settingsForm.get(this.setting).setValidators(validators);
   }

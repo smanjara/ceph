@@ -1,6 +1,6 @@
 """
-Test if we can recover the leveldb from OSD after where all leveldbs are
-corrupted
+Test that we can rebuild the mon RocksDB from OSD data if all mon DBs are
+corrupted or lost
 """
 
 import logging
@@ -90,14 +90,14 @@ def _rebuild_db(ctx, manager, cluster_name, mon, mon_id, keyring_path):
             log.info('collecting maps from {cluster}:osd.{osd}'.format(
                 cluster=cluster,
                 osd=osd_id))
-            # push leveldb to OSD
+            # push RocksDB to OSD
             osd_mstore = os.path.join(teuthology.get_testdir(ctx), 'mon-store')
             osd.run(args=['sudo', 'mkdir', '-m', 'o+x', '-p', osd_mstore])
 
             _push_directory(local_mstore, osd, osd_mstore)
             log.info('rm -rf {0}'.format(local_mstore))
             shutil.rmtree(local_mstore)
-            # update leveldb with OSD data
+            # update RocksDB with OSD data
             options = '--no-mon-config --op update-mon-db --mon-store-path {0}'
             log.info('cot {0}'.format(osd_mstore))
             manager.objectstore_tool(pool=None,
@@ -113,7 +113,7 @@ def _rebuild_db(ctx, manager, cluster_name, mon, mon_id, keyring_path):
             osd.run(args=['sudo', 'rm', '-fr', osd_mstore])
 
     # recover the first_mon with re-built mon db
-    # pull from recovered leveldb from client
+    # pull from recovered RocksDB from client
     mon_store_dir = os.path.join('/var/lib/ceph/mon',
                                  '{0}-{1}'.format(cluster_name, mon_id))
     _push_directory(local_mstore, mon, mon_store_dir)
@@ -132,6 +132,45 @@ def _rebuild_db(ctx, manager, cluster_name, mon, mon_id, keyring_path):
                   '--cap', 'osd', 'allow *',
                   '--cap', 'mds', 'allow *',
                   '--cap', 'mgr', 'allow *'])
+    # client/mgr keys aren't reconstructed from OSD data like osd.* keys
+    # are, so pull them from their keyring files into keyring_path before
+    # rebuild, or they'd be silently dropped from the rebuilt auth db.
+    # note: only picks up keyrings colocated with the recovered mon's host.
+    is_client = teuthology.is_type('client')
+    for role in ctx.cluster.only(is_client).remotes.get(mon, []):
+        if not is_client(role):
+            continue
+        _, _, client_id = teuthology.split_role(role)
+        client_keyring = '/etc/ceph/{0}.client.{1}.keyring'.format(
+            cluster_name, client_id)
+        mon.run(args=['sudo',
+                      'ceph-authtool', keyring_path,
+                      '--import-keyring', client_keyring])
+
+        mon.run(args=['sudo',
+                      'ceph-authtool', keyring_path,
+                      '-n', f'client.{client_id}',
+                      '--cap', 'mon', 'allow rw',
+                      '--cap', 'osd', 'allow rwx'])
+    is_mgr = teuthology.is_type('mgr')
+    for role in ctx.cluster.only(is_mgr).remotes.get(mon, []):
+        if not is_mgr(role):
+            continue
+        _, _, mgr_id = teuthology.split_role(role)
+        mgr_keyring = '/var/lib/ceph/mgr/{0}-{1}/keyring'.format(
+            cluster_name, mgr_id)
+        mon.run(args=['sudo',
+                      'ceph-authtool', keyring_path,
+                      '--import-keyring', mgr_keyring])
+
+        mon.run(args=['sudo',
+                      'ceph-authtool', keyring_path,
+                      '-n', f'mgr.{mgr_id}',
+                      '--cap', 'mon', 'allow profile mgr',
+                      '--cap', 'osd', 'allow *',
+                      '--cap', 'mds', 'allow *'])
+    log.info('Validating reconstructed keyring:')
+    mon.run(args=['sudo', 'ceph-authtool', '-l', keyring_path])
     mon.run(args=['sudo', '-u', 'ceph',
                   'CEPH_ARGS=--no-mon-config',
                   'ceph-monstore-tool', mon_store_dir,
@@ -167,7 +206,7 @@ def _revive_mons(manager, mons, recovered, keyring_path):
             log.info('reviving mon.{0}'.format(m))
             manager.revive_mon(m)
             n_mons += 1
-    manager.wait_for_mon_quorum_size(n_mons, timeout=30)
+    manager.wait_for_mon_quorum_size(n_mons)
 
 
 def _revive_mgrs(ctx, manager):

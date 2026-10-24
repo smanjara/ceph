@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab expandtab
+// vim: ts=8 sw=2 sts=2 expandtab expandtab
 
 #pragma once
 
@@ -26,6 +26,17 @@ public:
    */
   virtual std::optional<interval_set<rbm_abs_addr>> alloc_extent(
     size_t size) = 0;
+
+  /**
+   * alloc_extents
+   *
+   * Allocate regions for the given size. A continuous region is returned
+   * if possible.
+   *
+   */
+  virtual std::optional<interval_set<rbm_abs_addr>> alloc_extents(
+    size_t size, rbm_abs_addr hint) = 0;
+
   /**
    * free_extent
    *

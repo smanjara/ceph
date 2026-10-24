@@ -1,4 +1,4 @@
-// vim: ts=8 sw=2 smarttab ft=cpp
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -39,6 +39,10 @@ auto create_config_store(const DoutPrefixProvider* dpp)
         << cpp_strerror(-r) << dendl;
     return nullptr;
   }
+  // Use a distinct admin socket command name for the config store client,
+  // so it doesn't conflict with the main RGWRados objecter_requests command.
+  impl->rados.set_objecter_admin_socket_name("ConfigStore");
+
   r = impl->rados.connect();
   if (r < 0) {
     ldpp_dout(dpp, -1) << "Rados client connection failed with "

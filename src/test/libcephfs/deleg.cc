@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Tests for Ceph delegation handling
  *
@@ -7,7 +8,9 @@
  */
 
 #include "gtest/gtest.h"
+#include "include/compat.h"
 #include "include/cephfs/libcephfs.h"
+#include "include/fs_types.h"
 #include "include/stat.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -184,9 +187,9 @@ static void simple_deleg_test(struct ceph_mount_info *cmount, struct ceph_mount_
   std::thread breaker1(open_breaker_func, tcmount, filename, O_RDWR, &opened);
 
   wait_for_atomic_bool(recalled);
-  ASSERT_EQ(opened.load(), false);
   ASSERT_EQ(ceph_ll_delegation(cmount, fh, CEPH_DELEGATION_NONE, dummy_deleg_cb, &recalled), 0);
   breaker1.join();
+  ASSERT_EQ(opened.load(), true);
   ASSERT_EQ(ceph_ll_close(cmount, fh), 0);
   ASSERT_EQ(ceph_ll_unlink(cmount, root, filename, perms), 0);
 
@@ -199,9 +202,9 @@ static void simple_deleg_test(struct ceph_mount_info *cmount, struct ceph_mount_
   ASSERT_EQ(ceph_ll_delegation_wait(cmount, fh, CEPH_DELEGATION_WR, dummy_deleg_cb, &recalled), 0);
   std::thread breaker2(open_breaker_func, tcmount, filename, O_RDONLY, &opened);
   wait_for_atomic_bool(recalled);
-  ASSERT_EQ(opened.load(), false);
   ASSERT_EQ(ceph_ll_delegation(cmount, fh, CEPH_DELEGATION_NONE, dummy_deleg_cb, &recalled), 0);
   breaker2.join();
+  ASSERT_EQ(opened.load(), true);
   ASSERT_EQ(ceph_ll_close(cmount, fh), 0);
   ASSERT_EQ(ceph_ll_unlink(cmount, root, filename, perms), 0);
 
@@ -220,9 +223,9 @@ static void simple_deleg_test(struct ceph_mount_info *cmount, struct ceph_mount_
   std::thread breaker4(open_breaker_func, tcmount, filename, O_WRONLY, &opened);
   wait_for_atomic_bool(recalled);
   usleep(1000);
-  ASSERT_EQ(opened.load(), false);
   ASSERT_EQ(ceph_ll_delegation(cmount, fh, CEPH_DELEGATION_NONE, dummy_deleg_cb, &recalled), 0);
   breaker4.join();
+  ASSERT_EQ(opened.load(), true);
   ASSERT_EQ(ceph_ll_close(cmount, fh), 0);
   ASSERT_EQ(ceph_ll_unlink(cmount, root, filename, perms), 0);
 
@@ -326,6 +329,15 @@ TEST(LibCephFS, DelegTimeout) {
   std::thread breaker1(open_breaker_func, nullptr, filename, O_RDWR, &opened);
   breaker1.join();
   ASSERT_EQ(recalled.load(), true);
+  /*
+   * Wait for the delegation to be timedout.
+   *
+   * MDSs will allow multiple clients to do r/w at the same time and the filelock
+   * will be in LOCK_MIX state. So the open() in a second mounter in the
+   * open_breaker_func() thread won't guarantee that after it exiting the delegation
+   * in the mounter in main thread has already timedout.
+   */
+  sleep(3);
   ASSERT_EQ(ceph_ll_getattr(cmount, root, &stx, 0, 0, perms), -ENOTCONN);
   ceph_release(cmount);
 }
@@ -387,13 +399,51 @@ TEST(LibCephFS, RecalledGetattr) {
     ASSERT_LT(i++, MAX_WAIT);
     usleep(1000);
   } while (!recalled.load());
-  ASSERT_EQ(opened.load(), false);
   ASSERT_EQ(ceph_ll_getattr(cmount2, file, &stx, CEPH_STATX_ALL_STATS, 0, perms), 0);
   ASSERT_EQ(ceph_ll_delegation(cmount2, fh, CEPH_DELEGATION_NONE, dummy_deleg_cb, nullptr), 0);
   breaker1.join();
+  ASSERT_EQ(opened.load(), true);
   ASSERT_EQ(ceph_ll_close(cmount2, fh), 0);
   ceph_unmount(cmount2);
   ceph_release(cmount2);
+  ceph_unmount(cmount1);
+  ceph_release(cmount1);
+}
+
+TEST(LibCephFS, DelegTestWithWrite) {
+  struct ceph_mount_info *cmount1;
+  ASSERT_EQ(ceph_create(&cmount1, NULL), 0);
+  ASSERT_EQ(ceph_conf_read_file(cmount1, NULL), 0);
+  ASSERT_EQ(0, ceph_conf_parse_env(cmount1, NULL));
+  ASSERT_EQ(0, ceph_conf_set(cmount1, "client_oc", "0"));
+  ASSERT_EQ(ceph_mount(cmount1, "/"), 0);
+  ASSERT_EQ(set_default_deleg_timeout(cmount1), 0);
+
+  Inode *root, *file;
+  ASSERT_EQ(ceph_ll_lookup_root(cmount1, &root), 0);
+
+  char filename[32];
+  sprintf(filename, "delegtestwrite%x", getpid());
+
+  Fh *fh;
+  struct ceph_statx stx;
+  UserPerm *perms = ceph_mount_perms(cmount1);
+
+  ASSERT_EQ(ceph_ll_create(cmount1, root, filename, 0666,
+			   O_RDWR|O_CREAT|O_EXCL, &file, &fh, &stx, 0, 0, perms), 0);
+  ASSERT_EQ(ceph_ll_write(cmount1, fh, 0, sizeof(filename), filename),
+	    static_cast<int>(sizeof(filename)));
+  ASSERT_EQ(ceph_ll_close(cmount1, fh), 0);
+
+  std::atomic_bool recalled(false);
+  ASSERT_EQ(ceph_ll_lookup(cmount1, root, filename, &file, &stx, 0, 0, perms), 0);
+  ASSERT_EQ(ceph_ll_open(cmount1, file, O_WRONLY, &fh, perms), 0);
+  ASSERT_EQ(ceph_ll_delegation_wait(cmount1, fh, CEPH_DELEGATION_WR, dummy_deleg_cb, &recalled), 0);
+  ASSERT_EQ(ceph_ll_write(cmount1, fh, 0, sizeof(filename), filename),
+	    static_cast<int>(sizeof(filename)));
+  ASSERT_EQ(0, ceph_ll_fsync(cmount1, fh, false));
+  ASSERT_EQ(ceph_ll_close(cmount1, fh), 0);
+
   ceph_unmount(cmount1);
   ceph_release(cmount1);
 }

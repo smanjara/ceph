@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "SnapshotCopyRequest.h"
 #include "SetHeadRequest.h"
@@ -11,6 +11,8 @@
 #include "librbd/Utils.h"
 #include "librbd/asio/ContextWQ.h"
 #include "osdc/Striper.h"
+
+#include <shared_mutex> // for std::shared_lock
 
 #define dout_subsys ceph_subsys_rbd
 #undef dout_prefix
@@ -76,6 +78,15 @@ SnapshotCopyRequest<I>::SnapshotCopyRequest(I *src_image_ctx,
     m_src_snap_ids.erase(m_src_snap_ids.upper_bound(m_src_snap_id_end),
                          m_src_snap_ids.end());
   }
+
+  ldout(m_cct, 20) << "src_image_id=" << m_src_image_ctx->id
+                   << ", dst_image_id=" << m_dst_image_ctx->id
+                   << ", src_snap_id_start=" << m_src_snap_id_start
+                   << ", src_snap_id_end=" << m_src_snap_id_end
+                   << ", dst_snap_id_start=" << m_dst_snap_id_start
+                   << ", src_snap_ids=" << m_src_snap_ids
+                   << ", dst_snap_ids=" << m_dst_snap_ids
+		   << dendl;
 }
 
 template <typename I>

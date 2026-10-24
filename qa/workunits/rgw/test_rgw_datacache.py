@@ -80,20 +80,18 @@ def exec_cmd(cmd):
         return False
 
 def get_radosgw_endpoint():
-    out = exec_cmd('sudo netstat -nltp | egrep "rados|valgr"')  # short for radosgw/valgrind
+    out = exec_cmd('sudo ss -nltp | grep -E "rados|valgr|memcheck-"')  # short for radosgw/valgrind
     x = out.decode('utf8').split(" ")
     port = [i for i in x if ':' in i][0].split(':')[1]
     log.info('radosgw port: %s' % port)
     proto = "http"
-    hostname = 'localhost'
+    hostname = '127.0.0.1'
 
     if port == '443':
         proto = "https"
-        out = exec_cmd('hostname')
-        hostname = get_cmd_output(out)
-        hostname = hostname + ".front.sepia.ceph.com"
 
-    endpoint = proto + "://" + hostname + ":" + port
+    endpoint = hostname
+
     log.info("radosgw endpoint is: %s", endpoint)
     return endpoint, proto
 
@@ -129,6 +127,7 @@ def get_cmd_output(cmd_out):
     out = out.strip('\n')
     return out
 
+
 def main():
     """
     execute the datacache test
@@ -156,16 +155,16 @@ def main():
     create_s3cmd_config(s3cmd_config_path, proto)
 
     # create a bucket
-    exec_cmd('s3cmd --access_key=%s --secret_key=%s --config=%s --host=%s mb s3://%s'
+    exec_cmd('s3cmd --access_key=%s --secret_key=%s --config=%s --no-check-hostname --host=%s mb s3://%s'
             % (ACCESS_KEY, SECRET_KEY, s3cmd_config_path, endpoint, BUCKET_NAME))
 
     # put an object in the bucket
-    exec_cmd('s3cmd --access_key=%s --secret_key=%s --config=%s --host=%s put %s s3://%s'
+    exec_cmd('s3cmd --access_key=%s --secret_key=%s --config=%s --no-check-hostname --host=%s put %s s3://%s'
             % (ACCESS_KEY, SECRET_KEY, s3cmd_config_path, endpoint, outfile, BUCKET_NAME))
 
     # get object from bucket
     get_file_path = pwd + '/' + GET_FILE_NAME
-    exec_cmd('s3cmd --access_key=%s --secret_key=%s --config=%s --host=%s get s3://%s/%s %s --force'
+    exec_cmd('s3cmd --access_key=%s --secret_key=%s --config=%s --no-check-hostname --host=%s get s3://%s/%s %s --force'
             % (ACCESS_KEY, SECRET_KEY, s3cmd_config_path, endpoint, BUCKET_NAME, FILE_NAME, get_file_path))
 
     # get info of object
@@ -174,37 +173,69 @@ def main():
     json_op = json.loads(out)
     cached_object_name = json_op['manifest']['prefix']
     log.debug("Cached object name is: %s", cached_object_name)
+    stripe_size = json_op['manifest']['begin_iter']['stripe_size']
+    log.debug("*** stripe_size = %s", stripe_size)
+    stripe_max_size = json_op['manifest']['rules'][0]['val']['stripe_max_size']
+    log.debug("*** stripe_max_size = %s", stripe_max_size)
+    compression_type = 'none'
+    if 'compression' in json_op and 'compression_type' in json_op['compression']:
+        compression_type = json_op['compression']['compression_type']
+    log.debug("*** compression_type = %s", compression_type)
 
-    # check that the cache is enabled (does the cache directory empty)
+    # check if the cache directory is empty or not
     out = exec_cmd('find %s -type f | wc -l' % (cache_dir))
-    chk_cache_dir = int(get_cmd_output(out))
-    log.debug("Check cache dir content: %s", chk_cache_dir)
-    if chk_cache_dir == 0:
-        log.info("NOTICE: datacache test object not found, inspect if datacache was bypassed or disabled during this check.")
+    cache_dir_file_count = int(get_cmd_output(out))
+    log.debug("*** cache_dir_file_count = %s", cache_dir_file_count)
+
+    if stripe_max_size > 4194304:
+        # ref: qa/suites/rgw/verify/striping$/stripe-greater-than-chunk.yaml : "rgw obj stripe size: 6291456"
+        log.debug("*** NOTICE: Running under 'stripe-greater-than-chunk' permutation - skipping the RGW Datacache test")
         return
+    elif compression_type != 'none':
+        log.debug("*** NOTICE: Running under 'compression' enabled permutation - skipping the RGW Datacache test")
+        return
+    else:
+        log.debug("*** NOTICE: RGW Datacache test will be performed")
+
+    if cache_dir_file_count == 0:
+        log.debug("*** ERROR: Cache directory is empty, RGW Datacache test FAILED")
+        assert(cache_dir_file_count > 0)
 
     # list the files in the cache dir for troubleshooting
-    out = exec_cmd('ls -l %s' % (cache_dir))
+    out = exec_cmd('ls -ltr %s' % (cache_dir))
     # get name of cached object and check if it exists in the cache
-    out = exec_cmd('find %s -name "*%s*"' % (cache_dir, cached_object_name))
-    cached_object_path = get_cmd_output(out)
+    out = exec_cmd('ls -1tr %s | tail -1' % (cache_dir))
+    cached_object_path = cache_dir + "/" + get_cmd_output(out)
+
+    out = exec_cmd('ls -ltr %s' % (cache_dir))
     log.debug("Path of file in datacache is: %s", cached_object_path)
-    out = exec_cmd('basename %s' % (cached_object_path))
-    basename_cmd_out = get_cmd_output(out)
-    log.debug("Name of file in datacache is: %s", basename_cmd_out)
+    out = exec_cmd("sha1sum %s  | awk '{ print $1 }'" % (cached_object_path))
+    cached_object_sha1 = get_cmd_output(out)
+    log.debug("*** SHA1 of file in datacache is: %s", cached_object_sha1)
 
     # check to see if the cached object is in Ceph
     out = exec_cmd('rados ls -p default.rgw.buckets.data')
     rados_ls_out = get_cmd_output(out)
     log.debug("rados ls output is: %s", rados_ls_out)
 
-    assert(basename_cmd_out in rados_ls_out)
+    out = exec_cmd("dd status=none if=%s of=/dev/stdout bs=1M skip=4 | sha1sum | awk '{ print $1 }'" % (outfile))
+    org_object_sha1 = get_cmd_output(out)
+    log.debug("*** SHA1 of cached part in original file is: %s", org_object_sha1)
+    out = exec_cmd("dd status=none if=%s of=/dev/stdout bs=1M skip=4 | sha1sum | awk '{ print $1 }'" % (get_file_path))
+    download_object_sha1 = get_cmd_output(out)
+    log.debug("*** SHA1 of cached part in downloaded file is: %s", download_object_sha1)
+
+    log.debug("*** CHECK: cache_dir_file_count: %s > 0  and  (cached_object_sha1: %s == org_object_sha1: %s  or  (stripe_size: %s < 4194304 and org_object_sha1: %s == download_object_sha1: %s)", cache_dir_file_count, cached_object_sha1, org_object_sha1, stripe_size, org_object_sha1, download_object_sha1)
+    assert(cache_dir_file_count > 0  and  (cached_object_sha1 == org_object_sha1  or  (stripe_size < 4194304 and org_object_sha1 == download_object_sha1)))
+    #                                     (cached_object_sha1 == org_object_sha1) test fails if "stripe_size" < 4MiB(4194304),
+    #                                     in that case fall back to checking the sha1 of the downloaded file (https://tracker.ceph.com/issues/71387)
+
     log.debug("RGW Datacache test SUCCESS")
 
     # remove datacache dir
     #cmd = exec_cmd('rm -rf %s' % (cache_dir))
     #log.debug("RGW Datacache dir deleted")
-    #^ commenting for future refrence - the work unit will continue running tests and if the cache_dir is removed
+    #^ commenting for future reference - the work unit will continue running tests and if the cache_dir is removed
     #  all the writes to cache will fail with errno 2 ENOENT No such file or directory.
 
 main()

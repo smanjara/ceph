@@ -22,19 +22,22 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
  */
 
-import { Component, Injector, OnDestroy } from '@angular/core';
+import { Component, OnDestroy } from '@angular/core';
 import { Title } from '@angular/platform-browser';
-import { ActivatedRouteSnapshot, NavigationEnd, NavigationStart, Router } from '@angular/router';
+import { NavigationEnd, NavigationStart, Router } from '@angular/router';
 
-import { concat, from, Observable, of, Subscription } from 'rxjs';
-import { distinct, filter, first, mergeMap, toArray } from 'rxjs/operators';
+import { Subscription } from 'rxjs';
+import { filter, take } from 'rxjs/operators';
 
-import { BreadcrumbsResolver, IBreadcrumb } from '~/app/shared/models/breadcrumbs';
+import { IBreadcrumb } from '~/app/shared/models/breadcrumbs';
+import { BreadcrumbService } from '~/app/shared/services/breadcrumb.service';
+import { RouteBreadcrumbsService } from '~/app/shared/services/route-breadcrumbs.service';
 
 @Component({
   selector: 'cd-breadcrumbs',
   templateUrl: './breadcrumbs.component.html',
-  styleUrls: ['./breadcrumbs.component.scss']
+  styleUrls: ['./breadcrumbs.component.scss'],
+  standalone: false
 })
 export class BreadcrumbsComponent implements OnDestroy {
   crumbs: IBreadcrumb[] = [];
@@ -46,112 +49,59 @@ export class BreadcrumbsComponent implements OnDestroy {
    * still get the value from the previous
    */
   finished = false;
-  subscription: Subscription;
-  private defaultResolver = new BreadcrumbsResolver();
+  subscription: Subscription = new Subscription();
+  private tabCrumbSubscription: Subscription;
+  private baseCrumbs: IBreadcrumb[] = [];
 
-  constructor(private router: Router, private injector: Injector, private titleService: Title) {
-    this.subscription = this.router.events
-      .pipe(filter((x) => x instanceof NavigationStart))
-      .subscribe(() => {
+  constructor(
+    private router: Router,
+    private titleService: Title,
+    private breadcrumbService: BreadcrumbService,
+    private routeBreadcrumbsService: RouteBreadcrumbsService
+  ) {
+    this.refreshBreadcrumbs();
+
+    this.subscription.add(
+      this.router.events.pipe(filter((x) => x instanceof NavigationStart)).subscribe(() => {
         this.finished = false;
-      });
+        this.breadcrumbService.clearTabCrumb();
+      })
+    );
 
-    this.subscription = this.router.events
-      .pipe(filter((x) => x instanceof NavigationEnd))
-      .subscribe(() => {
-        const currentRoot = router.routerState.snapshot.root;
+    this.subscription.add(
+      this.router.events
+        .pipe(filter((x) => x instanceof NavigationEnd))
+        .subscribe(() => this.refreshBreadcrumbs())
+    );
 
-        this._resolveCrumbs(currentRoot)
-          .pipe(
-            mergeMap((x) => x),
-            distinct((x) => x.text),
-            toArray(),
-            mergeMap((x) => {
-              const y = this.postProcess(x);
-              return this.wrapIntoObservable<IBreadcrumb[]>(y).pipe(first());
-            })
-          )
-          .subscribe((x) => {
-            this.finished = true;
-            this.crumbs = x;
-            const title = this.getTitleFromCrumbs(this.crumbs);
-            this.titleService.setTitle(title);
-          });
-      });
+    this.tabCrumbSubscription = this.breadcrumbService.tabCrumb$.subscribe((tabCrumb) => {
+      if (tabCrumb && this.baseCrumbs.length > 0) {
+        this.crumbs = [...this.baseCrumbs.slice(0, -1), tabCrumb];
+      } else {
+        this.crumbs = [...this.baseCrumbs];
+      }
+      const title = this.routeBreadcrumbsService.getTitleFromCrumbs(this.crumbs);
+      this.titleService.setTitle(title);
+    });
   }
 
   ngOnDestroy(): void {
     this.subscription.unsubscribe();
+    this.tabCrumbSubscription.unsubscribe();
   }
 
-  private _resolveCrumbs(route: ActivatedRouteSnapshot): Observable<IBreadcrumb[]> {
-    let crumbs$: Observable<IBreadcrumb[]>;
+  private refreshBreadcrumbs(): void {
+    const currentRoot = this.router.routerState.snapshot.root;
 
-    const data = route.routeConfig && route.routeConfig.data;
-
-    if (data && data.breadcrumbs) {
-      let resolver: BreadcrumbsResolver;
-
-      if (data.breadcrumbs.prototype instanceof BreadcrumbsResolver) {
-        resolver = this.injector.get<BreadcrumbsResolver>(data.breadcrumbs);
-      } else {
-        resolver = this.defaultResolver;
-      }
-
-      const result = resolver.resolve(route);
-      crumbs$ = this.wrapIntoObservable<IBreadcrumb[]>(result).pipe(first());
-    } else {
-      crumbs$ = of([]);
-    }
-
-    if (route.firstChild) {
-      crumbs$ = concat<IBreadcrumb[]>(crumbs$, this._resolveCrumbs(route.firstChild));
-    }
-
-    return crumbs$;
-  }
-
-  postProcess(breadcrumbs: IBreadcrumb[]) {
-    const result: IBreadcrumb[] = [];
-    breadcrumbs.forEach((element) => {
-      const split = element.text.split('/');
-      if (split.length > 1) {
-        element.text = split[split.length - 1];
-        for (let i = 0; i < split.length - 1; i++) {
-          result.push({ text: split[i], path: null });
-        }
-      }
-      result.push(element);
+    this.routeBreadcrumbsService.resolve(currentRoot).subscribe((crumbs) => {
+      this.finished = true;
+      this.baseCrumbs = crumbs;
+      this.breadcrumbService.tabCrumb$.pipe(take(1)).subscribe((tabCrumb) => {
+        this.crumbs =
+          tabCrumb && crumbs.length > 0 ? [...crumbs.slice(0, -1), tabCrumb] : [...crumbs];
+        const title = this.routeBreadcrumbsService.getTitleFromCrumbs(this.crumbs);
+        this.titleService.setTitle(title);
+      });
     });
-    return result;
-  }
-
-  isPromise(value: any): boolean {
-    return value && typeof value.then === 'function';
-  }
-
-  wrapIntoObservable<T>(value: T | Promise<T> | Observable<T>): Observable<T> {
-    if (value instanceof Observable) {
-      return value;
-    }
-
-    if (this.isPromise(value)) {
-      return from(Promise.resolve(value));
-    }
-
-    return of(value as T);
-  }
-
-  private getTitleFromCrumbs(crumbs: IBreadcrumb[]): string {
-    const currentLocation = crumbs
-      .map((crumb: IBreadcrumb) => {
-        return crumb.text || '';
-      })
-      .join(' > ');
-    if (currentLocation.length > 0) {
-      return `Ceph: ${currentLocation}`;
-    } else {
-      return 'Ceph';
-    }
   }
 }

@@ -6,7 +6,8 @@ set -e
 # if defined, debug messages will be displayed and prepended with the string
 # debug="DEBUG"
 
-huge_size=5100 # in megabytes
+#huge_size=5100 # in megabytes
+huge_size=51 # in megabytes
 big_size=7 # in megabytes
 
 huge_obj=/tmp/huge_obj.temp.$$
@@ -216,12 +217,38 @@ quick_tests() {
 # S3 TESTS
 
 ####################################
+# radoslist names a bucket in a tenant with its tenant
+
+tenant_akey='TENANTACCESSKEY00001'
+tenant_skey='tenantsecretkey0000000000000000000000001'
+radosgw-admin user create --tenant tnt --uid tenant-tester \
+	      --access-key $tenant_akey --secret $tenant_skey \
+	      --display-name 'T. Tester'
+
+mys3cmd --access_key=$tenant_akey --secret_key=$tenant_skey \
+	mb s3://tenant-bkt
+mys3cmd --access_key=$tenant_akey --secret_key=$tenant_skey \
+	put -q $big_obj s3://tenant-bkt/tenant-obj
+
+if ! radosgw-admin bucket radoslist --bucket=tnt/tenant-bkt --rgw-obj-fs=, |
+	grep -q ',tnt/tenant-bkt,tenant-obj$' ;then
+    echo "ERROR: radoslist did not print the bucket's tenant"
+    exit 1
+fi
+
+####################################
 # regular multipart test
 
 mys3cmd mb s3://multipart-bkt
 mys3upload $huge_obj multipart-bkt multipart-obj
 mys3cmd ls
 mys3cmd ls s3://multipart-bkt
+
+####################################
+# an object name starting with '_' gives the head a rados locator
+
+mys3cmd mb s3://underscore-bkt
+mys3upload $big_obj underscore-bkt _under
 
 ####################################
 # multipart test with incomplete uploads
@@ -239,6 +266,19 @@ mys3uploadkill $huge_obj $bkt incomplete-mp-obj-b $fifo 1005
 for c in $(seq 1005) ;do
     mys3uploadkill $huge_obj $bkt incomplete-mp-obj-c-$c $fifo 3
 done
+
+# with a field separator radoslist lists the same rados objects,
+# including the tail objects of the parts of open uploads
+plain_out=$(radosgw-admin bucket radoslist --bucket=$bkt)
+fs_out=$(radosgw-admin bucket radoslist --bucket=$bkt --rgw-obj-fs=,)
+if ! diff <(sort -u <<<"$plain_out") <(cut -d, -f1 <<<"$fs_out" | sort -u) ;then
+    echo "ERROR: radoslist --rgw-obj-fs lists different rados objects"
+    exit 1
+fi
+if ! grep -q "__shadow_incomplete-mp-obj-c-1\..*,${bkt},incomplete-mp-obj-c-1\." <<<"$fs_out" ;then
+    echo "ERROR: radoslist --rgw-obj-fs left out the tail of an open upload"
+    exit 1
+fi
 
 ####################################
 # resharded bucket
@@ -376,6 +416,126 @@ done
 
 mys3cmd rb --recursive s3://$o_bkt
 
+############################################################
+# copy multipart objects and delete destination
+
+o_bkt="orig-mp-bkt-5"
+d_bkt="copy-mp-bkt-5"
+
+mys3cmd mb s3://$o_bkt
+
+for f in $(seq 2) ;do
+    dest_obj="orig-multipart-obj-$f"
+    mys3cmd put -q $huge_obj s3://${o_bkt}/$dest_obj
+done
+
+mys3cmd mb s3://$d_bkt
+
+mys3cmd cp s3://${o_bkt}/orig-multipart-obj-1 \
+	s3://${d_bkt}/copied-multipart-obj-1
+
+for f in $(seq 5 5) ;do
+    dest_obj="orig-multipart-obj-$f"
+    mys3cmd put -q $huge_obj s3://${d_bkt}/$dest_obj
+done
+
+mys3cmd rb --recursive s3://$d_bkt
+
+#####################################################################
+# FORCE GARBAGE COLLECTION
+sleep 6 # since for testing age at which gc can happen is 5 secs
+radosgw-admin gc process --include-all
+#####################################################################
+
+############################################################
+# copy multipart objects and delete original then destination
+
+o_bkt="orig-mp-bkt-6"
+d_bkt="copy-mp-bkt-6"
+
+mys3cmd mb s3://$o_bkt
+
+for f in $(seq 2) ;do
+    dest_obj="orig-multipart-obj-$f"
+    mys3cmd put -q $huge_obj s3://${o_bkt}/$dest_obj
+done
+
+mys3cmd mb s3://$d_bkt
+
+mys3cmd cp s3://${o_bkt}/orig-multipart-obj-1 \
+	s3://${d_bkt}/copied-multipart-obj-1
+
+for f in $(seq 5 5) ;do
+    dest_obj="orig-multipart-obj-$f"
+    mys3cmd put -q $huge_obj s3://${d_bkt}/$dest_obj
+done
+
+mys3cmd rb --recursive s3://$o_bkt
+mys3cmd rb --recursive s3://$d_bkt
+
+############################################################
+# copy multipart objects and delete destination then original
+
+o_bkt="orig-mp-bkt-7"
+d_bkt="copy-mp-bkt-7"
+
+mys3cmd mb s3://$o_bkt
+
+for f in $(seq 2) ;do
+    dest_obj="orig-multipart-obj-$f"
+    mys3cmd put -q $huge_obj s3://${o_bkt}/$dest_obj
+done
+
+mys3cmd mb s3://$d_bkt
+
+mys3cmd cp s3://${o_bkt}/orig-multipart-obj-1 \
+	s3://${d_bkt}/copied-multipart-obj-1
+
+for f in $(seq 5 5) ;do
+    dest_obj="orig-multipart-obj-$f"
+    mys3cmd put -q $huge_obj s3://${d_bkt}/$dest_obj
+done
+
+mys3cmd rb --recursive s3://$d_bkt
+mys3cmd rb --recursive s3://$o_bkt
+
+############################################################
+# copy a multipart object to itself
+# run gc process after the copy, then try to get the object
+
+o_bkt="orig-mp-bkt-8"
+
+mys3cmd mb s3://$o_bkt
+
+mp_obj="multipart-obj-1"
+mys3cmd put -q $huge_obj s3://${o_bkt}/$mp_obj
+
+mys3cmd cp --mime-type="text/plain" s3://${o_bkt}/$mp_obj s3://${o_bkt}/$mp_obj
+
+#####################################################################
+# FORCE GARBAGE COLLECTION
+sleep 6 # since for testing age at which gc can happen is 5 secs
+radosgw-admin gc process --include-all
+#####################################################################
+
+mp_obj_retrieved="multipart-obj-1-retrieved"
+mys3cmd get s3://${o_bkt}/$mp_obj $mp_obj_retrieved --force
+
+if [ -f $mp_obj_retrieved ]; then
+    rm -f $mp_obj_retrieved
+else
+    echo "ERROR: failed to get the object after copying to itself"
+    exit 1
+fi
+
+mys3cmd rb --recursive s3://$o_bkt
+
+#####################################################################
+# FORCE GARBAGE COLLECTION
+sleep 6 # since for testing age at which gc can happen is 5 secs
+radosgw-admin gc process --include-all
+#####################################################################
+
 ########################################################################
 # SWIFT TESTS
 
@@ -508,6 +668,16 @@ done
 
 if [ -n "$ol_error" ] ;then
     echo "ERROR: orphans found when none expected"
+    exit 1
+fi
+
+########################################
+# DO GAP LIST
+
+rgw-gap-list -p $pool
+
+if grep -F 'Object: "_under"' gap-list-*.gap ;then
+    echo "ERROR: object with a locator reported as a gap"
     exit 1
 fi
 

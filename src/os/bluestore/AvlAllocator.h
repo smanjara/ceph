@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -7,6 +7,7 @@
 #include <boost/intrusive/avl_set.hpp>
 
 #include "Allocator.h"
+#include "AllocatorBase.h"
 #include "os/bluestore/bluestore_types.h"
 #include "include/mempool.h"
 
@@ -49,7 +50,7 @@ struct range_seg_t {
   boost::intrusive::avl_set_member_hook<> size_hook;
 };
 
-class AvlAllocator : public Allocator {
+class AvlAllocator : public AllocatorBase, public AllocatorPerf {
   struct dispose_rs {
     void operator()(range_seg_t* p)
     {
@@ -81,18 +82,26 @@ public:
     uint64_t max_alloc_size,
     int64_t  hint,
     PExtentVector *extents) override;
-  void release(const interval_set<uint64_t>& release_set) override;
+  void release(const release_set_t& release_set) override;
   uint64_t get_free() override;
   double get_fragmentation() override;
 
   void dump() override;
   void foreach(
     std::function<void(uint64_t offset, uint64_t length)> notify) override;
+  uint64_t get_free_extents(
+    uint64_t range_begin,
+    uint64_t range_end,
+    size_t max_count,
+    free_extent_vector_t* out) override;
   void init_add_free(uint64_t offset, uint64_t length) override;
   void init_rm_free(uint64_t offset, uint64_t length) override;
   void shutdown() override;
 
 private:
+  CephContext* cct;
+  std::mutex lock;
+
   // pick a range by search from cursor forward
   uint64_t _pick_block_after(
     uint64_t *cursor,
@@ -105,6 +114,7 @@ private:
   int _allocate(
     uint64_t size,
     uint64_t unit,
+    int64_t  hint,
     uint64_t *offset,
     uint64_t *length);
 
@@ -226,13 +236,30 @@ private:
     // i.e. (range_count_cap > 0)
     ceph_assert(false);
   }
+  // to be overriden by Hybrid wrapper
+  virtual uint64_t _get_spilled_over() const {
+    return 0;
+  }
+  virtual uint64_t _spillover_allocate(uint64_t want,
+                                      uint64_t unit,
+                                      uint64_t max_alloc_size,
+                                      int64_t  hint,
+                                      PExtentVector* extents) {
+    // this should be overriden when range count cap is present,
+    // i.e. (range_count_cap > 0)
+    ceph_assert(false);
+    return 0;
+  }
+
 protected:
   // called when extent to be released/marked free
   virtual void _add_to_tree(uint64_t start, uint64_t size);
 
-protected:
-  CephContext* cct;
-  std::mutex lock;
+  CephContext* get_context() { return cct; }
+
+  std::mutex& get_lock() {
+    return lock;
+  }
 
   double _get_fragmentation() const {
     auto free_blocks = p2align(num_free, (uint64_t)block_size) / block_size;
@@ -246,7 +273,9 @@ protected:
 
   uint64_t _lowest_size_available() {
     auto rs = range_size_tree.begin();
-    return rs != range_size_tree.end() ? rs->length() : 0;
+    return rs != range_size_tree.end() ?
+      rs->length() :
+      std::numeric_limits<uint64_t>::max();
   }
 
   int64_t _allocate(
@@ -256,7 +285,7 @@ protected:
     int64_t  hint,
     PExtentVector *extents);
 
-  void _release(const interval_set<uint64_t>& release_set);
+  void _release(const release_set_t& release_set);
   void _release(const PExtentVector&  release_set);
   void _shutdown();
 

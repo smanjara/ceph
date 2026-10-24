@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef LIBRADOS_TEST_STUB_MOCK_TEST_MEM_IO_CTX_IMPL_H
 #define LIBRADOS_TEST_STUB_MOCK_TEST_MEM_IO_CTX_IMPL_H
@@ -44,11 +44,13 @@ public:
     return TestMemIoCtxImpl::aio_notify(o, c, bl, timeout_ms, pbl);
   }
 
-  MOCK_METHOD5(aio_operate, int(const std::string&, TestObjectOperationImpl&,
-                                AioCompletionImpl*, SnapContext*, int));
+  MOCK_METHOD6(aio_operate, int(const std::string&, TestObjectOperationImpl&,
+                                AioCompletionImpl*, SnapContext*,
+                                const ceph::real_time*, int));
   int do_aio_operate(const std::string& o, TestObjectOperationImpl& ops,
-                     AioCompletionImpl* c, SnapContext* snapc, int flags) {
-    return TestMemIoCtxImpl::aio_operate(o, ops, c, snapc, flags);
+                     AioCompletionImpl* c, SnapContext* snapc,
+                     const ceph::real_time* pmtime, int flags) {
+    return TestMemIoCtxImpl::aio_operate(o, ops, c, snapc, pmtime, flags);
   }
 
   MOCK_METHOD4(aio_watch, int(const std::string& o, AioCompletionImpl *c,
@@ -86,7 +88,7 @@ public:
     return TestMemIoCtxImpl::cmpext(oid, off, cmp_bl, snap_id);
   }
 
-  MOCK_METHOD8(exec, int(const std::string& oid,
+  MOCK_METHOD8(exec_internal, int(const std::string& oid,
                          TestClassHandler *handler,
                          const char *cls,
                          const char *method,
@@ -97,7 +99,7 @@ public:
   int do_exec(const std::string& oid, TestClassHandler *handler,
               const char *cls, const char *method, bufferlist& inbl,
               bufferlist* outbl, uint64_t snap_id, const SnapContext &snapc) {
-    return TestMemIoCtxImpl::exec(oid, handler, cls, method, inbl, outbl,
+    return TestMemIoCtxImpl::exec_internal(oid, handler, cls, method, inbl, outbl,
                                   snap_id, snapc);
   }
 
@@ -214,14 +216,14 @@ public:
 
     ON_CALL(*this, clone()).WillByDefault(Invoke(this, &MockTestMemIoCtxImpl::do_clone));
     ON_CALL(*this, aio_notify(_, _, _, _, _)).WillByDefault(Invoke(this, &MockTestMemIoCtxImpl::do_aio_notify));
-    ON_CALL(*this, aio_operate(_, _, _, _, _)).WillByDefault(Invoke(this, &MockTestMemIoCtxImpl::do_aio_operate));
+    ON_CALL(*this, aio_operate(_, _, _, _, _, _)).WillByDefault(Invoke(this, &MockTestMemIoCtxImpl::do_aio_operate));
     ON_CALL(*this, aio_watch(_, _, _, _)).WillByDefault(Invoke(this, &MockTestMemIoCtxImpl::do_aio_watch));
     ON_CALL(*this, aio_unwatch(_, _)).WillByDefault(Invoke(this, &MockTestMemIoCtxImpl::do_aio_unwatch));
     ON_CALL(*this, assert_exists(_, _)).WillByDefault(Invoke(this, &MockTestMemIoCtxImpl::do_assert_exists));
     ON_CALL(*this, assert_version(_, _)).WillByDefault(Invoke(this, &MockTestMemIoCtxImpl::do_assert_version));
     ON_CALL(*this, create(_, _, _)).WillByDefault(Invoke(this, &MockTestMemIoCtxImpl::do_create));
     ON_CALL(*this, cmpext(_, _, _, _)).WillByDefault(Invoke(this, &MockTestMemIoCtxImpl::do_cmpext));
-    ON_CALL(*this, exec(_, _, _, _, _, _, _, _)).WillByDefault(Invoke(this, &MockTestMemIoCtxImpl::do_exec));
+    ON_CALL(*this, exec_internal(_, _, _, _, _, _, _, _)).WillByDefault(Invoke(this, &MockTestMemIoCtxImpl::do_exec));
     ON_CALL(*this, get_instance_id()).WillByDefault(Invoke(this, &MockTestMemIoCtxImpl::do_get_instance_id));
     ON_CALL(*this, list_snaps(_, _)).WillByDefault(Invoke(this, &MockTestMemIoCtxImpl::do_list_snaps));
     ON_CALL(*this, list_watchers(_, _)).WillByDefault(Invoke(this, &MockTestMemIoCtxImpl::do_list_watchers));

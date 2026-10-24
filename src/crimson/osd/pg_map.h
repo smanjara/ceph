@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -21,65 +21,52 @@ class PG;
 /**
  * PGShardMapping
  *
- * Maps pgs to shards.
+ * Maintains a mapping from spg_t to the core containing that PG.  Internally, each
+ * core has a local copy of the mapping to enable core-local lookups.  Updates
+ * are proxied to core 0, and the back out to all other cores -- see get_or_create_pg_mapping.
  */
-class PGShardMapping {
+class PGShardMapping : public seastar::peering_sharded_service<PGShardMapping> {
 public:
   /// Returns mapping if present, NULL_CORE otherwise
   core_id_t get_pg_mapping(spg_t pgid) {
     auto iter = pg_to_core.find(pgid);
-    ceph_assert_always(iter == pg_to_core.end() || iter->second != NULL_CORE);
-    return iter == pg_to_core.end() ? NULL_CORE : iter->second;
+    ceph_assert_always(iter == pg_to_core.end() || iter->second.first != NULL_CORE);
+    return iter == pg_to_core.end() ? NULL_CORE : iter->second.first;
   }
 
   /// Returns mapping for pgid, creates new one if it doesn't already exist
-  core_id_t maybe_create_pg(spg_t pgid, core_id_t core = NULL_CORE) {
-    auto [insert_iter, inserted] = pg_to_core.emplace(pgid, core);
-    if (!inserted) {
-      ceph_assert_always(insert_iter->second != NULL_CORE);
-      if (core != NULL_CORE) {
-	ceph_assert_always(insert_iter->second == core);
-      }
-      return insert_iter->second;
-    } else {
-      ceph_assert_always(core_to_num_pgs.size() > 0);
-      std::map<core_id_t, unsigned>::iterator core_iter;
-      if (core == NULL_CORE) {
-        core_iter = std::min_element(
-          core_to_num_pgs.begin(),
-          core_to_num_pgs.end(),
-          [](const auto &left, const auto &right) {
-            return left.second < right.second;
-        });
-      } else {
-	core_iter = core_to_num_pgs.find(core);
-      }
-      ceph_assert_always(core_to_num_pgs.end() != core_iter);
-      insert_iter->second = core_iter->first;
-      core_iter->second++;
-      return insert_iter->second;
-    }
-  }
+  seastar::future<std::pair<core_id_t, store_index_t>> get_or_create_pg_mapping(
+    spg_t pgid,
+    core_id_t core_expected = NULL_CORE,
+    store_index_t store_index = NULL_STORE_INDEX);
 
-  /// Remove pgid
-  void remove_pg(spg_t pgid) {
-    auto iter = pg_to_core.find(pgid);
-    ceph_assert_always(iter != pg_to_core.end());
-    ceph_assert_always(iter->second != NULL_CORE);
-    auto count_iter = core_to_num_pgs.find(iter->second);
-    ceph_assert_always(count_iter != core_to_num_pgs.end());
-    ceph_assert_always(count_iter->second > 0);
-    --(count_iter->second);
-    pg_to_core.erase(iter);
-  }
+  /// Remove pgid mapping
+  seastar::future<> remove_pg_mapping(spg_t pgid);
 
   size_t get_num_pgs() const { return pg_to_core.size(); }
 
+  seastar::future<> dump_store_shards(Formatter *f) const;
+
   /// Map to cores in [min_core_mapping, core_mapping_limit)
-  PGShardMapping(core_id_t min_core_mapping, core_id_t core_mapping_limit) {
+  PGShardMapping(core_id_t min_core_mapping, core_id_t core_mapping_limit, uint32_t store_shard_nums)
+    : store_shard_nums(store_shard_nums) {
     ceph_assert_always(min_core_mapping < core_mapping_limit);
-    for (auto i = min_core_mapping; i != core_mapping_limit; ++i) {
+    auto max_core_mapping = std::min(min_core_mapping + store_shard_nums, core_mapping_limit);
+    auto num_shard_services = (store_shard_nums + seastar::this_smp_shard_count() - 1 ) / seastar::this_smp_shard_count();
+    auto num_alien_cores = (seastar::this_smp_shard_count() + store_shard_nums -1 ) / store_shard_nums;
+
+    for (auto i = min_core_mapping; i != max_core_mapping; ++i) {
+      for (unsigned int j = 0; j < num_shard_services; ++j) {
+        if (i - min_core_mapping + j * seastar::this_smp_shard_count() < store_shard_nums) {
+          core_shard_to_num_pgs[i].emplace(j, 0);
+        }
+      }
       core_to_num_pgs.emplace(i, 0);
+      for (unsigned int j = 0; j < num_alien_cores; ++j) {
+        if (store_shard_nums * j + i < core_mapping_limit) {
+          core_alien_to_num_pgs[i].emplace(store_shard_nums * j + i, 0);
+        }
+      }
     }
   }
 
@@ -91,8 +78,19 @@ public:
   }
 
 private:
+
+  uint32_t store_shard_nums;
+  // only in shard 0
+  //<core_id, num_pgs>
   std::map<core_id_t, unsigned> core_to_num_pgs;
-  std::map<spg_t, core_id_t> pg_to_core;
+  //<core_id, <shard_index, num_pgs>>  // when smp < store_shard_nums, each core more than one store shard
+  std::map<core_id_t, std::map<unsigned, unsigned>> core_shard_to_num_pgs;
+  //<core_id, <alien_core_id, num_pgs>> // when smp > store_shard_nums, more than one core share store shard
+  std::map<core_id_t, std::map<core_id_t, unsigned>> core_alien_to_num_pgs;
+  // per-shard, updated by shard 0
+  //<pg, <core_id, store_index>>
+  std::map<spg_t, std::pair<core_id_t, store_index_t>> pg_to_core;
+
 };
 
 /**
@@ -161,6 +159,8 @@ public:
    * Cancel pending creation of pgid.
    */
   void pg_creation_canceled(spg_t pgid);
+
+  void remove_pg(spg_t pgid);
 
   pgs_t& get_pgs() { return pgs; }
   const pgs_t& get_pgs() const { return pgs; }

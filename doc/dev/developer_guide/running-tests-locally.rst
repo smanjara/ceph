@@ -45,17 +45,40 @@ To run the s3tests suite do the following::
 
 Running test using vstart_runner.py
 -----------------------------------
-CephFS and Ceph Manager code is be tested using `vstart_runner.py`_.
+CephFS and Ceph Manager code can be tested using `vstart_runner.py`_.
 
 Running your first test
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
 The Python tests in Ceph repository can be executed on your local machine
 using `vstart_runner.py`_. To do that, you'd need `teuthology`_ installed::
 
+    $ git clone https://github.com/ceph/teuthology
+    $ cd teuthology
+    $ ./bootstrap install
+
+This will create a virtual environment named ``virtualenv`` in root of the
+teuthology repository and install teuthology in it.
+
+You can also install teuthology via ``pip`` if you would like to install it
+in a custom virtual environment with clone `teuthology`_ repository using
+``git``::
+
     $ virtualenv --python=python3 venv
     $ source venv/bin/activate
     $ pip install 'setuptools >= 12'
-    $ pip install git+https://github.com/ceph/teuthology#egg=teuthology[test]
+    $ pip install teuthology[test]@git+https://github.com/ceph/teuthology
+    $ deactivate
+
+If for some unforeseen reason above approaches do not work (maybe the bootstrap
+script doesn't work due to a bug or you can't download teuthology at the
+moment) teuthology can be installed manually from copy of
+teuthology repo already present on your machine::
+
+    $ cd teuthology
+    $ virtualenv -p python3 venv
+    $ source venv/bin/activate
+    $ pip install -r requirements.txt
+    $ pip install .
     $ deactivate
 
 The above steps installs teuthology in a virtual environment. Before running
@@ -144,8 +167,8 @@ vstart_runner.py primarily does three things -
           checked in ``<ceph-repo-root>/build/bin/``. If present, the first
           argument is replaced with the path to binary file.
 
-Running Workunits Using vstart_enviroment.sh
---------------------------------------------
+Running Workunits Using vstart_environment.sh
+---------------------------------------------
 
 Code can be tested by building Ceph locally from source, starting a vstart
 cluster, and running any suite against it.
@@ -156,7 +179,7 @@ Set up the environment
 
 Configure your environment::
 
-    $ . ./build/vstart_enviroment.sh
+    $ . ./build/vstart_environment.sh
 
 Running a test
 ^^^^^^^^^^^^^^
@@ -165,7 +188,7 @@ To run a workunit (e.g ``mon/osd.sh``) do the following::
 
     $ ./qa/workunits/mon/osd.sh
 
-.. _test_reconnect_timeout: https://github.com/ceph/ceph/blob/master/qa/tasks/cephfs/test_client_recovery.py#L133
-.. _TestClientRecovery: https://github.com/ceph/ceph/blob/master/qa/tasks/cephfs/test_client_recovery.py#L86
+.. _test_reconnect_timeout: https://github.com/ceph/ceph/blob/main/qa/tasks/cephfs/test_client_recovery.py#L133
+.. _TestClientRecovery: https://github.com/ceph/ceph/blob/main/qa/tasks/cephfs/test_client_recovery.py#L86
 .. _teuthology: https://github.com/ceph/teuthology
-.. _vstart_runner.py: https://github.com/ceph/ceph/blob/master/qa/tasks/vstart_runner.py
+.. _vstart_runner.py: https://github.com/ceph/ceph/blob/main/qa/tasks/vstart_runner.py

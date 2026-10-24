@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -14,16 +15,17 @@
 #ifndef MDS_AUTH_CAPS_H
 #define MDS_AUTH_CAPS_H
 
-#include <ostream>
+#include <cstdint>
+#include <iosfwd>
 #include <string>
 #include <string_view>
 #include <vector>
 
-#include "include/common_fwd.h"
-#include "include/types.h"
-#include "common/debug.h"
+#include "include/encoding.h"
+#include "msg/msg_types.h" // for struct entity_addr_t
+#include "include/filepath.h"
 
-#include "mdstypes.h"
+#include <boost/optional.hpp>
 
 // unix-style capabilities
 enum {
@@ -48,6 +50,10 @@ struct MDSCapSpec {
   static const unsigned SNAPSHOT	= (1 << 4);
   // if the capability permits to bypass osd full check
   static const unsigned FULL	        = (1 << 5);
+  // if the capability permits access to a specific quarantined dir
+  static const unsigned Q               = (1 << 6);
+  // if the capability permits access to all quarantined dirs
+  static const unsigned Q_PRIME         = (1 << 7);
 
   static const unsigned RW		= (READ|WRITE);
   static const unsigned RWF		= (READ|WRITE|FULL);
@@ -62,6 +68,8 @@ struct MDSCapSpec {
   MDSCapSpec(unsigned _caps) : caps(_caps) {
     if (caps & ALL)
       caps |= RWFPS;
+    // Q and Q_PRIME are never implied by ALL — quarantine access
+    // must be granted explicitly to limit who can access compromised data.
   }
 
   bool allow_all() const {
@@ -93,6 +101,25 @@ struct MDSCapSpec {
   bool allow_full() const {
     return (caps & FULL);
   }
+  // check access for specific dir
+  bool allow_qtine_access() const {
+    return (caps & Q);
+  }
+  // check access for all dirs (superset access to all quarantined dirs)
+  bool allow_qtine_prime_access() const {
+    return (caps & Q_PRIME);
+  }
+
+  unsigned get_caps() {
+    return caps;
+  }
+
+  void set_caps(unsigned int _caps) {
+    caps = _caps;
+  }
+
+  std::string to_string();
+
 private:
   unsigned caps = 0;
 };
@@ -101,42 +128,32 @@ private:
 struct MDSCapMatch {
   static const int64_t MDS_AUTH_UID_ANY = -1;
 
-  MDSCapMatch() : uid(MDS_AUTH_UID_ANY), fs_name(std::string()) {}
+  MDSCapMatch() {}
 
-  MDSCapMatch(int64_t uid_, std::vector<gid_t>& gids_) :
-    uid(uid_), gids(gids_), fs_name(std::string()) {}
+  MDSCapMatch(const std::string& fsname_, const std::string& path_,
+	      bool root_squash_, int64_t uid_=MDS_AUTH_UID_ANY,
+	      const std::vector<gid_t>& gids_={}) {
+    fs_name = fsname_;
+    path = path_;
+    root_squash = root_squash_;
+    uid = (uid_ == 0) ? -1 : uid_;
+    gids = gids_;
 
-  explicit MDSCapMatch(const std::string &path_)
-    : uid(MDS_AUTH_UID_ANY), path(path_), fs_name(std::string()) {
     normalize_path();
   }
-
-  explicit MDSCapMatch(std::string path, std::string fs_name) :
-    uid(MDS_AUTH_UID_ANY), path(std::move(path)), fs_name(std::move(fs_name))
-  {
-    normalize_path();
-  }
-
-  explicit MDSCapMatch(std::string path, std::string fs_name, bool root_squash_) :
-    uid(MDS_AUTH_UID_ANY), path(std::move(path)), fs_name(std::move(fs_name)), root_squash(root_squash_)
-  {
-    normalize_path();
-  }
-
-  MDSCapMatch(const std::string& path_, int64_t uid_, std::vector<gid_t>& gids_)
-    : uid(uid_), gids(gids_), path(path_), fs_name(std::string()) {
-    normalize_path();
-  }
+  MDSCapMatch(const MDSCapMatch& m) = default;
+  MDSCapMatch& operator=(const MDSCapMatch& m) = default;
 
   void normalize_path();
-  
+
   bool is_match_all() const
   {
     return uid == MDS_AUTH_UID_ANY && path == "";
   }
 
   // check whether this grant matches against a given file and caller uid:gid
-  bool match(std::string_view target_path,
+  bool match(std::string_view fs_name,
+             std::string_view target_path,
 	     const int caller_uid,
 	     const int caller_gid,
 	     const std::vector<uint64_t> *caller_gid_list) const;
@@ -148,13 +165,70 @@ struct MDSCapMatch {
    * @param target_path filesystem path without leading '/'
    */
   bool match_path(std::string_view target_path) const;
+  std::string to_string();
 
-  int64_t uid;       // Require UID to be equal to this, if !=MDS_AUTH_UID_ANY
+  bool match_fs(std::string_view target_fs) const {
+    return fs_name == target_fs || fs_name.empty() || fs_name == "*";
+  }
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(uid, bl);
+    encode(gids, bl);
+    encode(path, bl);
+    encode(fs_name, bl);
+    encode(root_squash, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(ceph::buffer::list::const_iterator& p) {
+    DECODE_START(1, p);
+    decode(uid, p);
+    decode(gids, p);
+    decode(path, p);
+    decode(fs_name, p);
+    decode(root_squash, p);
+    DECODE_FINISH(p);
+  }
+
+  // Require UID to be equal to this, if !=MDS_AUTH_UID_ANY
+  int64_t uid = MDS_AUTH_UID_ANY;
   std::vector<gid_t> gids;  // Use these GIDs
   std::string path;  // Require path to be child of this (may be "" or "/" for any)
   std::string fs_name;
   bool root_squash=false;
 };
+WRITE_CLASS_ENCODER(MDSCapMatch)
+
+struct MDSCapAuth {
+  MDSCapAuth() {}
+  MDSCapAuth(MDSCapMatch m, bool r, bool w) :
+    match(m), readable(r), writeable(w) {}
+
+  MDSCapAuth(const MDSCapAuth& m) = default;
+  MDSCapAuth& operator=(const MDSCapAuth& m) = default;
+
+  void encode(ceph::buffer::list& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(match, bl);
+    encode(readable, bl);
+    encode(writeable, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(ceph::buffer::list::const_iterator& p) {
+    DECODE_START(1, p);
+    decode(match, p);
+    decode(readable, p);
+    decode(writeable, p);
+    DECODE_FINISH(p);
+  }
+
+  MDSCapMatch match;
+  bool readable;
+  bool writeable;
+};
+WRITE_CLASS_ENCODER(MDSCapAuth)
 
 struct MDSCapGrant {
   MDSCapGrant(const MDSCapSpec &spec_, const MDSCapMatch &match_,
@@ -168,6 +242,7 @@ struct MDSCapGrant {
   MDSCapGrant() {}
 
   void parse_network();
+  std::string to_string();
 
   MDSCapSpec spec;
   MDSCapMatch match;
@@ -183,9 +258,8 @@ class MDSAuthCaps
 {
 public:
   MDSAuthCaps() = default;
-  explicit MDSAuthCaps(CephContext *cct_) : cct(cct_) {}
 
-  // this ctor is used by spirit/phoenix; doesn't need cct.
+  // this ctor is used by spirit/phoenix
   explicit MDSAuthCaps(const std::vector<MDSCapGrant>& grants_) : grants(grants_) {}
 
   void clear() {
@@ -193,14 +267,18 @@ public:
   }
 
   void set_allow_all();
-  bool parse(CephContext *cct, std::string_view str, std::ostream *err);
+  bool parse(std::string_view str, std::ostream *err);
+  bool merge_one_cap_grant(MDSCapGrant ng);
+  bool merge(MDSAuthCaps newcaps);
 
   bool allow_all() const;
-  bool is_capable(std::string_view inode_path,
+  bool is_capable(std::string_view fs_name,
+                  std::string_view inode_path,
 		  uid_t inode_uid, gid_t inode_gid, unsigned inode_mode,
 		  uid_t uid, gid_t gid, const std::vector<uint64_t> *caller_gid_list,
 		  unsigned mask, uid_t new_uid, gid_t new_gid,
-		  const entity_addr_t& addr) const;
+		  const entity_addr_t& addr, std::string_view trimmed_inode_path,
+                  bool check_quarantine_access) const;
   bool path_capable(std::string_view inode_path) const;
 
   bool fs_name_capable(std::string_view fs_name, unsigned mask) const {
@@ -209,8 +287,7 @@ public:
     }
 
     for (const MDSCapGrant &g : grants) {
-      if (g.match.fs_name == fs_name || g.match.fs_name.empty() ||
-	  g.match.fs_name == "*") {
+      if (g.match.match_fs(fs_name)) {
 	if (mask & MAY_READ && g.spec.allow_read()) {
 	  return true;
 	}
@@ -224,13 +301,68 @@ public:
     return false;
   }
 
+  void get_cap_auths(std::vector<MDSCapAuth> *cap_auths)
+  {
+    for (const auto& grant : grants) {
+      cap_auths->emplace_back(MDSCapAuth(grant.match,
+                                grant.spec.allow_read(),
+                                grant.spec.allow_write()));
+    }
+  }
+
+  bool root_squash_in_caps(std::string_view fs_name) const {
+    for (const MDSCapGrant& g : grants) {
+      if (g.match.match_fs(fs_name)) {
+        if (g.match.root_squash) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  bool quarantine_access_in_caps(std::string_view fs_name, std::string_view path) const {
+    for (const MDSCapGrant& g : grants) {
+      if (g.match.match_fs(fs_name)) {
+        // Check if this grant has quarantine access
+        if (!(g.spec.allow_qtine_access() || g.spec.allow_qtine_prime_access())) {
+          continue;
+        }
+        
+        // Check if the path matches this grant
+        // Handle empty or root path specially
+        if (path.empty() || path == "/") {
+          if (g.match.match_path("")) {
+            return true;
+          }
+          continue;
+        }
+        
+        filepath fp(path);
+        bool path_matched = g.match.match_path(fp.get_path()); // Check current path
+        
+        // If not matched, try parent paths
+        while (!path_matched && fp.depth()) {
+          fp.pop_dentry();
+          path_matched = g.match.match_path(fp.get_path());
+        }
+        
+        if (path_matched) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   friend std::ostream &operator<<(std::ostream &out, const MDSAuthCaps &cap);
+  std::string to_string();
 private:
-  CephContext *cct = nullptr;
   std::vector<MDSCapGrant> grants;
 };
 
 std::ostream &operator<<(std::ostream &out, const MDSCapMatch &match);
+std::ostream &operator<<(std::ostream &out, const MDSCapAuth &auth);
 std::ostream &operator<<(std::ostream &out, const MDSCapSpec &spec);
 std::ostream &operator<<(std::ostream &out, const MDSCapGrant &grant);
 std::ostream &operator<<(std::ostream &out, const MDSAuthCaps &cap);
