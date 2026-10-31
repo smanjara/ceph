@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -20,6 +21,8 @@ void ceph_heap_profiler_init() { return; }
 void ceph_heap_profiler_stats(char *buf, int length) { return; }
 
 void ceph_heap_release_free_memory() { return; }
+
+void ceph_heap_release_to_system(size_t bytes) { return; }
 
 double ceph_heap_get_release_rate() { return 0; }
 

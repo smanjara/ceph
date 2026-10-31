@@ -5,8 +5,6 @@ TMPDIR=/tmp/rbd_test_admin_socket$$
 mkdir $TMPDIR
 trap "rm -fr $TMPDIR" 0
 
-. $(dirname $0)/../../standalone/ceph-helpers.sh
-
 function expect_false()
 {
     set -x
@@ -40,12 +38,12 @@ function rbd_get_perfcounter()
     local name
 
     name=$(ceph --format xml --admin-daemon $(rbd_watch_asok ${image}) \
-		perf schema | $XMLSTARLET el -d3 |
+		perf schema | xmlstarlet el -d3 |
 		  grep "/librbd-.*-${image}/${counter}\$")
     test -n "${name}" || return 1
 
     ceph --format xml --admin-daemon $(rbd_watch_asok ${image}) perf dump |
-	$XMLSTARLET sel -t -m "${name}" -v .
+	xmlstarlet sel -t -m "${name}" -v .
 }
 
 function rbd_check_perfcounter()
@@ -124,8 +122,8 @@ rbd_cache_flush="rbd cache flush ${pool}/${image}"
 rbd_cache_invalidate="rbd cache invalidate ${pool}/${image}"
 
 rbd_watch_start ${image}
-${ceph_admin} help | fgrep "${rbd_cache_flush}"
-${ceph_admin} help | fgrep "${rbd_cache_invalidate}"
+${ceph_admin} help | grep -F "${rbd_cache_flush}"
+${ceph_admin} help | grep -F "${rbd_cache_invalidate}"
 rbd_watch_end ${image}
 
 # test rbd cache commands with disabled and enabled cache

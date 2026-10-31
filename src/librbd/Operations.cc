@@ -1,8 +1,9 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "cls/rbd/cls_rbd_types.h"
 #include "librbd/Operations.h"
+#include "common/Cond.h"
 #include "common/dout.h"
 #include "common/errno.h"
 #include "common/perf_counters.h"
@@ -39,6 +40,7 @@
 #include "librbd/operation/SnapshotLimitRequest.h"
 #include "librbd/operation/SparsifyRequest.h"
 #include <set>
+#include <shared_mutex> // for std::shared_lock
 #include <boost/bind/bind.hpp>
 #include <boost/scope_exit.hpp>
 
@@ -185,7 +187,6 @@ struct C_InvokeAsyncRequest : public Context {
   bool permit_snapshot;
   boost::function<void(Context*)> local;
   boost::function<void(Context*)> remote;
-  std::set<int> filter_error_codes;
   Context *on_finish;
   bool request_lock = false;
 
@@ -194,11 +195,10 @@ struct C_InvokeAsyncRequest : public Context {
                        bool permit_snapshot,
                        const boost::function<void(Context*)>& local,
                        const boost::function<void(Context*)>& remote,
-                       const std::set<int> &filter_error_codes,
                        Context *on_finish)
     : image_ctx(image_ctx), operation(operation), request_type(request_type),
       permit_snapshot(permit_snapshot), local(local), remote(remote),
-      filter_error_codes(filter_error_codes), on_finish(on_finish) {
+      on_finish(on_finish) {
   }
 
   void send() {
@@ -258,7 +258,7 @@ struct C_InvokeAsyncRequest : public Context {
     }
 
     if (image_ctx.exclusive_lock->is_lock_owner() &&
-        image_ctx.exclusive_lock->accept_request(request_type, nullptr)) {
+        image_ctx.exclusive_lock->accept_request(request_type)) {
       send_local_request();
       owner_lock.unlock_shared();
       return;
@@ -382,9 +382,6 @@ struct C_InvokeAsyncRequest : public Context {
   }
 
   void finish(int r) override {
-    if (filter_error_codes.count(r) != 0) {
-      r = 0;
-    }
     on_finish->complete(r);
   }
 };
@@ -503,11 +500,8 @@ int Operations<I>::flatten(ProgressContext &prog_ctx) {
                                        m_image_ctx.image_watcher, request_id,
                                        boost::ref(prog_ctx), _1));
 
-  if (r < 0 && r != -EINVAL) {
-    return r;
-  }
   ldout(cct, 20) << "flatten finished" << dendl;
-  return 0;
+  return r;
 }
 
 template <typename I>
@@ -582,10 +576,7 @@ int Operations<I>::rebuild_object_map(ProgressContext &prog_ctx) {
                                        boost::ref(prog_ctx), _1));
 
   ldout(cct, 10) << "rebuild object map finished" << dendl;
-  if (r < 0) {
-    return r;
-  }
-  return 0;
+  return r;
 }
 
 template <typename I>
@@ -686,12 +677,9 @@ int Operations<I>::rename(const char *dstname) {
                            boost::bind(&ImageWatcher<I>::notify_rename,
                                        m_image_ctx.image_watcher, request_id,
                                        dstname, _1));
-  if (r < 0 && r != -EEXIST) {
-    return r;
-  }
 
   m_image_ctx.set_image_name(dstname);
-  return 0;
+  return r;
 }
 
 template <typename I>
@@ -874,7 +862,7 @@ void Operations<I>::snap_create(const cls::rbd::SnapshotNamespace &snap_namespac
     boost::bind(&ImageWatcher<I>::notify_snap_create, m_image_ctx.image_watcher,
                 request_id, snap_namespace, snap_name, flags,
                 boost::ref(prog_ctx), _1),
-    {-EEXIST}, on_finish);
+    on_finish);
   req->send();
 }
 
@@ -1077,7 +1065,7 @@ void Operations<I>::snap_remove(const cls::rbd::SnapshotNamespace& snap_namespac
       boost::bind(&ImageWatcher<I>::notify_snap_remove,
                   m_image_ctx.image_watcher, request_id, snap_namespace,
                   snap_name, _1),
-      {-ENOENT}, on_finish);
+      on_finish);
     req->send();
   } else {
     std::shared_lock owner_lock{m_image_ctx.owner_lock};
@@ -1173,9 +1161,6 @@ int Operations<I>::snap_rename(const char *srcname, const char *dstname) {
                              boost::bind(&ImageWatcher<I>::notify_snap_rename,
                                          m_image_ctx.image_watcher, request_id,
                                          snap_id, dstname, _1));
-    if (r < 0 && r != -EEXIST) {
-      return r;
-    }
   } else {
     C_SaferCond cond_ctx;
     {
@@ -1184,13 +1169,10 @@ int Operations<I>::snap_rename(const char *srcname, const char *dstname) {
     }
 
     r = cond_ctx.wait();
-    if (r < 0) {
-      return r;
-    }
   }
 
   m_image_ctx.perfcounter->inc(l_librbd_snap_rename);
-  return 0;
+  return r;
 }
 
 template <typename I>
@@ -1275,9 +1257,6 @@ int Operations<I>::snap_protect(const cls::rbd::SnapshotNamespace& snap_namespac
                              boost::bind(&ImageWatcher<I>::notify_snap_protect,
                                          m_image_ctx.image_watcher, request_id,
 					 snap_namespace, snap_name, _1));
-    if (r < 0 && r != -EBUSY) {
-      return r;
-    }
   } else {
     C_SaferCond cond_ctx;
     {
@@ -1286,11 +1265,9 @@ int Operations<I>::snap_protect(const cls::rbd::SnapshotNamespace& snap_namespac
     }
 
     r = cond_ctx.wait();
-    if (r < 0) {
-      return r;
-    }
   }
-  return 0;
+
+  return r;
 }
 
 template <typename I>
@@ -1373,9 +1350,6 @@ int Operations<I>::snap_unprotect(const cls::rbd::SnapshotNamespace& snap_namesp
                              boost::bind(&ImageWatcher<I>::notify_snap_unprotect,
                                          m_image_ctx.image_watcher, request_id,
 					 snap_namespace, snap_name, _1));
-    if (r < 0 && r != -EINVAL) {
-      return r;
-    }
   } else {
     C_SaferCond cond_ctx;
     {
@@ -1384,11 +1358,9 @@ int Operations<I>::snap_unprotect(const cls::rbd::SnapshotNamespace& snap_namesp
     }
 
     r = cond_ctx.wait();
-    if (r < 0) {
-      return r;
-    }
   }
-  return 0;
+
+  return r;
 }
 
 template <typename I>
@@ -1640,15 +1612,25 @@ int Operations<I>::metadata_set(const std::string &key,
     return -EROFS;
   }
 
-  uint64_t request_id = util::reserve_async_request_id();
-  r = invoke_async_request(OPERATION_METADATA_UPDATE,
-                           exclusive_lock::OPERATION_REQUEST_TYPE_GENERAL,
-                           false,
-                           boost::bind(&Operations<I>::execute_metadata_set,
-                                       this, key, value, _1),
-                           boost::bind(&ImageWatcher<I>::notify_metadata_set,
-                                       m_image_ctx.image_watcher, request_id,
-                                       key, value, _1));
+  if (m_image_ctx.test_features(RBD_FEATURE_JOURNALING)) {
+    uint64_t request_id = util::reserve_async_request_id();
+    r = invoke_async_request(OPERATION_METADATA_UPDATE,
+                             exclusive_lock::OPERATION_REQUEST_TYPE_GENERAL,
+                             false,
+                             boost::bind(&Operations<I>::execute_metadata_set,
+                                         this, key, value, _1),
+                             boost::bind(&ImageWatcher<I>::notify_metadata_set,
+                                         m_image_ctx.image_watcher, request_id,
+                                         key, value, _1));
+  } else {
+    C_SaferCond cond_ctx;
+    {
+      std::shared_lock owner_lock{m_image_ctx.owner_lock};
+      execute_metadata_set(key, value, &cond_ctx);
+    }
+
+    r = cond_ctx.wait();
+  }
 
   if (config_override && r >= 0) {
     // apply new config key immediately
@@ -1664,6 +1646,10 @@ void Operations<I>::execute_metadata_set(const std::string &key,
 					const std::string &value,
 					Context *on_finish) {
   ceph_assert(ceph_mutex_is_locked(m_image_ctx.owner_lock));
+  if ((m_image_ctx.features & RBD_FEATURE_JOURNALING) != 0) {
+    ceph_assert(m_image_ctx.exclusive_lock == nullptr ||
+                m_image_ctx.exclusive_lock->is_lock_owner());
+  }
 
   CephContext *cct = m_image_ctx.cct;
   ldout(cct, 5) << this << " " << __func__ << ": key=" << key << ", value="
@@ -1673,6 +1659,14 @@ void Operations<I>::execute_metadata_set(const std::string &key,
     on_finish->complete(-EROFS);
     return;
   }
+
+  m_image_ctx.image_lock.lock_shared();
+  if (m_image_ctx.snap_id != CEPH_NOSNAP) {
+    m_image_ctx.image_lock.unlock_shared();
+    on_finish->complete(-EROFS);
+    return;
+  }
+  m_image_ctx.image_lock.unlock_shared();
 
   operation::MetadataSetRequest<I> *request =
     new operation::MetadataSetRequest<I>(m_image_ctx,
@@ -1700,17 +1694,24 @@ int Operations<I>::metadata_remove(const std::string &key) {
   if(r < 0)
     return r;
 
-  uint64_t request_id = util::reserve_async_request_id();
-  r = invoke_async_request(OPERATION_METADATA_UPDATE,
-                           exclusive_lock::OPERATION_REQUEST_TYPE_GENERAL,
-                           false,
-                           boost::bind(&Operations<I>::execute_metadata_remove,
-                                       this, key, _1),
-                           boost::bind(&ImageWatcher<I>::notify_metadata_remove,
-                                       m_image_ctx.image_watcher, request_id,
-                                       key, _1));
-  if (r == -ENOENT) {
-    r = 0;
+  if (m_image_ctx.test_features(RBD_FEATURE_JOURNALING)) {
+    uint64_t request_id = util::reserve_async_request_id();
+    r = invoke_async_request(OPERATION_METADATA_UPDATE,
+                             exclusive_lock::OPERATION_REQUEST_TYPE_GENERAL,
+                             false,
+                             boost::bind(&Operations<I>::execute_metadata_remove,
+                                         this, key, _1),
+                             boost::bind(&ImageWatcher<I>::notify_metadata_remove,
+                                         m_image_ctx.image_watcher, request_id,
+                                         key, _1));
+  } else {
+    C_SaferCond cond_ctx;
+    {
+      std::shared_lock owner_lock{m_image_ctx.owner_lock};
+      execute_metadata_remove(key, &cond_ctx);
+    }
+
+    r = cond_ctx.wait();
   }
 
   std::string config_key;
@@ -1727,6 +1728,10 @@ template <typename I>
 void Operations<I>::execute_metadata_remove(const std::string &key,
                                            Context *on_finish) {
   ceph_assert(ceph_mutex_is_locked(m_image_ctx.owner_lock));
+  if ((m_image_ctx.features & RBD_FEATURE_JOURNALING) != 0) {
+    ceph_assert(m_image_ctx.exclusive_lock == nullptr ||
+                m_image_ctx.exclusive_lock->is_lock_owner());
+  }
 
   CephContext *cct = m_image_ctx.cct;
   ldout(cct, 5) << this << " " << __func__ << ": key=" << key << dendl;
@@ -1735,6 +1740,14 @@ void Operations<I>::execute_metadata_remove(const std::string &key,
     on_finish->complete(-EROFS);
     return;
   }
+
+  m_image_ctx.image_lock.lock_shared();
+  if (m_image_ctx.snap_id != CEPH_NOSNAP) {
+    m_image_ctx.image_lock.unlock_shared();
+    on_finish->complete(-EROFS);
+    return;
+  }
+  m_image_ctx.image_lock.unlock_shared();
 
   operation::MetadataRemoveRequest<I> *request =
     new operation::MetadataRemoveRequest<I>(
@@ -1775,11 +1788,8 @@ int Operations<I>::migrate(ProgressContext &prog_ctx) {
                                        m_image_ctx.image_watcher, request_id,
                                        boost::ref(prog_ctx), _1));
 
-  if (r < 0 && r != -EINVAL) {
-    return r;
-  }
   ldout(cct, 20) << "migrate finished" << dendl;
-  return 0;
+  return r;
 }
 
 template <typename I>
@@ -1842,11 +1852,9 @@ int Operations<I>::sparsify(size_t sparse_size, ProgressContext &prog_ctx) {
                                            m_image_ctx.image_watcher,
                                            request_id, sparse_size,
                                            boost::ref(prog_ctx), _1));
-  if (r < 0 && r != -EINVAL) {
-    return r;
-  }
+
   ldout(cct, 20) << "resparsify finished" << dendl;
-  return 0;
+  return r;
 }
 
 template <typename I>
@@ -1887,7 +1895,7 @@ int Operations<I>::prepare_image_update(
     std::unique_lock owner_locker{m_image_ctx.owner_lock};
     if (m_image_ctx.exclusive_lock != nullptr &&
         (!m_image_ctx.exclusive_lock->is_lock_owner() ||
-         !m_image_ctx.exclusive_lock->accept_request(request_type, nullptr))) {
+         !m_image_ctx.exclusive_lock->accept_request(request_type))) {
 
       attempting_lock = true;
       m_image_ctx.exclusive_lock->block_requests(0);
@@ -1934,7 +1942,7 @@ int Operations<I>::invoke_async_request(
                                                              permit_snapshot,
                                                              local_request,
                                                              remote_request,
-                                                             {}, &ctx);
+                                                             &ctx);
   req->send();
   return ctx.wait();
 }

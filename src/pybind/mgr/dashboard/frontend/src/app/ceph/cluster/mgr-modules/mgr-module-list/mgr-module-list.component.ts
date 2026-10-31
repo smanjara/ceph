@@ -1,7 +1,4 @@
-import { Component, ViewChild } from '@angular/core';
-
-import { BlockUI, NgBlockUI } from 'ng-block-ui';
-import { timer as observableTimer } from 'rxjs';
+import { Component, OnInit, ViewChild } from '@angular/core';
 
 import { MgrModuleService } from '~/app/shared/api/mgr-module.service';
 import { ListWithDetails } from '~/app/shared/classes/list-with-details.class';
@@ -14,53 +11,30 @@ import { CdTableFetchDataContext } from '~/app/shared/models/cd-table-fetch-data
 import { CdTableSelection } from '~/app/shared/models/cd-table-selection';
 import { Permission } from '~/app/shared/models/permissions';
 import { AuthStorageService } from '~/app/shared/services/auth-storage.service';
-import { NotificationService } from '~/app/shared/services/notification.service';
 
 @Component({
   selector: 'cd-mgr-module-list',
   templateUrl: './mgr-module-list.component.html',
-  styleUrls: ['./mgr-module-list.component.scss']
+  styleUrls: ['./mgr-module-list.component.scss'],
+  standalone: false
 })
-export class MgrModuleListComponent extends ListWithDetails {
+export class MgrModuleListComponent extends ListWithDetails implements OnInit {
   @ViewChild(TableComponent, { static: true })
   table: TableComponent;
-  @BlockUI()
-  blockUI: NgBlockUI;
 
   permission: Permission;
   tableActions: CdTableAction[];
   columns: CdTableColumn[] = [];
   modules: object[] = [];
   selection: CdTableSelection = new CdTableSelection();
+  viewUrl = '/mgr-modules';
 
   constructor(
     private authStorageService: AuthStorageService,
-    private mgrModuleService: MgrModuleService,
-    private notificationService: NotificationService
+    private mgrModuleService: MgrModuleService
   ) {
     super();
     this.permission = this.authStorageService.getPermissions().configOpt;
-    this.columns = [
-      {
-        name: $localize`Name`,
-        prop: 'name',
-        flexGrow: 1
-      },
-      {
-        name: $localize`Enabled`,
-        prop: 'enabled',
-        flexGrow: 1,
-        cellClass: 'text-center',
-        cellTransformation: CellTemplate.checkIcon
-      },
-      {
-        name: $localize`Always-On`,
-        prop: 'always_on',
-        flexGrow: 1,
-        cellClass: 'text-center',
-        cellTransformation: CellTemplate.checkIcon
-      }
-    ];
     const getModuleUri = () =>
       this.selection.first() && encodeURIComponent(this.selection.first().name);
     this.tableActions = [
@@ -94,10 +68,38 @@ export class MgrModuleListComponent extends ListWithDetails {
     ];
   }
 
+  ngOnInit() {
+    this.columns = [
+      {
+        name: $localize`Name`,
+        prop: 'name',
+        flexGrow: 1,
+        cellTransformation: CellTemplate.routerLink
+      },
+      {
+        name: $localize`Enabled`,
+        prop: 'enabled',
+        flexGrow: 1,
+        cellClass: 'text-center',
+        cellTransformation: CellTemplate.checkIcon
+      },
+      {
+        name: $localize`Always-On`,
+        prop: 'always_on',
+        flexGrow: 1,
+        cellClass: 'text-center',
+        cellTransformation: CellTemplate.checkIcon
+      }
+    ];
+  }
+
   getModuleList(context: CdTableFetchDataContext) {
     this.mgrModuleService.list().subscribe(
       (resp: object[]) => {
-        this.modules = resp;
+        this.modules = resp.map((module: any) => ({
+          ...module,
+          cdLink: `${this.viewUrl}/${encodeURIComponent(module.name)}/overview`
+        }));
       },
       () => {
         context.error();
@@ -147,52 +149,13 @@ export class MgrModuleListComponent extends ListWithDetails {
   }
 
   /**
-   * Update the Ceph Mgr module state to enabled or disabled.
+   * Update the selected Ceph Mgr module state to enabled or disabled.
    */
   updateModuleState() {
     if (!this.selection.hasSelection) {
       return;
     }
-
-    let $obs;
-    const fnWaitUntilReconnected = () => {
-      observableTimer(2000).subscribe(() => {
-        // Trigger an API request to check if the connection is
-        // re-established.
-        this.mgrModuleService.list().subscribe(
-          () => {
-            // Resume showing the notification toasties.
-            this.notificationService.suspendToasties(false);
-            // Unblock the whole UI.
-            this.blockUI.stop();
-            // Reload the data table content.
-            this.table.refreshBtn();
-          },
-          () => {
-            fnWaitUntilReconnected();
-          }
-        );
-      });
-    };
-
-    // Note, the Ceph Mgr is always restarted when a module
-    // is enabled/disabled.
-    const module = this.selection.first();
-    if (module.enabled) {
-      $obs = this.mgrModuleService.disable(module.name);
-    } else {
-      $obs = this.mgrModuleService.enable(module.name);
-    }
-    $obs.subscribe(
-      () => undefined,
-      () => {
-        // Suspend showing the notification toasties.
-        this.notificationService.suspendToasties(true);
-        // Block the whole UI to prevent user interactions until
-        // the connection to the backend is reestablished
-        this.blockUI.start($localize`Reconnecting, please wait ...`);
-        fnWaitUntilReconnected();
-      }
-    );
+    const selected = this.selection.first();
+    this.mgrModuleService.updateModuleState(selected.name, selected.enabled, this.table);
   }
 }

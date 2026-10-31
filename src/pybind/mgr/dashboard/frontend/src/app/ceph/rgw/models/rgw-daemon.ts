@@ -5,6 +5,13 @@ export class RgwDaemon {
   server_hostname: string;
   realm_name: string;
   zonegroup_name: string;
+  zonegroup_id: string;
   zone_name: string;
   default: boolean;
+  port: number;
+  http_port?: number;
+}
+
+export interface RgwDaemonDetailsResponse {
+  rgw_metadata?: Record<string, string>;
 }

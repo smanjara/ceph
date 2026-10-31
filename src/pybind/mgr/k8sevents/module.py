@@ -33,6 +33,8 @@ import logging
 import tempfile
 import threading
 
+from .cli import K8SeventsCLICommand
+
 from urllib.parse import urlparse
 from datetime import tzinfo, datetime, timedelta
    
@@ -67,7 +69,11 @@ else:
     # which causes an exception in the generator. A workaround is discussed for a similar issue
     # in https://github.com/kubernetes-client/python/issues/376 which has been used here
     # pylint: disable=no-member
-    from kubernetes.client.models.v1_event import V1Event
+    try:
+        from kubernetes.client.models.core_v1_event import CoreV1Event as V1Event
+    except ImportError:
+        from kubernetes.client.models.v1_event import V1Event
+
     def local_involved_object(self, involved_object):
         if involved_object is None:
             involved_object = client.V1ObjectReference(api_version="1")
@@ -409,14 +415,14 @@ class KubernetesEvent(object):
 
         event_source = client.V1EventSource(component="ceph-mgr", 
                                             host=self.host)
-        return  client.V1Event(
-                    involved_object=obj_ref, 
-                    metadata=obj_meta, 
-                    message=self.message, 
-                    count=self.count, 
+        return V1Event(
+                    involved_object=obj_ref,
+                    metadata=obj_meta,
+                    message=self.message,
+                    count=self.count,
                     type=self.event_type,
                     reason=self.event_reason,
-                    source=event_source, 
+                    source=event_source,
                     first_timestamp=self.first_timestamp,
                     last_timestamp=self.last_timestamp
                 )
@@ -1008,6 +1014,7 @@ class CephConfigWatcher(BaseThread):
 
 
 class Module(MgrModule):
+    CLICommand = K8SeventsCLICommand
     COMMANDS = [
         {
             "cmd": "k8sevents status",

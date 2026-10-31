@@ -14,6 +14,7 @@ function(build_opentelemetry)
                                -DBUILD_TESTING=OFF
                                -DCMAKE_BUILD_TYPE=Release
                                -DWITH_EXAMPLES=OFF)
+  list(APPEND opentelemetry_CMAKE_ARGS ${CEPH_EXTERNAL_PROJECT_CMAKE_ARGS})
 
   set(opentelemetry_libs
       ${opentelemetry_BINARY_DIR}/sdk/src/trace/libopentelemetry_trace.a
@@ -21,7 +22,6 @@ function(build_opentelemetry)
       ${opentelemetry_BINARY_DIR}/sdk/src/common/libopentelemetry_common.a
       ${opentelemetry_BINARY_DIR}/exporters/jaeger/libopentelemetry_exporter_jaeger_trace.a
       ${opentelemetry_BINARY_DIR}/ext/src/http/client/curl/libopentelemetry_http_client_curl.a
-      ${CURL_LIBRARIES}
   )
   set(opentelemetry_include_dir ${opentelemetry_SOURCE_DIR}/api/include/
                                 ${opentelemetry_SOURCE_DIR}/exporters/jaeger/include/
@@ -47,6 +47,16 @@ function(build_opentelemetry)
     list(APPEND opentelemetry_CMAKE_ARGS -DBoost_INCLUDE_DIR=${CMAKE_BINARY_DIR}/boost/include)
   endif()
 
+  # Check if CMake version is >= 4.0.0
+  if(CMAKE_VERSION VERSION_GREATER_EQUAL "4.0.0")
+    # Use CMAKE_POLICY_VERSION_MINIMUM if set, otherwise default to 3.5
+    if(DEFINED CMAKE_POLICY_VERSION_MINIMUM)
+      list(APPEND opentelemetry_CMAKE_ARGS -DCMAKE_POLICY_VERSION_MINIMUM=${CMAKE_POLICY_VERSION_MINIMUM})
+    else()
+      list(APPEND opentelemetry_CMAKE_ARGS -DCMAKE_POLICY_VERSION_MINIMUM=3.5)
+    endif()
+  endif()
+
   include(ExternalProject)
   ExternalProject_Add(opentelemetry-cpp
     SOURCE_DIR ${opentelemetry_SOURCE_DIR}
@@ -57,6 +67,7 @@ function(build_opentelemetry)
     INSTALL_COMMAND ""
     BUILD_BYPRODUCTS ${opentelemetry_libs}
     DEPENDS ${dependencies}
+    LIST_SEPARATOR !
     LOG_BUILD ON)
 
   # CMake doesn't allow to add a list of libraries to the import property, hence
@@ -82,4 +93,5 @@ function(build_opentelemetry)
     PROPERTIES
       INTERFACE_LINK_LIBRARIES "${opentelemetry_deps}"
       INTERFACE_INCLUDE_DIRECTORIES "${opentelemetry_include_dir}")
+  include_directories(SYSTEM "${opentelemetry_include_dir}")
 endfunction()

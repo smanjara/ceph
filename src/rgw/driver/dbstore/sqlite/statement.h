@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -47,6 +47,10 @@ using stmt_execution = std::unique_ptr<sqlite3_stmt, stmt_execution_deleter>;
 // prepare the sql statement or throw on error
 stmt_ptr prepare_statement(const DoutPrefixProvider* dpp,
                            sqlite3* db, std::string_view sql);
+
+// bind a NULL input for the given parameter name
+void bind_null(const DoutPrefixProvider* dpp, const stmt_binding& stmt,
+               const char* name);
 
 // bind an input string for the given parameter name
 void bind_text(const DoutPrefixProvider* dpp, const stmt_binding& stmt,

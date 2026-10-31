@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "common/ceph_context.h"
 #include "perf_counters_collection.h"
@@ -20,10 +20,11 @@ PerfCountersCollectionImpl* PerfCountersCollection:: get_perf_collection()
 }
 
 void PerfCountersCollection::dump_formatted(ceph::Formatter *f, bool schema,
+                                            select_labeled_t dump_labeled,
                                             const std::string &logger,
                                             const std::string &counter)
 {
-  perf_collection->dump_formatted(f, schema, logger, counter);
+  perf_collection->dump_formatted(f, schema, dump_labeled, logger, counter);
 }
 
 PerfCountersCollection::ShardedPerfCountersCollection PerfCountersCollection::sharded_perf_coll;

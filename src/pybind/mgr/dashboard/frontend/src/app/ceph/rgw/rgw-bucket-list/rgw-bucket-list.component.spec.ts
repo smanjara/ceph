@@ -10,7 +10,7 @@ import { RgwBucketService } from '~/app/shared/api/rgw-bucket.service';
 import { TableActionsComponent } from '~/app/shared/datatable/table-actions/table-actions.component';
 import { SharedModule } from '~/app/shared/shared.module';
 import { configureTestBed, PermissionHelper } from '~/testing/unit-test-helper';
-import { RgwBucketDetailsComponent } from '../rgw-bucket-details/rgw-bucket-details.component';
+import { RgwBucketResourceSidebarComponent } from '../rgw-bucket-resource-sidebar/rgw-bucket-resource-sidebar.component';
 import { RgwBucketListComponent } from './rgw-bucket-list.component';
 
 describe('RgwBucketListComponent', () => {
@@ -20,7 +20,7 @@ describe('RgwBucketListComponent', () => {
   let rgwBucketServiceListSpy: jasmine.Spy;
 
   configureTestBed({
-    declarations: [RgwBucketListComponent, RgwBucketDetailsComponent],
+    declarations: [RgwBucketListComponent, RgwBucketResourceSidebarComponent],
     imports: [
       BrowserAnimationsModule,
       RouterTestingModule,
@@ -53,41 +53,81 @@ describe('RgwBucketListComponent', () => {
 
     expect(tableActions).toEqual({
       'create,update,delete': {
-        actions: ['Create', 'Edit', 'Delete'],
-        primary: { multiple: 'Delete', executing: 'Edit', single: 'Edit', no: 'Create' }
+        actions: ['Create', 'Edit', 'Tiering', 'Delete'],
+        primary: {
+          multiple: 'Create',
+          executing: 'Create',
+          single: 'Create',
+          no: 'Create'
+        }
       },
       'create,update': {
-        actions: ['Create', 'Edit'],
-        primary: { multiple: 'Create', executing: 'Edit', single: 'Edit', no: 'Create' }
+        actions: ['Create', 'Edit', 'Tiering'],
+        primary: {
+          multiple: 'Create',
+          executing: 'Create',
+          single: 'Create',
+          no: 'Create'
+        }
       },
       'create,delete': {
         actions: ['Create', 'Delete'],
-        primary: { multiple: 'Delete', executing: 'Create', single: 'Create', no: 'Create' }
+        primary: {
+          multiple: 'Create',
+          executing: 'Create',
+          single: 'Create',
+          no: 'Create'
+        }
       },
       create: {
         actions: ['Create'],
-        primary: { multiple: 'Create', executing: 'Create', single: 'Create', no: 'Create' }
+        primary: {
+          multiple: 'Create',
+          executing: 'Create',
+          single: 'Create',
+          no: 'Create'
+        }
       },
       'update,delete': {
-        actions: ['Edit', 'Delete'],
-        primary: { multiple: 'Delete', executing: 'Edit', single: 'Edit', no: 'Edit' }
+        actions: ['Edit', 'Tiering', 'Delete'],
+        primary: {
+          multiple: '',
+          executing: '',
+          single: '',
+          no: ''
+        }
       },
       update: {
-        actions: ['Edit'],
-        primary: { multiple: 'Edit', executing: 'Edit', single: 'Edit', no: 'Edit' }
+        actions: ['Edit', 'Tiering'],
+        primary: {
+          multiple: '',
+          executing: '',
+          single: '',
+          no: ''
+        }
       },
       delete: {
         actions: ['Delete'],
-        primary: { multiple: 'Delete', executing: 'Delete', single: 'Delete', no: 'Delete' }
+        primary: {
+          multiple: 'Delete',
+          executing: 'Delete',
+          single: 'Delete',
+          no: 'Delete'
+        }
       },
       'no-permissions': {
         actions: [],
-        primary: { multiple: '', executing: '', single: '', no: '' }
+        primary: {
+          multiple: '',
+          executing: '',
+          single: '',
+          no: ''
+        }
       }
     });
   });
 
-  it('should test if bucket data is tranformed correctly', () => {
+  it('should test if bucket data is transformed correctly', () => {
     rgwBucketServiceListSpy.and.returnValue(
       of([
         {

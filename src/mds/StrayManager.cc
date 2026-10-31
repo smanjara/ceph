@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -12,7 +13,13 @@
  * 
  */
 
+#include "StrayManager.h"
+#include "BatchOp.h"
+#include "MDSContext.h"
+#include "MDSRank.h"
+#include "Mutation.h"
 
+#include "common/debug.h"
 #include "common/perf_counters.h"
 
 #include "mds/MDSRank.h"
@@ -20,10 +27,11 @@
 #include "mds/MDLog.h"
 #include "mds/CDir.h"
 #include "mds/CDentry.h"
+#include "mds/PurgeQueue.h"
+#include "mds/ScrubStack.h"
+#include "mds/SnapRealm.h"
 #include "events/EUpdate.h"
 #include "messages/MClientRequest.h"
-
-#include "StrayManager.h"
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_mds
@@ -80,7 +88,7 @@ public:
   C_IO_PurgeStrayPurged(StrayManager *sm_, CDentry *d, bool oh) : 
     StrayManagerIOContext(sm_), dn(d), only_head(oh) { }
   void finish(int r) override {
-    ceph_assert(r == 0 || r == -CEPHFS_ENOENT);
+    ceph_assert(r == 0 || r == -ENOENT);
     sm->_purge_stray_purged(dn, only_head);
   }
   void print(ostream& out) const override {
@@ -201,7 +209,6 @@ void StrayManager::_purge_stray_purged(
     pf->version = dir->pre_dirty();
 
     EUpdate *le = new EUpdate(mds->mdlog, "purge_stray truncate");
-    mds->mdlog->start_entry(le);
 
     le->metablob.add_dir_context(dir);
     auto& dl = le->metablob.add_dir(dn->dir, true);
@@ -229,7 +236,6 @@ void StrayManager::_purge_stray_purged(
     dn->push_projected_linkage(); // NULL
 
     EUpdate *le = new EUpdate(mds->mdlog, "purge_stray");
-    mds->mdlog->start_entry(le);
 
     // update dirfrag fragstat, rstat
     CDir *dir = dn->get_dir();
@@ -299,6 +305,11 @@ void StrayManager::enqueue(CDentry *dn, bool trunc)
   ceph_assert(dnl);
   CInode *in = dnl->get_inode();
   ceph_assert(in);
+
+  //remove inode from scrub stack if it is being purged
+  if(mds->scrubstack->remove_inode_if_stacked(in)) {
+    dout(20) << "removed " << *in << " from the scrub stack" << dendl;
+  }
 
   /* We consider a stray to be purging as soon as it is enqueued, to avoid
    * enqueing it twice */
@@ -465,7 +476,7 @@ bool StrayManager::_eval_stray(CDentry *dn)
   }
 
   // purge?
-  if (in->get_inode()->nlink == 0) {
+  if (in->get_inode()->nlink <= 0) {
     // past snaprealm parents imply snapped dentry remote links.
     // only important for directories.  normal file data snaps are handled
     // by the object store.
@@ -480,7 +491,7 @@ bool StrayManager::_eval_stray(CDentry *dn)
 	if (in->state_test(CInode::STATE_MISSINGOBJS)) {
 	  mds->clog->error() << "previous attempt at committing dirfrag of ino "
 			     << in->ino() << " has failed, missing object";
-	  mds->handle_write_error(-CEPHFS_ENOENT);
+	  mds->handle_write_error(-ENOENT);
 	}
 	return false;  // not until some snaps are deleted.
       }
@@ -488,11 +499,17 @@ bool StrayManager::_eval_stray(CDentry *dn)
       mds->mdcache->clear_dirty_bits_for_stray(in);
 
       if (!in->remote_parents.empty()) {
-	// unlink any stale remote snap dentry.
+	// unlink any stale remote dentries (both snap and non-snap).
+	// When nlink <= 0, the inode has been fully deleted and all
+	// remote parents are stale.  Snap dentries are created during
+	// snapshot operations; non-snap dentries may remain from
+	// incomplete hardlink cleanup (e.g. after MDS failover).
 	for (auto it = in->remote_parents.begin(); it != in->remote_parents.end(); ) {
 	  CDentry *remote_dn = *it;
 	  ++it;
-	  ceph_assert(remote_dn->last != CEPH_NOSNAP);
+	  dout(10) << __func__ << ": unlinking stale remote "
+	           << (remote_dn->last != CEPH_NOSNAP ? "snap " : "")
+	           << "dentry " << *remote_dn << dendl;
 	  remote_dn->unlink_remote(remote_dn->get_linkage());
 	}
       }
@@ -619,8 +636,26 @@ void StrayManager::_eval_stray_remote(CDentry *stray_dn, CDentry *remote_dn)
   CDentry::linkage_t *stray_dnl = stray_dn->get_projected_linkage();
   ceph_assert(stray_dnl->is_primary());
   CInode *stray_in = stray_dnl->get_inode();
-  ceph_assert(stray_in->get_inode()->nlink >= 1);
   ceph_assert(stray_in->last == CEPH_NOSNAP);
+
+  if (stray_in->get_inode()->nlink <= 0) {
+    /*
+     * When nlink reaches 0, the inode has been fully deleted and is
+     * pending purge from the stray directory.  Any remote parents that
+     * still point here are stale dentries that haven't been cleaned
+     * up yet (e.g. after an MDS failover, stale remote dentries may
+     * still reside on disk and get loaded during dirfrag fetch).
+     *
+     * We must NOT attempt to reintegrate a stray with nlink <= 0,
+     * because reintegration assumes at least one valid hard link
+     * remains.  Instead, just return; the normal _eval_stray path
+     * will handle cleanup when it processes this inode via the
+     * nlink <= 0 purge path.
+     */
+    dout(10) << __func__ << ": stray inode " << *stray_in
+             << " nlink <= 0, skipping reintegration" << dendl;
+    return;
+  }
 
   /* If no remote_dn hinted, pick one arbitrarily */
   if (remote_dn == NULL) {
@@ -653,7 +688,7 @@ void StrayManager::_eval_stray_remote(CDentry *stray_dn, CDentry *remote_dn)
 	dout(20) << __func__ << ": not reintegrating (can't authpin remote parent)" << dendl;
       }
 
-    } else if (!remote_dn->is_auth() && stray_dn->is_auth()) {
+    } else if (stray_dn->is_auth()) {
       migrate_stray(stray_dn, remote_dn->authority().first);
     } else {
       dout(20) << __func__ << ": not reintegrating" << dendl;
@@ -669,23 +704,40 @@ void StrayManager::reintegrate_stray(CDentry *straydn, CDentry *rdn)
 {
   dout(10) << __func__ << " " << *straydn << " to " << *rdn << dendl;
 
+  if (straydn->reintegration_reqid) {
+    dout(20) << __func__ << ": stray dentry " << *straydn
+             << " is already under reintegrating" << dendl;
+    return;
+  }
+
   logger->inc(l_mdc_strays_reintegrated);
-  
+
   // rename it to remote linkage .
   filepath src(straydn->get_name(), straydn->get_dir()->ino());
   filepath dst(rdn->get_name(), rdn->get_dir()->ino());
 
+  ceph_tid_t tid = mds->issue_tid();
+
   auto req = make_message<MClientRequest>(CEPH_MDS_OP_RENAME);
   req->set_filepath(dst);
   req->set_filepath2(src);
-  req->set_tid(mds->issue_tid());
+  req->set_tid(tid);
+
+  auto ptr = std::make_unique<StrayEvalRequest>(CEPH_MDS_OP_RENAME, tid, straydn);
+  mds->internal_client_requests.emplace(tid, std::move(ptr));
 
   mds->send_message_mds(req, rdn->authority().first);
 }
- 
+
 void StrayManager::migrate_stray(CDentry *dn, mds_rank_t to)
 {
   dout(10) << __func__ << " " << *dn << " to mds." << to << dendl;
+
+  if (dn->reintegration_reqid) {
+    dout(20) << __func__ << ": stray dentry " << *dn
+             << " is already under migrating" << dendl;
+    return;
+  }
 
   logger->inc(l_mdc_strays_migrated);
 
@@ -696,10 +748,15 @@ void StrayManager::migrate_stray(CDentry *dn, mds_rank_t to)
   filepath src(dn->get_name(), dirino);
   filepath dst(dn->get_name(), MDS_INO_STRAY(to, MDS_INO_STRAY_INDEX(dirino)));
 
+  ceph_tid_t tid = mds->issue_tid();
+
   auto req = make_message<MClientRequest>(CEPH_MDS_OP_RENAME);
   req->set_filepath(dst);
   req->set_filepath2(src);
-  req->set_tid(mds->issue_tid());
+  req->set_tid(tid);
+
+  auto ptr = std::make_unique<StrayEvalRequest>(CEPH_MDS_OP_RENAME, tid, dn);
+  mds->internal_client_requests.emplace(tid, std::move(ptr));
 
   mds->send_message_mds(req, to);
 }

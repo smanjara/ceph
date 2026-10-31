@@ -1,10 +1,12 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "Request.h"
 #include "librbd/BlockGuard.h"
 #include "librbd/cache/pwl/LogEntry.h"
 #include "librbd/cache/pwl/AbstractWriteLog.h"
+#include "common/Clock.h" // for ceph_clock_now()
+#include "common/debug.h"
 
 #define dout_subsys ceph_subsys_rbd_pwl
 #undef dout_prefix
@@ -163,7 +165,7 @@ void C_WriteRequest<T>::finish_req(int r) {
     update_req_stats(now);
     return;
   }
-  pwl.release_write_lanes(this);
+  pwl.dispatch_deferred_writes();
   ceph_assert(m_resources.allocated);
   m_resources.allocated = false;
   this->release_cell(); /* TODO: Consider doing this in appending state */
@@ -212,7 +214,6 @@ void C_WriteRequest<T>::setup_log_operations(DeferredContexts &on_exit) {
                                  << "], op_set=" << op_set.get() << dendl;
     ceph_assert(m_resources.allocated);
     /* op_set->operations initialized differently for plain write or write same */
-    auto allocation = m_resources.buffers.begin();
     uint64_t buffer_offset = 0;
     for (auto &extent : this->image_extents) {
       /* operation->on_write_persist connected to m_prior_log_entries_persisted Gather */
@@ -227,11 +228,10 @@ void C_WriteRequest<T>::setup_log_operations(DeferredContexts &on_exit) {
       if (!op_set->persist_on_flush) {
         pwl.inc_last_op_sequence_num();
       }
-      operation->init(true, allocation, current_sync_gen,
+      operation->init(true, current_sync_gen,
                       pwl.get_last_op_sequence_num(), this->bl, buffer_offset, op_set->persist_on_flush);
       buffer_offset += operation->log_entry->write_bytes();
       ldout(pwl.get_context(), 20) << "operation=[" << *operation << "]" << dendl;
-      allocation++;
     }
   }
     /* All extent ops subs created */
@@ -239,11 +239,6 @@ void C_WriteRequest<T>::setup_log_operations(DeferredContexts &on_exit) {
   op_set->extent_ops_persist->activate();
 
   pwl.add_into_log_map(log_entries, this);
-}
-
-template <typename T>
-void C_WriteRequest<T>::copy_cache() {
-  pwl.copy_bl_to_buffer(&m_resources, op_set);
 }
 
 template <typename T>
@@ -269,10 +264,8 @@ void C_WriteRequest<T>::schedule_append() {
 /**
  * Attempts to allocate log resources for a write. Returns true if successful.
  *
- * Resources include 1 lane per extent, 1 log entry per extent, and the payload
- * data space for each extent.
- *
- * Lanes are released after the write persists via release_write_lanes()
+ * Resources include 1 log entry per extent, and the payload data space for
+ * each extent.
  */
 template <typename T>
 bool C_WriteRequest<T>::alloc_resources() {
@@ -315,7 +308,7 @@ void C_WriteRequest<T>::dispatch()
   } else {
     /* The prior sync point is done, so we'll schedule append here. If this is
      * persist-on-write, and probably still the caller's thread, we'll use this
-     * caller's thread to perform the persist & replication of the payload
+     * caller's thread to perform the persist of the payload
      * buffer. */
     m_do_early_flush =
       !(this->detained || this->m_queued || this->m_deferred || op_set->persist_on_flush);
@@ -377,8 +370,7 @@ void C_FlushRequest<T>::dispatch() {
 template <typename T>
 void C_FlushRequest<T>::setup_buffer_resources(
     uint64_t *bytes_cached, uint64_t *bytes_dirtied, uint64_t *bytes_allocated,
-    uint64_t *number_lanes, uint64_t *number_log_entries,
-    uint64_t *number_unpublished_reserves) {
+    uint64_t *number_log_entries) {
   *number_log_entries = 1;
 }
 
@@ -404,6 +396,14 @@ C_DiscardRequest<T>::C_DiscardRequest(T &pwl, const utime_t arrived, io::Extents
 template <typename T>
 C_DiscardRequest<T>::~C_DiscardRequest() {
   ldout(pwl.get_context(), 20) << this << dendl;
+}
+
+template <typename T>
+void C_DiscardRequest<T>::finish_req(int r) {
+  ldout(pwl.get_context(), 20) << "discard_req=" << this
+                               << " cell=" << this->get_cell() << dendl;
+  ceph_assert(this->get_cell());
+  this->release_cell();
 }
 
 template <typename T>
@@ -434,12 +434,8 @@ void C_DiscardRequest<T>::setup_log_operations() {
   Context *on_write_append = pwl.get_current_sync_point()->prior_persisted_gather_new_sub();
 
   Context *on_write_persist = new LambdaContext(
-    [this, discard_req](int r) {
-      ldout(pwl.get_context(), 20) << "discard_req=" << discard_req
-                                   << " cell=" << discard_req->get_cell() << dendl;
-      ceph_assert(discard_req->get_cell());
-      discard_req->complete_user_request(r);
-      discard_req->release_cell();
+    [discard_req](int r) {
+      discard_req->complete(r);
     });
   op->init_op(current_sync_gen, persist_on_flush, pwl.get_last_op_sequence_num(),
               on_write_persist, on_write_append);
@@ -461,8 +457,7 @@ void C_DiscardRequest<T>::dispatch() {
 template <typename T>
 void C_DiscardRequest<T>::setup_buffer_resources(
     uint64_t *bytes_cached, uint64_t *bytes_dirtied, uint64_t *bytes_allocated,
-    uint64_t *number_lanes, uint64_t *number_log_entries,
-    uint64_t *number_unpublished_reserves) {
+    uint64_t *number_log_entries) {
   *number_log_entries = 1;
   /* No bytes are allocated for a discard, but we count the discarded bytes
    * as dirty.  This means it's possible to have more bytes dirty than

@@ -8,7 +8,6 @@ import {
 } from '@angular/core';
 
 import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap';
-import { TableColumnProp } from '@swimlane/ngx-datatable';
 import _ from 'lodash';
 
 import { InventoryDevice } from '~/app/ceph/cluster/inventory/inventory-devices/inventory-device.model';
@@ -23,7 +22,8 @@ import { WizardStepsService } from '~/app/shared/services/wizard-steps.service';
 @Component({
   selector: 'cd-osd-devices-selection-modal',
   templateUrl: './osd-devices-selection-modal.component.html',
-  styleUrls: ['./osd-devices-selection-modal.component.scss']
+  styleUrls: ['./osd-devices-selection-modal.component.scss'],
+  standalone: false
 })
 export class OsdDevicesSelectionModalComponent implements AfterViewInit {
   @ViewChild('inventoryDevices')
@@ -33,7 +33,7 @@ export class OsdDevicesSelectionModalComponent implements AfterViewInit {
   submitAction = new EventEmitter<CdTableColumnFiltersChange>();
 
   icons = Icons;
-  filterColumns: TableColumnProp[] = [];
+  filterColumns: (string | number)[] = [];
 
   hostname: string;
   deviceType: string;

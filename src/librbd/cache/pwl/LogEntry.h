@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_CACHE_PWL_LOG_ENTRY_H
 #define CEPH_LIBRBD_CACHE_PWL_LOG_ENTRY_H
@@ -162,7 +162,7 @@ protected:
   buffer::ptr cache_bp;
   buffer::list cache_bl;
   std::atomic<int> bl_refs = {0}; /* The refs held on cache_bp by cache_bl */
-  /* Used in WriteLogEntry::get_cache_bl() to syncronize between threads making entries readable */
+  /* Used in WriteLogEntry::get_cache_bl() to synchronize between threads making entries readable */
   mutable ceph::mutex m_entry_bl_lock;
 
   virtual void init_cache_bp() {}
@@ -212,7 +212,6 @@ public:
   };
   void init(bool has_data,
             uint64_t current_sync_gen, uint64_t last_op_sequence_num, bool persist_on_flush);
-  virtual void init_cache_buffer(std::vector<WriteBufferAllocation>::iterator allocation) {}
   virtual void init_cache_bl(bufferlist &src_bl, uint64_t off, uint64_t len) {}
   /* Returns a ref to a bl containing bufferptrs to the entry cache buffer */
   virtual buffer::list &get_cache_bl() = 0;

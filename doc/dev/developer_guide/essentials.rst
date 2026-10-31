@@ -8,28 +8,15 @@ Leads
 -----
 
 The Ceph project was created by Sage Weil and is led by the Ceph Leadership
-Team (CLT). In addition, each major project component has its own lead. The
-following table shows all the leads and their nicks on `GitHub`_:
+Team (CLT). Each major component of the Ceph project has its own lead. The
+`team list`_ on the Ceph community website shows all the leads and their nicks
+on `GitHub`_:
 
 .. _github: https://github.com/
+.. _team list: https://ceph.io/en/community/team
 
-========= ================ =============
-Scope     Lead             GitHub nick
-========= ================ =============
-Ceph      Sage Weil        liewegas
-RADOS     Neha Ojha        neha-ojha
-RGW       Yehuda Sadeh     yehudasa
-RGW       Matt Benjamin    mattbenjamin
-RBD       Ilya Dryomov     dis 
-CephFS    Venky Shankar    vshankar
-Dashboard Ernesto Puerta   epuertat
-MON       Joao Luis        jecluis
-Build/Ops Ken Dreyer       ktdreyer
-Docs      Zac Dover        zdover23
-========= ================ =============
-
-The Ceph-specific acronyms in the table are explained in
-:doc:`/architecture`.
+Ceph-specific acronyms in the table of leads are explained in
+:doc:`/architecture/index`.
 
 History
 -------
@@ -48,7 +35,7 @@ terms of the LGPL2.1 or LGPL3.0. For full details, see the file
 `COPYING`_ in the top-level directory of the source-code tree.
 
 .. _`COPYING`:
-  https://github.com/ceph/ceph/blob/master/COPYING
+  https://github.com/ceph/ceph/blob/main/COPYING
 
 Source code repositories
 ------------------------
@@ -76,7 +63,7 @@ which is powered by `Redmine`_.
 
 The tracker has a Ceph project with a number of subprojects loosely
 corresponding to the various architectural components (see
-:doc:`/architecture`).
+:doc:`/architecture/index`).
 
 Mere `registration`_ in the tracker automatically grants permissions
 sufficient to open new issues and comment on existing ones.
@@ -89,10 +76,23 @@ click on `New issue`_.
 .. _`jump to the Ceph project`: http://tracker.ceph.com/projects/ceph
 .. _`New issue`: http://tracker.ceph.com/projects/ceph/issues/new
 
+.. _ceph-slack:
+
+Slack
+-----
+
+Ceph developers and users chat on `Ceph's Slack`_.
+
+.. _`Ceph's Slack`: https://join.slack.com/t/ceph-storage/shared_invite/zt-32hkefbs5-f6qZDZLd5U8CYj7drBTHFw
+
 .. _mailing-list:
 
 Mailing lists
 -------------
+
+Ceph developers and users discuss the project on `Ceph-related mailing lists`_.
+
+.. _`Ceph-related mailing lists`: https://ceph.io/en/community/connect/
 
 Ceph Development Mailing List
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -101,11 +101,9 @@ its interoperability with other technology, and the operations of the
 project itself.
 
 The email discussion list for Ceph development is open to all. Subscribe by
-sending a message to ``dev-request@ceph.io`` with the following line in the
-body of the message::
+completing the `sign-up form on dev.ceph.io`_.
 
-    subscribe ceph-devel
-
+.. _`sign-up form on dev.ceph.io`: https://lists.ceph.io/postorius/lists/dev.ceph.io
 
 Ceph Client Patch Review Mailing List
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -114,19 +112,10 @@ for the Linux kernel Ceph client component. Note that this list used to
 be an all-encompassing list for developers. When searching the archives, 
 remember that this list contains the generic devel-ceph archives before mid-2018.
 
-Subscribe to the list covering the Linux kernel Ceph client component by sending
-a message to ``majordomo@vger.kernel.org`` with the following line in the body
-of the message::
+Subscribe to the list covering the Linux kernel Ceph client component by using
+the `sub link for ceph-devel in vger.kernel.org`_.
 
-    subscribe ceph-devel
-
-
-Other Ceph Mailing Lists
-~~~~~~~~~~~~~~~~~~~~~~~~
-
-There are also `other Ceph-related mailing lists`_.
-
-.. _`other Ceph-related mailing lists`: https://ceph.com/irc/
+.. _`sub link for ceph-devel in vger.kernel.org`: https://subspace.kernel.org/vger.kernel.org.html
 
 .. _irc:
 
@@ -293,16 +282,13 @@ See :ref:`kubernetes-dev`
 Backporting
 -----------
 
-All bugfixes should be merged to the ``main`` branch before being
-backported. To flag a bugfix for backporting, make sure it has a
-`tracker issue`_ associated with it and set the ``Backport`` field to a
-comma-separated list of previous releases (e.g. "hammer,jewel") that you think
-need the backport.
-The rest (including the actual backporting) will be taken care of by the
-`Stable Releases and Backports`_ team.
+All bugfixes should be merged to the ``main`` branch before being backported.
+To flag a bugfix for backporting, make sure it has a `tracker issue`_
+associated with it and set the ``Backport`` field to a comma-separated list of
+previous releases (e.g. "hammer,jewel") that you think need the backport. You
+are responsible for the backporting of pull requests that you raise.
 
 .. _`tracker issue`: http://tracker.ceph.com/
-.. _`Stable Releases and Backports`: http://tracker.ceph.com/projects/ceph-releases/wiki
 
 Dependabot
 ----------

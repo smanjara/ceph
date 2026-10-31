@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "ObjectCopyRequest.h"
 #include "include/neorados/RADOS.hpp"
@@ -17,6 +17,8 @@
 #include "librbd/io/ReadResult.h"
 #include "librbd/io/Utils.h"
 #include "osdc/Striper.h"
+
+#include <shared_mutex> // for std::shared_lock
 
 #define dout_subsys ceph_subsys_rbd
 #undef dout_prefix
@@ -58,10 +60,12 @@ ObjectCopyRequest<I>::ObjectCopyRequest(I *src_image_ctx,
 
   m_dst_oid = m_dst_image_ctx->get_object_name(dst_object_number);
 
-  ldout(m_cct, 20) << "dst_oid=" << m_dst_oid << ", "
-                   << "src_snap_id_start=" << m_src_snap_id_start << ", "
-                   << "dst_snap_id_start=" << m_dst_snap_id_start << ", "
-                   << "snap_map=" << m_snap_map << dendl;
+  ldout(m_cct, 20) << "src_image_id=" << m_src_image_ctx->id
+		   << ", dst_image_id=" << m_dst_image_ctx->id
+	           << ", dst_oid=" << m_dst_oid
+		   << ", src_snap_id_start=" << m_src_snap_id_start
+		   << ", dst_snap_id_start=" << m_dst_snap_id_start
+                   << ", snap_map=" << m_snap_map << dendl;
 }
 
 template <typename I>
@@ -148,7 +152,7 @@ void ObjectCopyRequest<I>::send_read() {
   }
 
   auto io_context = m_src_image_ctx->duplicate_data_io_context();
-  io_context->read_snap(index.second);
+  io_context->set_read_snap(index.second);
 
   io::Extents image_extents{read_op.image_interval.begin(),
                             read_op.image_interval.end()};
@@ -574,7 +578,7 @@ void ObjectCopyRequest<I>::merge_write_ops() {
   for (auto& [write_read_snap_ids, read_op] : m_read_ops) {
     auto src_snap_seq = write_read_snap_ids.first;
 
-    // convert the the resulting sparse image extent map to an interval ...
+    // convert the resulting sparse image extent map to an interval ...
     auto& image_data_interval = m_dst_data_interval[src_snap_seq];
     for (auto [image_offset, image_length] : read_op.image_extent_map) {
       image_data_interval.union_insert(image_offset, image_length);

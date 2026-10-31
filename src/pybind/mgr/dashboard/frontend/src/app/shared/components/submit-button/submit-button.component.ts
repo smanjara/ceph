@@ -1,5 +1,5 @@
 import { Component, ElementRef, EventEmitter, Input, OnInit, Output } from '@angular/core';
-import { AbstractControl, FormGroup, FormGroupDirective, NgForm } from '@angular/forms';
+import { AbstractControl, UntypedFormGroup, FormGroupDirective, NgForm } from '@angular/forms';
 
 import _ from 'lodash';
 
@@ -26,11 +26,12 @@ import { Icons } from '~/app/shared/enum/icons.enum';
 @Component({
   selector: 'cd-submit-button',
   templateUrl: './submit-button.component.html',
-  styleUrls: ['./submit-button.component.scss']
+  styleUrls: ['./submit-button.component.scss'],
+  standalone: false
 })
 export class SubmitButtonComponent implements OnInit {
   @Input()
-  form: FormGroup | NgForm;
+  form: UntypedFormGroup | NgForm;
 
   @Input()
   type = 'submit';
@@ -44,6 +45,12 @@ export class SubmitButtonComponent implements OnInit {
 
   @Input()
   ariaLabel: string;
+
+  @Input()
+  buttonType: 'primary' | 'danger' = 'primary';
+
+  @Input()
+  modalForm = false;
 
   @Output()
   submitAction = new EventEmitter();
@@ -74,7 +81,7 @@ export class SubmitButtonComponent implements OnInit {
       (<FormGroupDirective>this.form).onSubmit($event);
     }
 
-    if (this.form.invalid) {
+    if (this.form?.invalid) {
       this.focusInvalid();
       return;
     }

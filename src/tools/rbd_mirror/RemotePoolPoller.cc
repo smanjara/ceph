@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "RemotePoolPoller.h"
 #include "include/ceph_assert.h"
@@ -138,14 +138,14 @@ void RemotePoolPoller<I>::handle_mirror_peer_ping(int r) {
   dout(10) << "r=" << r << dendl;
 
   if (r == -EOPNOTSUPP) {
-    // older OSD that doesn't support snaphot-based mirroring, so no need
+    // older OSD that doesn't support snapshot-based mirroring, so no need
     // to query remote peers
     dout(10) << "remote peer does not support snapshot-based mirroring"
              << dendl;
     notify_listener();
     return;
   } else if (r < 0) {
-    // we can still see if we can perform a peer list and find outselves
+    // we can still see if we can perform a peer list and find ourselves
     derr << "failed to ping remote mirror peer: " << cpp_strerror(r) << dendl;
   }
 

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_OS_BLUESTORE_STUPIDALLOCATOR_H
 #define CEPH_OS_BLUESTORE_STUPIDALLOCATOR_H
@@ -7,13 +7,14 @@
 #include <mutex>
 
 #include "Allocator.h"
+#include "AllocatorBase.h"
 #include "include/btree_map.h"
 #include "include/interval_set.h"
 #include "os/bluestore/bluestore_types.h"
 #include "include/mempool.h"
 #include "common/ceph_mutex.h"
 
-class StupidAllocator : public Allocator {
+class StupidAllocator : public AllocatorBase, public AllocatorPerf {
   CephContext* cct;
   ceph::mutex lock = ceph::make_mutex("StupidAllocator::lock");
 
@@ -30,10 +31,6 @@ class StupidAllocator : public Allocator {
 
   unsigned _choose_bin(uint64_t len);
   void _insert_free(uint64_t offset, uint64_t len);
-
-  uint64_t _aligned_len(
-    interval_set_t::iterator p,
-    uint64_t alloc_unit);
 
 public:
   StupidAllocator(CephContext* cct,
@@ -62,6 +59,11 @@ public:
 
   void dump() override;
   void foreach(std::function<void(uint64_t offset, uint64_t length)> notify) override;
+  uint64_t get_free_extents(
+    uint64_t range_begin,
+    uint64_t range_end,
+    size_t max_count,
+    free_extent_vector_t* out) override;
 
   void init_add_free(uint64_t offset, uint64_t length) override;
   void init_rm_free(uint64_t offset, uint64_t length) override;

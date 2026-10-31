@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS PeriodConfigs (
 CREATE TABLE IF NOT EXISTS ZoneGroups (
   ID TEXT PRIMARY KEY NOT NULL,
   Name TEXT UNIQUE NOT NULL,
-  RealmID TEXT NOT NULL REFERENCES Realms (ID),
+  RealmID TEXT REFERENCES Realms (ID),
   Data TEXT NOT NULL,
   VersionNumber INTEGER,
   VersionTag TEXT
@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS ZoneGroups (
 CREATE TABLE IF NOT EXISTS Zones (
   ID TEXT PRIMARY KEY NOT NULL,
   Name TEXT UNIQUE NOT NULL,
-  RealmID TEXT NOT NULL REFERENCES Realms (ID),
+  RealmID TEXT REFERENCES Realms (ID),
   Data TEXT NOT NULL,
   VersionNumber INTEGER,
   VersionTag TEXT

@@ -1,12 +1,11 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
-#ifndef RGW_REQUEST_H
-#define RGW_REQUEST_H
+#pragma once
 
 #include "rgw_common.h"
 #include "rgw_acl.h"
-#include "rgw_user.h"
+#include "driver/rados/rgw_user.h"
 #include "rgw_op.h"
 
 #include "common/QueueRing.h"
@@ -39,5 +38,3 @@ RGWLoadGenRequest(uint64_t req_id, const std::string& _m, const std::string& _r,
 	: RGWRequest(req_id), method(_m), resource(_r), content_length(_cl),
 		fail_flag(ff) {}
 };
-
-#endif /* RGW_REQUEST_H */

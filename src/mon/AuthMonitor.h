@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -18,6 +19,7 @@
 #include <map>
 #include <set>
 
+#include "auth/cephx/CephxKeyServer.h"
 #include "global/global_init.h"
 #include "include/ceph_features.h"
 #include "include/types.h"
@@ -31,7 +33,12 @@ class Monitor;
 #define MIN_GLOBAL_ID 0x1000
 
 class AuthMonitor : public PaxosService {
+
 public:
+  typedef enum {
+    CAPS_UPDATE_NOT_REQD, CAPS_UPDATE_REQD, CAPS_PARSING_ERR
+  } caps_update;
+
   enum IncType {
     GLOBAL_ID,
     AUTH_DATA,
@@ -77,15 +84,17 @@ public:
       f->dump_int("auth_type", auth_type);
       f->dump_int("auth_data_len", auth_data.length());
     }
-    static void generate_test_instances(std::list<Incremental*>& ls) {
-      ls.push_back(new Incremental);
-      ls.push_back(new Incremental);
-      ls.back()->inc_type = GLOBAL_ID;
-      ls.back()->max_global_id = 1234;
-      ls.push_back(new Incremental);
-      ls.back()->inc_type = AUTH_DATA;
-      ls.back()->auth_type = 12;
-      ls.back()->auth_data.append("foo");
+    static std::list<Incremental> generate_test_instances() {
+      std::list<Incremental> ls;
+      ls.emplace_back();
+      ls.emplace_back();
+      ls.back().inc_type = GLOBAL_ID;
+      ls.back().max_global_id = 1234;
+      ls.emplace_back();
+      ls.back().inc_type = AUTH_DATA;
+      ls.back().auth_type = 12;
+      ls.back().auth_data.append("foo");
+      return ls;
     }
   };
 
@@ -97,8 +106,9 @@ public:
 
 private:
   std::vector<Incremental> pending_auth;
-  uint64_t max_global_id;
-  uint64_t last_allocated_id;
+  uint64_t max_global_id = 0;
+  uint64_t last_allocated_id = 0;
+  boost::intrusive_ptr<CephContext> cct;
 
   // these are protected by mon->auth_lock
   int mon_num = 0, mon_rank = 0;
@@ -119,8 +129,12 @@ private:
     pending_auth.push_back(inc);
   }
 
-  /* validate mon/osd/mds caps; fail on unrecognized service/type */
-  bool valid_caps(const std::string& type, const std::string& caps, std::ostream *out);
+  template<typename CAP_ENTITY_CLASS>
+  bool _was_parsing_fine(const std::string& entity, const std::string& caps,
+    std::ostream* out);
+  /* validate mon/osd/mgr/mds caps; fail on unrecognized service/type */
+  bool valid_caps(const std::string& entity, const std::string& caps,
+		  std::ostream *out);
   bool valid_caps(const std::string& type, const ceph::buffer::list& bl, std::ostream *out) {
     auto p = bl.begin();
     std::string v;
@@ -133,7 +147,8 @@ private:
     }
     return valid_caps(type, v, out);
   }
-  bool valid_caps(const std::vector<std::string>& caps, std::ostream *out);
+  bool valid_caps(const std::map<std::string, std::string>& caps,
+		  std::ostream *out);
 
   void on_active() override;
   bool should_propose(double& delay) override;
@@ -153,6 +168,8 @@ public:
 private:
   bool prepare_used_pending_keys(MonOpRequestRef op);
 
+  bool check_health();
+
   // propose pending update to peers
   void encode_pending(MonitorDBStore::TransactionRef t) override;
   void encode_full(MonitorDBStore::TransactionRef t) override;
@@ -164,7 +181,42 @@ private:
   bool prep_auth(MonOpRequestRef op, bool paxos_writable);
 
   bool preprocess_command(MonOpRequestRef op);
+
+  int get_cipher_type(const cmdmap_t& cmdmap, std::ostream& ss) const;
   bool prepare_command(MonOpRequestRef op);
+
+  void _encode_keyring(KeyRing& kr, const EntityName& entity,
+    bufferlist& rdata, Formatter* fmtr,
+    std::map<std::string, bufferlist>* wanted_caps=nullptr);
+  void _encode_auth(const EntityName& entity, const EntityAuth& eauth,
+    bufferlist& rdata, Formatter* fmtr, bool pending_key=false,
+    std::map<std::string, bufferlist>* caps=nullptr);
+  void _encode_key(const EntityName& entity, const EntityAuth& eauth,
+    bufferlist& rdata, Formatter* fmtr, bool pending_key=false,
+    std::map<std::string, bufferlist>* caps=nullptr);
+
+  int _check_and_encode_caps(const std::map<std::string, std::string>& caps,
+    std::map<std::string, bufferlist>& encoded_caps, std::stringstream& ss);
+
+  int _update_or_create_entity(const EntityName& entity, int key_type,
+    const std::map<std::string, std::string>& caps, MonOpRequestRef op,
+    std::stringstream& ss, std::stringstream& ds, bufferlist* rdata=nullptr,
+    Formatter* fmtr=nullptr, bool create_entity=false);
+  int _create_entity(const EntityName& entity, int key_type,
+    const std::map<std::string, std::string>& caps, MonOpRequestRef op,
+    std::stringstream& ss, std::stringstream& ds, bufferlist* rdata,
+    Formatter* fmtr);
+  int _update_caps(const EntityName& entity, int key_type,
+    const std::map<std::string, std::string>& caps, MonOpRequestRef op,
+    std::stringstream& ss, std::stringstream& ds, bufferlist* rdata,
+    Formatter* fmtr);
+
+  caps_update _gen_wanted_caps(EntityAuth& e_auth,
+    std::map<std::string, std::string>& newcaps, std::ostream& out);
+  template<typename CAP_ENTITY_CLASS>
+  caps_update _merge_caps(const std::string& cap_entity,
+    const std::string& new_cap_str, const std::string& cur_cap_str,
+    std::map<std::string, std::string>& newcaps, std::ostream& out);
 
   bool check_rotate();
   void process_used_pending_keys(const std::map<EntityName,CryptoKey>& keys);
@@ -186,10 +238,8 @@ private:
       const EntityAuth& auth);
 
  public:
-  AuthMonitor(Monitor &mn, Paxos &p, const std::string& service_name)
-    : PaxosService(mn, p, service_name),
-      max_global_id(0),
-      last_allocated_id(0)
+  AuthMonitor(CephContext* cct, Monitor &mn, Paxos &p, const std::string& service_name)
+    : PaxosService(mn, p, service_name), cct(cct)
   {}
 
   void pre_auth(MAuth *m);
@@ -202,9 +252,9 @@ private:
       EntityName& cephx_entity,
       EntityName& lockbox_entity,
       std::stringstream& ss);
-  int do_osd_destroy(
-      const EntityName& cephx_entity,
-      const EntityName& lockbox_entity);
+  void do_osd_destroy(
+       const EntityName& cephx_entity,
+       const EntityName& lockbox_entity);
 
   int do_osd_new(
       const auth_entity_t& cephx_entity,

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -17,8 +17,9 @@
 // like a full memory barrier stalling execution till CPU's store and
 // load buffers are drained.
 
-#if defined(WITH_SEASTAR) && !defined(WITH_BLUESTORE)
+#if defined(WITH_CRIMSON) && !defined(WITH_BLUESTORE)
 
+#include <concepts>
 #include <type_traits>
 
 namespace ceph {
@@ -51,29 +52,23 @@ namespace ceph {
     // We need to differentiate with SFINAE as std::atomic offers beefier
     // interface for integral types.
 
-    template<class TT=T>
-    std::enable_if_t<!std::is_enum_v<TT> && std::is_integral_v<TT>, TT>  operator++() {
+    T operator++() requires std::integral<T> {
       return ++value;
     }
-    template<class TT=T>
-    std::enable_if_t<!std::is_enum_v<TT> && std::is_integral_v<TT>, TT> operator++(int) {
+    T operator++(int) requires std::integral<T> {
       return value++;
     }
-    template<class TT=T>
-    std::enable_if_t<!std::is_enum_v<TT> && std::is_integral_v<TT>, TT> operator--() {
+    T operator--() requires std::integral<T> {
       return --value;
     }
-    template<class TT=T>
-    std::enable_if_t<!std::is_enum_v<TT> && std::is_integral_v<TT>, TT> operator--(int) {
+    T operator--(int) requires std::integral<T> {
       return value--;
     }
-    template<class TT=T>
-    std::enable_if_t<!std::is_enum_v<TT> && std::is_integral_v<TT>, TT> operator+=(const dummy_atomic& b) {
+    T operator+=(const dummy_atomic& b) requires std::integral<T> {
       value += b;
       return value;
     }
-    template<class TT=T>
-    std::enable_if_t<!std::is_enum_v<TT> && std::is_integral_v<TT>, TT> operator-=(const dummy_atomic& b) {
+    T operator-=(const dummy_atomic& b) requires std::integral<T> {
       value -= b;
       return value;
     }
@@ -84,10 +79,10 @@ namespace ceph {
   template <class T> using atomic = dummy_atomic<T>;
 } // namespace ceph
 
-#else  // WITH_SEASTAR
+#else  // WITH_CRIMSON
 
 namespace ceph {
   template <class T> using atomic = ::std::atomic<T>;
 } // namespace ceph
 
-#endif	// WITH_SEASTAR
+#endif	// WITH_CRIMSON

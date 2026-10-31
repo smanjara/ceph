@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -14,11 +15,16 @@
 #include <Python.h>
 #include <boost/algorithm/string/replace.hpp>
 
+#include "common/debug.h"
 #include "common/errno.h"
 #include "common/signal.h"
+#include "common/cmdparse.h"
 #include "include/compat.h"
+#include "include/str_list.h"
+#include "perfglue/heap_profiler.h"
 
 #include "include/stringify.h"
+#include "include/util.h" // for collect_sys_info()
 #include "global/global_context.h"
 #include "global/signal_handler.h"
 
@@ -40,6 +46,29 @@
 using std::map;
 using std::string;
 using std::vector;
+using namespace std::literals;
+using ceph::common::cmd_getval;
+
+class MgrHook : public AdminSocketHook {
+  MgrStandby* mgr;
+public:
+  explicit MgrHook(MgrStandby *m) : mgr(m) {}
+  int call(std::string_view admin_command,
+           const cmdmap_t& cmdmap,
+           const bufferlist& inbl,
+           Formatter *f,
+           std::ostream& errss,
+           bufferlist& outbl) override {
+    int r = 0;
+    try {
+      r = mgr->asok_command(admin_command, cmdmap, f, errss, outbl);
+    } catch (const TOPNSPC::common::bad_cmd_get& e) {
+      errss << e.what();
+      r = -EINVAL;
+    }
+    return r;
+  }
+};
 
 MgrStandby::MgrStandby(int argc, const char **argv) :
   Dispatcher(g_ceph_context),
@@ -50,9 +79,8 @@ MgrStandby::MgrStandby(int argc, const char **argv) :
 			cct->_conf.get_val<std::string>("ms_type") : cct->_conf.get_val<std::string>("ms_public_type"),
 		     entity_name_t::MGR(),
 		     "mgr",
-		     Messenger::get_pid_nonce())),
+		     Messenger::get_random_nonce())),
   objecter{g_ceph_context, client_messenger.get(), &monc, poolctx},
-  client{client_messenger.get(), &monc, &objecter},
   mgrc(g_ceph_context, client_messenger.get(), &monc.monmap),
   log_client(g_ceph_context, client_messenger.get(), &monc.monmap, LogClient::NO_FLAGS),
   clog(log_client.create_channel(CLOG_CHANNEL_CLUSTER)),
@@ -67,25 +95,32 @@ MgrStandby::MgrStandby(int argc, const char **argv) :
 {
 }
 
-MgrStandby::~MgrStandby() = default;
+MgrStandby::~MgrStandby() {
+  if (active_mgr) {
+    active_mgr->shutdown();
+    active_mgr.reset();
+  }
+  if (asok_hook) {
+    g_ceph_context->get_admin_socket()->unregister_commands(asok_hook.get());
+    asok_hook.reset();
+  }
+}
 
-const char** MgrStandby::get_tracked_conf_keys() const
+std::vector<std::string> MgrStandby::get_tracked_keys() const noexcept
 {
-  static const char* KEYS[] = {
+  return {
     // clog & admin clog
-    "clog_to_monitors",
-    "clog_to_syslog",
-    "clog_to_syslog_facility",
-    "clog_to_syslog_level",
-    "clog_to_graylog",
-    "clog_to_graylog_host",
-    "clog_to_graylog_port",
-    "mgr_standby_modules",
-    "host",
-    "fsid",
-    NULL
+    "clog_to_monitors"s,
+    "clog_to_syslog"s,
+    "clog_to_syslog_facility"s,
+    "clog_to_syslog_level"s,
+    "clog_to_graylog"s,
+    "clog_to_graylog_host"s,
+    "clog_to_graylog_port"s,
+    "mgr_standby_modules"s,
+    "host"s,
+    "fsid"s
   };
-  return KEYS;
 }
 
 void MgrStandby::handle_conf_change(
@@ -116,11 +151,49 @@ void MgrStandby::handle_conf_change(
   }
 }
 
+int MgrStandby::asok_command(std::string_view cmd, const cmdmap_t& cmdmap,
+			     Formatter* f, std::ostream& errss,
+			     ceph::buffer::list& outbl)
+{
+  dout(10) << __func__ << ": " << cmd << dendl;
+  if (cmd == "status") {
+    f->open_object_section("status");
+    f->close_section();
+    return 0;
+  } else if (cmd == "heap") {
+    if (!ceph_using_tcmalloc()) {
+      errss << "could not issue heap profiler command -- not using tcmalloc!";
+      return -EOPNOTSUPP;
+    }
+    std::string heapcmd;
+    cmd_getval(cmdmap, "heapcmd", heapcmd);
+    std::vector<std::string> cmd_vec;
+    get_str_vec(heapcmd, cmd_vec);
+    std::string val;
+    if (cmd_getval(cmdmap, "value", val)) {
+      cmd_vec.push_back(val);
+    }
+    std::ostringstream outss;
+    ceph_heap_profiler_handle_command(cmd_vec, outss);
+    outbl.append(outss.str());
+    return 0;
+  } else {
+    return -ENOSYS;
+  }
+}
+
+static void handle_standby_mgr_signal(int signum)
+{
+  derr << " *** Got signal " << sig_str(signum) << " ***" << dendl;
+  _exit(0);
+}
+
 int MgrStandby::init()
 {
   init_async_signal_handler();
   register_async_signal_handler(SIGHUP, sighup_handler);
-
+  register_async_signal_handler_oneshot(SIGTERM, handle_standby_mgr_signal);
+  register_async_signal_handler_oneshot(SIGINT, handle_standby_mgr_signal);
   cct->_conf.add_observer(this);
 
   std::lock_guard l(lock);
@@ -131,8 +204,22 @@ int MgrStandby::init()
   // Initialize Messenger
   client_messenger->add_dispatcher_tail(this);
   client_messenger->add_dispatcher_head(&objecter);
-  client_messenger->add_dispatcher_tail(&client);
   client_messenger->start();
+
+  AdminSocket *admin_socket = g_ceph_context->get_admin_socket();
+  asok_hook.reset(new MgrHook(this));
+  {
+    int r = admin_socket->register_command("status", asok_hook.get(), "show status");
+    ceph_assert(r == 0);
+    r = admin_socket->register_command(
+      "heap " \
+      "name=heapcmd,type=CephChoices,strings=" \
+      "dump|start_profiler|stop_profiler|release|get_release_rate|set_release_rate|stats " \
+      "name=value,type=CephString,req=false",
+      asok_hook.get(),
+      "show heap usage info (available only if compiled with tcmalloc)");
+    ceph_assert(r == 0);
+  }
 
   poolctx.start(2);
 
@@ -198,7 +285,6 @@ int MgrStandby::init()
   objecter.set_client_incarnation(0);
   objecter.init();
   objecter.start();
-  client.init();
   timer.init();
 
   py_module_registry.init();
@@ -236,8 +322,23 @@ void MgrStandby::send_beacon()
   }
 
   // Whether I think I am available (request MgrMonitor to set me
-  // as available in the map)
-  bool available = active_mgr != nullptr && active_mgr->is_initialized();
+  // as available in the map).
+  //
+  // The active mgr is marked available if:
+  // 1. The mon has chosen a standby to be active
+  // 2. The chosen active mgr has all of its modules initialized
+  //
+  // In extreme cases, if modules take very long to initialize (a buffer of extra time
+  // is allowed; see "mgr_module_load_expiration"), we will proceed to mark the chosen
+  // active mgr "available" to unblock other mgr functionality such as reporting PG
+  // availability. If this happens, a health error will be issued indicating which
+  // mgr modules got stuck initializing (See src/mgr/PyModuleRegistry.cc). This unblocks
+  // the rest of the mgr's functionality while making it clear that some modules
+  // are unusuable.
+  bool available = false;
+  if (active_mgr != nullptr) {
+    available = active_mgr->is_initialized() || active_mgr->exceeded_initialization_expiration();
+  }
 
   auto addrs = available ? active_mgr->get_server_addrs() : entity_addrvec_t();
   dout(10) << "sending beacon as gid " << monc.get_global_id() << dendl;
@@ -293,41 +394,6 @@ void MgrStandby::tick()
           tick();
       }
   ));
-}
-
-void MgrStandby::shutdown()
-{
-  finisher.queue(new LambdaContext([&](int) {
-    std::lock_guard l(lock);
-
-    dout(4) << "Shutting down" << dendl;
-
-    py_module_registry.shutdown();
-    // stop sending beacon first, I use monc to talk with monitors
-    timer.shutdown();
-    // client uses monc and objecter
-    client.shutdown();
-    mgrc.shutdown();
-    // Stop asio threads, so leftover events won't call into shut down
-    // monclient/objecter.
-    poolctx.finish();
-    // stop monc, so mon won't be able to instruct me to shutdown/activate after
-    // the active_mgr is stopped
-    monc.shutdown();
-    if (active_mgr) {
-      active_mgr->shutdown();
-    }
-    // objecter is used by monc and active_mgr
-    objecter.shutdown();
-    // client_messenger is used by all of them, so stop it in the end
-    client_messenger->shutdown();
-  }));
-
-  // Then stop the finisher to ensure its enqueued contexts aren't going
-  // to touch references to the things we're about to tear down
-  finisher.wait_for_empty();
-  finisher.stop();
-  mgr_perf_stop(g_ceph_context);
 }
 
 void MgrStandby::respawn()
@@ -404,7 +470,7 @@ void MgrStandby::handle_mgr_map(ref_t<MMgrMap> mmap)
       dout(1) << "Activating!" << dendl;
       active_mgr.reset(new Mgr(&monc, map, &py_module_registry,
                                client_messenger.get(), &objecter,
-			       &client, clog, audit_clog));
+			       clog, audit_clog));
       active_mgr->background_init(new LambdaContext(
             [this](int r){
               // Advertise our active-ness ASAP instead of waiting for
@@ -440,26 +506,24 @@ void MgrStandby::handle_mgr_map(ref_t<MMgrMap> mmap)
   }
 }
 
-bool MgrStandby::ms_dispatch2(const ref_t<Message>& m)
+Dispatcher::dispatch_result_t MgrStandby::ms_dispatch2(const ref_t<Message>& m)
 {
   std::lock_guard l(lock);
   dout(10) << state_str() << " " << *m << dendl;
 
+  Dispatcher::dispatch_result_t r;
+
   if (m->get_type() == MSG_MGR_MAP) {
     handle_mgr_map(ref_cast<MMgrMap>(m));
+    r = Dispatcher::ACKNOWLEDGED();
   }
-  bool handled = false;
   if (active_mgr) {
     auto am = active_mgr;
     lock.unlock();
-    handled = am->ms_dispatch2(m);
+    r = am->ms_dispatch2(m);
     lock.lock();
   }
-  if (m->get_type() == MSG_MGR_MAP) {
-    // let this pass through for mgrc
-    handled = false;
-  }
-  return handled;
+  return r;
 }
 
 
@@ -475,6 +539,8 @@ int MgrStandby::main(vector<const char *> args)
 
   // Disable signal handlers
   unregister_async_signal_handler(SIGHUP, sighup_handler);
+  unregister_async_signal_handler(SIGTERM, handle_standby_mgr_signal);
+  unregister_async_signal_handler(SIGINT, handle_standby_mgr_signal);
   shutdown_async_signal_handler();
 
   return 0;

@@ -7,7 +7,8 @@ import { DimlessPipe } from '~/app/shared/pipes/dimless.pipe';
 @Component({
   selector: 'cd-cephfs-detail',
   templateUrl: './cephfs-detail.component.html',
-  styleUrls: ['./cephfs-detail.component.scss']
+  styleUrls: ['./cephfs-detail.component.scss'],
+  standalone: false
 })
 export class CephfsDetailComponent implements OnChanges, OnInit {
   @ViewChild('poolUsageTpl', { static: true })
@@ -32,7 +33,10 @@ export class CephfsDetailComponent implements OnChanges, OnInit {
 
   objectValues = Object.values;
 
-  constructor(private dimlessBinary: DimlessBinaryPipe, private dimless: DimlessPipe) {}
+  constructor(
+    private dimlessBinary: DimlessBinaryPipe,
+    private dimless: DimlessPipe
+  ) {}
 
   ngOnChanges() {
     this.setStandbys();
@@ -41,7 +45,7 @@ export class CephfsDetailComponent implements OnChanges, OnInit {
   private setStandbys() {
     this.standbys = [
       {
-        key: $localize`Standby daemons`,
+        key: $localize`Standby service instances`,
         value: this.data.standbys
       }
     ];
@@ -52,7 +56,7 @@ export class CephfsDetailComponent implements OnChanges, OnInit {
       ranks: [
         { prop: 'rank', name: $localize`Rank` },
         { prop: 'state', name: $localize`State` },
-        { prop: 'mds', name: $localize`Daemon` },
+        { prop: 'mds', name: $localize`Service instance` },
         { prop: 'activity', name: $localize`Activity`, cellTemplate: this.activityTmpl },
         { prop: 'dns', name: $localize`Dentries`, pipe: this.dimless },
         { prop: 'inos', name: $localize`Inodes`, pipe: this.dimless },

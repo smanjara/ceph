@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -12,12 +13,11 @@
  *
  */
 
-#include "mdstypes.h"
-#include "MDSRank.h"
 #include "Mantle.h"
-#include "msg/Messenger.h"
-#include "common/Clock.h"
-#include "CInode.h"
+
+#include <lua.hpp>
+
+#include "common/dout.h"
 
 /* Note, by default debug_mds_balancer is 1/5. For debug messages 1<lvl<=5,
  * should_gather (below) will be true; so, debug_mds will be ignored even if
@@ -47,18 +47,20 @@ static int dout_wrapper(lua_State *L)
   return 0;
 }
 
-int Mantle::balance(std::string_view script,
-                    mds_rank_t whoami,
-                    const std::vector<std::map<std::string, double>> &metrics,
-                    std::map<mds_rank_t, double> &my_targets)
+int
+Mantle::balance(
+    const std::string& script,
+    mds_rank_t whoami,
+    const std::vector<std::map<std::string, double>>& metrics,
+    std::map<mds_rank_t, double>& my_targets)
 {
   lua_settop(L, 0); /* clear the stack */
 
   /* load the balancer */
-  if (luaL_loadstring(L, script.data())) {
+  if (luaL_loadstring(L, script.c_str())) {
     mantle_dout(0) << "WARNING: mantle could not load balancer: "
             << lua_tostring(L, -1) << mantle_dendl;
-    return -CEPHFS_EINVAL;
+    return -EINVAL;
   }
 
   /* tell the balancer which mds is making the decision */
@@ -89,20 +91,20 @@ int Mantle::balance(std::string_view script,
   if (lua_pcall(L, 0, 1, 0) != LUA_OK) {
     mantle_dout(0) << "WARNING: mantle could not execute script: "
             << lua_tostring(L, -1) << mantle_dendl;
-    return -CEPHFS_EINVAL;
+    return -EINVAL;
   }
 
   /* parse response by iterating over Lua stack */
   if (lua_istable(L, -1) == 0) {
     mantle_dout(0) << "WARNING: mantle script returned a malformed response" << mantle_dendl;
-    return -CEPHFS_EINVAL;
+    return -EINVAL;
   }
 
   /* fill in return value */
   for (lua_pushnil(L); lua_next(L, -2); lua_pop(L, 1)) {
     if (!lua_isinteger(L, -2) || !lua_isnumber(L, -1)) {
       mantle_dout(0) << "WARNING: mantle script returned a malformed response" << mantle_dendl;
-      return -CEPHFS_EINVAL;
+      return -EINVAL;
     }
     mds_rank_t rank(lua_tointeger(L, -2));
     my_targets[rank] = lua_tonumber(L, -1);
@@ -139,4 +141,9 @@ Mantle::Mantle (void)
 
   /* setup debugging */
   lua_register(L, "BAL_LOG", dout_wrapper);
+}
+
+Mantle::~Mantle() noexcept {
+  if (L)
+    lua_close(L);
 }

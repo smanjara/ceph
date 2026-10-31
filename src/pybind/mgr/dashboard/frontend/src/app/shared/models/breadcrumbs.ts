@@ -22,32 +22,33 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
  */
 
-import { ActivatedRouteSnapshot, Resolve, UrlSegment } from '@angular/router';
+import { ActivatedRouteSnapshot, UrlSegment } from '@angular/router';
 
 import { Observable, of } from 'rxjs';
 
-export class BreadcrumbsResolver implements Resolve<IBreadcrumb[]> {
+export class BreadcrumbsResolver {
   public resolve(
     route: ActivatedRouteSnapshot
   ): Observable<IBreadcrumb[]> | Promise<IBreadcrumb[]> | IBreadcrumb[] {
     const data = route.routeConfig.data;
     const path = data.path === null ? null : this.getFullPath(route);
+    const disableSplit = data.disableSplit || false;
 
     const text =
       typeof data.breadcrumbs === 'string'
         ? data.breadcrumbs
         : data.breadcrumbs.text || data.text || path;
 
-    const crumbs: IBreadcrumb[] = [{ text: text, path: path }];
+    const crumbs: IBreadcrumb[] = [{ text: text, path: path, disableSplit: disableSplit }];
 
     return of(crumbs);
   }
 
   public getFullPath(route: ActivatedRouteSnapshot): string {
     const relativePath = (segments: UrlSegment[]) =>
-      segments.reduce((a, v) => (a += '/' + v.path), '');
+      segments.reduce((a, v) => a + '/' + v.path, '');
     const fullPath = (routes: ActivatedRouteSnapshot[]) =>
-      routes.reduce((a, v) => (a += relativePath(v.url)), '');
+      routes.reduce((a, v) => a + relativePath(v.url), '');
 
     return fullPath(route.pathFromRoot);
   }
@@ -56,4 +57,5 @@ export class BreadcrumbsResolver implements Resolve<IBreadcrumb[]> {
 export interface IBreadcrumb {
   text: string;
   path: string;
+  disableSplit?: boolean;
 }

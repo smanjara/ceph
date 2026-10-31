@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_API_SNAPSHOT_H
 #define CEPH_LIBRBD_API_SNAPSHOT_H
@@ -21,7 +21,7 @@ struct Snapshot {
                                  snap_group_namespace_t *group_snap);
 
   static int get_trash_namespace(ImageCtxT *ictx, uint64_t snap_id,
-                                 std::string *original_name);
+                                 snap_trash_namespace_t *trash_snap);
 
   static int get_mirror_namespace(
       ImageCtxT *ictx, uint64_t snap_id,

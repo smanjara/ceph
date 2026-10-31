@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph distributed storage system
  *
@@ -17,6 +18,9 @@
 #include <errno.h>
 #include <signal.h>
 #include <stdlib.h>
+
+#include <iostream> // for std::cout
+
 #include "gtest/gtest.h"
 #include "common/ceph_context.h"
 #include "common/config.h"
@@ -210,19 +214,39 @@ TEST_P(CompressorTest, compress_decompress)
   bufferlist in, out;
   bufferlist after;
   bufferlist exp;
+
   in.append(test, len);
+  exp.append(test);
   std::optional<int32_t> compressor_message;
   res = compressor->compress(in, out, compressor_message);
   EXPECT_EQ(res, 0);
   res = compressor->decompress(out, after, compressor_message);
   EXPECT_EQ(res, 0);
-  exp.append(test);
   EXPECT_TRUE(exp.contents_equal(after));
   after.clear();
   size_t compressed_len = out.length();
   out.append_zero(12);
   auto it = out.cbegin();
   res = compressor->decompress(it, compressed_len, after, compressor_message);
+  EXPECT_EQ(res, 0);
+  EXPECT_TRUE(exp.contents_equal(after));
+
+  //compressing bl which has got empty bufferptr at the end
+  in.clear();
+  out.clear();
+  after.clear();
+  exp.clear();
+
+  const size_t PREALLOC_SIZE = 1;  // any non-zero value would suffice here
+  bufferlist dummy(PREALLOC_SIZE); // this appends an empty preallocated ptr to the end of the bufferlist
+  EXPECT_TRUE(dummy.buffers().back().length() == 0); // make sure we have empty ptr at the end
+  in.append(test, len);
+  in.append(dummy);
+  exp.append(test);
+
+  res = compressor->compress(in, out, compressor_message);
+  EXPECT_EQ(res, 0);
+  res = compressor->decompress(out, after, compressor_message);
   EXPECT_EQ(res, 0);
   EXPECT_TRUE(exp.contents_equal(after));
 
@@ -378,7 +402,7 @@ INSTANTIATE_TEST_SUITE_P(
 #ifdef HAVE_LZ4
     "lz4",
 #endif
-#if defined(__x86_64__) || defined(__aarch64__)
+#if defined(__x86_64__) || defined(__aarch64__) || defined(HAVE_RISCV_RVV)
     "zlib/isal",
 #endif
     "zlib/noisal",
@@ -388,7 +412,7 @@ INSTANTIATE_TEST_SUITE_P(
 #endif
     "zstd"));
 
-#if defined(__x86_64__) || defined(__aarch64__)
+#if defined(__x86_64__) || defined(__aarch64__) || defined(HAVE_RISCV_RVV)
 
 TEST(ZlibCompressor, zlib_isal_compatibility)
 {
@@ -453,7 +477,7 @@ TEST(CompressionPlugin, all)
   }
 }
 
-#if defined(__x86_64__) || defined(__aarch64__)
+#if defined(__x86_64__) || defined(__aarch64__) || defined(HAVE_RISCV_RVV)
 
 TEST(ZlibCompressor, isal_compress_zlib_decompress_random)
 {
@@ -610,3 +634,88 @@ TEST(QAT, enc_noqat_dec_qat) {
 }
 
 #endif	// HAVE_QATZIP
+
+#ifdef HAVE_UADK
+TEST(UADK, enc_uadk_dec_nouadk) {
+  //reserve for more algs in the future
+  const char* alg_collection[] = {"zlib"};
+
+  for (auto alg : alg_collection) {
+    g_conf().set_val("uadk_compressor_enabled", "true");
+    g_conf().set_val("compressor_zlib_winsize", "15");
+    g_ceph_context->_conf.apply_changes(nullptr);
+    CompressorRef hw = Compressor::create(g_ceph_context, alg);
+    if (hw == NULL) 
+      return;
+
+    g_conf().set_val("uadk_compressor_enabled", "false");
+    g_conf().set_val("compressor_zlib_winsize", "15");
+    g_ceph_context->_conf.apply_changes(nullptr);
+    CompressorRef sw = Compressor::create(g_ceph_context, alg);
+
+    //generate random buffer
+    for (int cnt = 0; cnt < 100; cnt++) {
+      srand(cnt + 1000);
+      int log2 = (rand()%18) + 1;
+      int size = (rand() % (1 << log2)) + 1;
+
+      char test[size];
+      for (int i = 0; i < size; ++i)
+	        test[i] = rand()%256;
+      bufferlist in, out;
+      in.append(test, size);
+
+      std::optional<int32_t> compressor_message;
+      int res = hw->compress(in, out, compressor_message);
+      EXPECT_EQ(res, 0);
+      bufferlist after;
+      res = sw->decompress(out, after, compressor_message);
+      EXPECT_EQ(res, 0);
+      bufferlist exp;
+      exp.append(test, size);
+      EXPECT_TRUE(exp.contents_equal(after));
+    }
+  }
+}
+
+TEST(UADK, enc_nouadk_dec_uadk) {
+  const char* alg_collection[] = {"zlib"};
+
+  for (auto alg : alg_collection) {
+    g_conf().set_val("uadk_compressor_enabled", "true");
+    g_conf().set_val("compressor_zlib_winsize", "15");
+    g_ceph_context->_conf.apply_changes(nullptr);
+    CompressorRef hw = Compressor::create(g_ceph_context, alg);
+    if (hw == NULL) 
+      return;
+    g_conf().set_val("uadk_compressor_enabled", "false");
+    g_conf().set_val("compressor_zlib_winsize", "15");
+    g_ceph_context->_conf.apply_changes(nullptr);
+    CompressorRef sw = Compressor::create(g_ceph_context, alg);
+
+    //generate random buffer
+    for (int cnt = 0; cnt < 100; cnt++) {
+      srand(cnt + 1000);
+      int log2 = (rand()%18) +1;
+      int size = (rand() % (1 << log2)) + 1;
+
+      char test[size];
+      for (int i = 0; i < size; ++i)
+        test[i] = rand()%256;
+      bufferlist in, out;
+      in.append(test, size);
+
+      std::optional<int32_t> compressor_message;
+      int res = sw->compress(in, out, compressor_message);
+      EXPECT_EQ(res, 0);
+      bufferlist after;
+      res = hw->decompress(out, after, compressor_message);
+      EXPECT_EQ(res, 0);
+      bufferlist exp;
+      exp.append(test, size);
+      EXPECT_TRUE(exp.contents_equal(after));
+    }
+  }
+}
+
+#endif //HAVE_UADK

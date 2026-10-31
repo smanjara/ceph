@@ -11,11 +11,15 @@ import { CdTableFetchDataContext } from '~/app/shared/models/cd-table-fetch-data
 import { CdTableSelection } from '~/app/shared/models/cd-table-selection';
 import { Permission } from '~/app/shared/models/permissions';
 import { AuthStorageService } from '~/app/shared/services/auth-storage.service';
+import { ConfigurationOption } from '~/app/shared/services/configuration-resource-state.service';
+
+const RGW = 'rgw';
 
 @Component({
   selector: 'cd-configuration',
   templateUrl: './configuration.component.html',
-  styleUrls: ['./configuration.component.scss']
+  styleUrls: ['./configuration.component.scss'],
+  standalone: false
 })
 export class ConfigurationComponent extends ListWithDetails implements OnInit {
   permission: Permission;
@@ -26,10 +30,26 @@ export class ConfigurationComponent extends ListWithDetails implements OnInit {
   selection = new CdTableSelection();
   filters: CdTableColumn[] = [
     {
+      name: $localize`Modified`,
+      prop: 'modified',
+      filterOptions: [$localize`yes`, $localize`no`],
+      filterInitValue: $localize`yes`,
+      filterPredicate: (row, value) => {
+        if (value === 'yes' && row.hasOwnProperty('value')) {
+          return true;
+        }
+
+        if (value === 'no' && !row.hasOwnProperty('value')) {
+          return true;
+        }
+
+        return false;
+      }
+    },
+    {
       name: $localize`Level`,
       prop: 'level',
       filterOptions: ['basic', 'advanced', 'dev'],
-      filterInitValue: 'basic',
       filterPredicate: (row, value) => {
         enum Level {
           basic = 0,
@@ -53,7 +73,7 @@ export class ConfigurationComponent extends ListWithDetails implements OnInit {
     {
       name: $localize`Source`,
       prop: 'source',
-      filterOptions: ['mon'],
+      filterOptions: ['mon', 'mgr_module'],
       filterPredicate: (row, value) => {
         if (!row.hasOwnProperty('source')) {
           return false;
@@ -62,18 +82,29 @@ export class ConfigurationComponent extends ListWithDetails implements OnInit {
       }
     },
     {
-      name: $localize`Modified`,
-      prop: 'modified',
-      filterOptions: ['yes', 'no'],
+      name: $localize`Module`,
+      prop: 'module',
+      filterOptions: ['cephadm'],
       filterPredicate: (row, value) => {
-        if (value === 'yes' && row.hasOwnProperty('value')) {
-          return true;
+        if (value === 'cephadm') {
+          return row.name?.startsWith('mgr/cephadm/');
         }
-
-        if (value === 'no' && !row.hasOwnProperty('value')) {
-          return true;
+        return false;
+      }
+    },
+    {
+      name: $localize`Category`,
+      prop: 'category',
+      filterOptions: [$localize`certificate`],
+      filterPredicate: (row, value) => {
+        if (value === 'certificate') {
+          return (
+            row.name?.toLowerCase().includes('certificate') ||
+            row.name?.toLowerCase().includes('cert') ||
+            row.name?.toLowerCase().includes('ssl') ||
+            row.name?.toLowerCase().includes('tls')
+          );
         }
-
         return false;
       }
     }
@@ -105,7 +136,12 @@ export class ConfigurationComponent extends ListWithDetails implements OnInit {
 
   ngOnInit() {
     this.columns = [
-      { canAutoResize: true, prop: 'name', name: $localize`Name` },
+      {
+        canAutoResize: true,
+        prop: 'name',
+        name: $localize`Name`,
+        cellTransformation: CellTemplate.routerLink
+      },
       { prop: 'desc', name: $localize`Description`, cellClass: 'wrap' },
       {
         prop: 'value',
@@ -131,7 +167,10 @@ export class ConfigurationComponent extends ListWithDetails implements OnInit {
   getConfigurationList(context: CdTableFetchDataContext) {
     this.configurationService.getConfigData().subscribe(
       (data: any) => {
-        this.data = data;
+        this.data = (Array.isArray(data) ? data : []).map((configOption: ConfigurationOption) => ({
+          ...configOption,
+          cdLink: `/configuration/${encodeURIComponent(configOption.name)}`
+        }));
       },
       () => {
         context.error();
@@ -143,7 +182,9 @@ export class ConfigurationComponent extends ListWithDetails implements OnInit {
     if (selection.selected.length !== 1) {
       return false;
     }
-
-    return selection.selected[0].can_update_at_runtime;
+    if ((this.selection.selected[0].name as string).includes(RGW)) {
+      return true;
+    }
+    return this.selection.selected[0].can_update_at_runtime;
   }
 }

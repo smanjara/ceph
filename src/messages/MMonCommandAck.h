@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -15,7 +16,13 @@
 #ifndef CEPH_MMONCOMMANDACK_H
 #define CEPH_MMONCOMMANDACK_H
 
+#include "include/errorcode32.h"
 #include "messages/PaxosServiceMessage.h"
+#include "include/container_ios.h"
+
+#include <sstream>
+#include <string>
+#include <vector>
 
 using ceph::common::cmdmap_from_json;
 using ceph::common::cmd_getval;
@@ -27,9 +34,9 @@ public:
   std::string rs;
 
   MMonCommandAck() : PaxosServiceMessage{MSG_MON_COMMAND_ACK, 0} {}
-  MMonCommandAck(const std::vector<std::string>& c, int _r, std::string s, version_t v) :
+  MMonCommandAck(const std::vector<std::string>& c, int _r, auto&& s, version_t v) :
     PaxosServiceMessage{MSG_MON_COMMAND_ACK, v},
-    cmd(c), r(_r), rs(s) { }
+    cmd(c), r(_r), rs(std::forward<decltype(s)>(s)) { }
 private:
   ~MMonCommandAck() final {}
 

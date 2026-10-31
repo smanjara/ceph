@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <errno.h>
 
@@ -44,8 +44,13 @@ static int read_refcount(cls_method_context_t hctx, bool implicit_ref, obj_refco
   return 0;
 }
 
-static int set_refcount(cls_method_context_t hctx, const struct obj_refcount& objr)
+static int set_refcount(cls_method_context_t hctx, struct obj_refcount& objr)
 {
+  // retired tags only stop a replayed put from dropping a wildcard that has no owner
+  if (!objr.refs.count(wildcard_tag) || !objr.wildcard_owner.empty()) {
+    objr.retired_refs.clear();
+  }
+
   bufferlist bl;
 
   encode(objr, bl);
@@ -78,6 +83,12 @@ static int cls_rc_refcount_get(cls_method_context_t hctx, bufferlist *in, buffer
 
   objr.refs[op.tag] = true;
 
+  // a source with a ref of its own, live or retired, doesn't own the wildcard
+  if (objr.refs.count(wildcard_tag) && objr.wildcard_owner.empty() &&
+      !objr.refs.count(op.src_tag) && !objr.retired_refs.count(op.src_tag)) {
+    objr.wildcard_owner = op.src_tag;
+  }
+
   ret = set_refcount(hctx, objr);
   if (ret < 0)
     return ret;
@@ -109,19 +120,14 @@ static int cls_rc_refcount_put(cls_method_context_t hctx, bufferlist *in, buffer
 
   CLS_LOG(10, "cls_rc_refcount_put() tag=%s\n", op.tag.c_str());
 
-  bool found = false;
   auto iter = objr.refs.find(op.tag);
-  if (iter != objr.refs.end()) {
-    found = true;
-  } else if (op.implicit_ref) {
+  if (iter == objr.refs.end() && op.implicit_ref &&
+      (objr.wildcard_owner.empty() || objr.wildcard_owner == op.tag)) {
     iter = objr.refs.find(wildcard_tag);
-    if (iter != objr.refs.end()) {
-      found = true;
-    }
+    objr.wildcard_owner.clear();
   }
 
-  if (!found ||
-      objr.retired_refs.find(op.tag) != objr.retired_refs.end())
+  if (iter == objr.refs.end() || objr.retired_refs.count(op.tag))
     return 0;
 
   objr.retired_refs.insert(op.tag);
@@ -204,13 +210,14 @@ CLS_INIT(refcount)
   cls_method_handle_t h_refcount_set;
   cls_method_handle_t h_refcount_read;
 
-  cls_register("refcount", &h_class);
+  using namespace cls::refcount;
+  cls_register(ClassId::name, &h_class);
+  ClassRegistrar<ClassId> cls(h_class);
 
-  /* refcount */
-  cls_register_cxx_method(h_class, "get", CLS_METHOD_RD | CLS_METHOD_WR, cls_rc_refcount_get, &h_refcount_get);
-  cls_register_cxx_method(h_class, "put", CLS_METHOD_RD | CLS_METHOD_WR, cls_rc_refcount_put, &h_refcount_put);
-  cls_register_cxx_method(h_class, "set", CLS_METHOD_RD | CLS_METHOD_WR, cls_rc_refcount_set, &h_refcount_set);
-  cls_register_cxx_method(h_class, "read", CLS_METHOD_RD, cls_rc_refcount_read, &h_refcount_read);
+  cls.register_cxx_method(method::get,  cls_rc_refcount_get,  &h_refcount_get);
+  cls.register_cxx_method(method::put,  cls_rc_refcount_put,  &h_refcount_put);
+  cls.register_cxx_method(method::set,  cls_rc_refcount_set,  &h_refcount_set);
+  cls.register_cxx_method(method::read, cls_rc_refcount_read, &h_refcount_read);
 
   return;
 }

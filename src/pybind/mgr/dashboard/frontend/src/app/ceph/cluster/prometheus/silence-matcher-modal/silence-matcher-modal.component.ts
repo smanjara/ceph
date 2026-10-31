@@ -1,5 +1,5 @@
 import { Component, EventEmitter, Output, ViewChild } from '@angular/core';
-import { FormControl, Validators } from '@angular/forms';
+import { UntypedFormControl, Validators } from '@angular/forms';
 
 import { NgbActiveModal, NgbTypeahead } from '@ng-bootstrap/ng-bootstrap';
 import _ from 'lodash';
@@ -19,7 +19,8 @@ import { PrometheusSilenceMatcherService } from '~/app/shared/services/prometheu
 @Component({
   selector: 'cd-silence-matcher-modal',
   templateUrl: './silence-matcher-modal.component.html',
-  styleUrls: ['./silence-matcher-modal.component.scss']
+  styleUrls: ['./silence-matcher-modal.component.scss'],
+  standalone: false
 })
 export class SilenceMatcherModalComponent {
   @ViewChild(NgbTypeahead, { static: true })
@@ -66,7 +67,7 @@ export class SilenceMatcherModalComponent {
     this.form = this.formBuilder.group({
       name: [null, [Validators.required]],
       value: [{ value: '', disabled: true }, [Validators.required]],
-      isRegex: new FormControl(false)
+      isRegex: new UntypedFormControl(false)
     });
   }
 

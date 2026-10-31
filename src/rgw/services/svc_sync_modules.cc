@@ -1,11 +1,12 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include "svc_sync_modules.h"
 #include "svc_zone.h"
 
 #include "rgw_sync_module.h"
 #include "rgw_zone.h"
+#include "include/container_ios.h"
 
 #define dout_subsys ceph_subsys_rgw
 

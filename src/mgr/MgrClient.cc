@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -14,6 +15,10 @@
 
 #include "MgrClient.h"
 
+#include <algorithm>
+
+#include "common/perf_counters_collection.h"
+#include "common/perf_counters_key.h"
 #include "mgr/MgrContext.h"
 #include "mon/MonMap.h"
 
@@ -35,6 +40,16 @@ using std::vector;
 
 using ceph::bufferlist;
 using ceph::make_message;
+
+namespace {
+
+std::string format_counter_path(std::string path)
+{
+  std::replace(path.begin(), path.end(), '\0', ' ');
+  return path;
+}
+
+} // anonymous namespace
 using ceph::ref_cast;
 using ceph::ref_t;
 
@@ -52,6 +67,8 @@ MgrClient::MgrClient(CephContext *cct_, Messenger *msgr_, MonMap *monmap_)
   ceph_assert(cct != nullptr);
 }
 
+MgrClient::~MgrClient() = default;
+
 void MgrClient::init()
 {
   std::lock_guard l(lock);
@@ -60,12 +77,15 @@ void MgrClient::init()
 
   timer.init();
   initialized = true;
+  dead = false;
 }
 
 void MgrClient::shutdown()
 {
   std::unique_lock l(lock);
   ldout(cct, 10) << dendl;
+
+  dead = true;
 
   if (connect_retry_callback) {
     timer.cancel_event(connect_retry_callback);
@@ -96,9 +116,13 @@ void MgrClient::shutdown()
   }
 }
 
-bool MgrClient::ms_dispatch2(const ref_t<Message>& m)
+Dispatcher::dispatch_result_t MgrClient::ms_dispatch2(const ref_t<Message>& m)
 {
   std::lock_guard l(lock);
+
+  if (dead) {
+    return false;
+  }
 
   switch(m->get_type()) {
   case MSG_MGR_MAP:
@@ -328,9 +352,8 @@ void MgrClient::_send_report()
   {
     // Helper for checking whether a counter should be included
     auto include_counter = [this](
-        const PerfCounters::perf_counter_data_any_d &ctr,
-        const PerfCounters &perf_counters)
-    {
+			       const PerfCounters::perf_counter_data_any_d &ctr,
+			       const PerfCounters &perf_counters) {
       return perf_counters.get_adjusted_priority(ctr.prio) >= (int)stats_threshold;
     };
 
@@ -338,7 +361,7 @@ void MgrClient::_send_report()
     auto undeclare = [report, this](const std::string &path)
     {
       report->undeclare_types.push_back(path);
-      ldout(cct,20) << " undeclare " << path << dendl;
+      ldout(cct,20) << " undeclare " << format_counter_path(path) << dendl;
       session->declared.erase(path);
     };
 
@@ -367,20 +390,20 @@ void MgrClient::_send_report()
       }
 
       if (session->declared.count(path) == 0) {
-	ldout(cct,20) << " declare " << path << dendl;
-	PerfCounterType type;
-	type.path = path;
-	if (data.description) {
-	  type.description = data.description;
-	}
-	if (data.nick) {
-	  type.nick = data.nick;
-	}
-	type.type = data.type;
-       type.priority = perf_counters.get_adjusted_priority(data.prio);
-	type.unit = data.unit;
-	report->declare_types.push_back(std::move(type));
-	session->declared.insert(path);
+        ldout(cct, 20) << " declare " << format_counter_path(path) << dendl;
+        PerfCounterType type;
+        type.path = path;
+        if (data.description) {
+          type.description = data.description;
+        }
+        if (data.nick) {
+          type.nick = data.nick;
+        }
+        type.type = data.type;
+        type.priority = perf_counters.get_adjusted_priority(data.prio);
+        type.unit = data.unit;
+        report->declare_types.push_back(std::move(type));
+        session->declared.insert(path);
       }
 
       encode(static_cast<uint64_t>(data.u64), report->packed);
@@ -464,7 +487,7 @@ bool MgrClient::handle_mgr_configure(ref_t<MMgrConfigure> m)
     handle_config_payload(m->osd_perf_metric_queries);
   } else if (m->metric_config_message) {
     const MetricConfigMessage &message = *m->metric_config_message;
-    boost::apply_visitor(HandlePayloadVisitor(this), message.payload);
+    std::visit(HandlePayloadVisitor(this), message.payload);
   }
 
   bool starting = (stats_period == 0) && (m->stats_period != 0);
@@ -483,7 +506,7 @@ bool MgrClient::handle_mgr_close(ref_t<MMgrClose> m)
   return true;
 }
 
-int MgrClient::start_command(const vector<string>& cmd, const bufferlist& inbl,
+int MgrClient::start_command(vector<string>&& cmd, bufferlist&& inbl,
 			     bufferlist *outbl, string *outs,
 			     Context *onfinish)
 {
@@ -497,8 +520,8 @@ int MgrClient::start_command(const vector<string>& cmd, const bufferlist& inbl,
   }
 
   auto &op = command_table.start_command();
-  op.cmd = cmd;
-  op.inbl = inbl;
+  op.cmd = std::move(cmd);
+  op.inbl = std::move(inbl);
   op.outbl = outbl;
   op.outs = outs;
   op.on_finish = onfinish;
@@ -517,8 +540,8 @@ int MgrClient::start_command(const vector<string>& cmd, const bufferlist& inbl,
 }
 
 int MgrClient::start_tell_command(
-  const string& name,
-  const vector<string>& cmd, const bufferlist& inbl,
+  string&& name,
+  vector<string>&& cmd, bufferlist&& inbl,
   bufferlist *outbl, string *outs,
   Context *onfinish)
 {
@@ -533,9 +556,9 @@ int MgrClient::start_tell_command(
 
   auto &op = command_table.start_command();
   op.tell = true;
-  op.name = name;
-  op.cmd = cmd;
-  op.inbl = inbl;
+  op.name = std::move(name);
+  op.cmd = std::move(cmd);
+  op.inbl = std::move(inbl);
   op.outbl = outbl;
   op.outs = outs;
   op.on_finish = onfinish;

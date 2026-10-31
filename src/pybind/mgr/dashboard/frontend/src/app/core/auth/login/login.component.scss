@@ -1,7 +1,8 @@
 @use 'sass:map';
+@use 'sass:color';
 @use './src/styles/vendor/variables' as vv;
 
-$dark-secondary: darken(vv.$secondary, 4%);
+$dark-secondary: color.adjust(vv.$secondary, $lightness: -4%);
 
 ::ng-deep cd-login {
   .form-group {
@@ -27,7 +28,7 @@ $dark-secondary: darken(vv.$secondary, 4%);
     outline: none;
   }
 
-  .placeholder {
+  label {
     color: vv.$gray-500;
   }
 

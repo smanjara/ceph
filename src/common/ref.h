@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef COMMON_REF_H
 #define COMMON_REF_H
@@ -19,6 +19,14 @@ ref_t<T> ref_cast(ref_t<U>&& r) noexcept {
 }
 template<class T, class U>
 cref_t<T> ref_cast(const cref_t<U>& r) noexcept {
+  return static_cast<const T*>(r.get());
+}
+template<class T, class U>
+cref_t<T> cref_cast(const ref_t<U>& r) noexcept {
+  return static_cast<const T*>(r.get());
+}
+template<class T, class U>
+cref_t<T> cref_cast(const cref_t<U>& r) noexcept {
   return static_cast<const T*>(r.get());
 }
 template<class T, typename... Args>

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -40,8 +41,9 @@ class Fixture : public testing::Test {
  protected:
   void SetUp() override {
     CephInitParameters params(CEPH_ENTITY_TYPE_CLIENT);
-    cct = common_preinit(params, CODE_ENVIRONMENT_UTILITY,
-                         CINIT_FLAG_NO_DEFAULT_CONFIG_FILE);
+    cct.reset(common_preinit(params, CODE_ENVIRONMENT_UTILITY,
+			     CINIT_FLAG_NO_DEFAULT_CONFIG_FILE),
+	      false);
     prefix.emplace(cct.get(), ceph_subsys_context);
   }
   void TearDown() override {

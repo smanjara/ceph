@@ -20,6 +20,7 @@ set(mds_srcs
   CDir.cc
   CInode.cc
   LogEvent.cc
+  LogSegment.cc
   MDSTable.cc
   InoTable.cc
   JournalPointer.cc
@@ -34,20 +35,26 @@ set(mds_srcs
   snap.cc
   SessionMap.cc
   MDSContext.cc
-  MDSAuthCaps.cc
   MDLog.cc
   MDSCacheObject.cc
   Mantle.cc
   Anchor.cc
   OpenFileTable.cc
+  MDSPhaseTracker.cc
   MDSPinger.cc
   MetricAggregator.cc
   MetricsHandler.cc
-  ${CMAKE_SOURCE_DIR}/src/common/TrackedOp.cc
+  QuiesceDbManager.cc
+  QuiesceAgent.cc
+  MDSRankQuiesce.cc
+  MDSRankQuarantine.cc
+  MDSDmclockScheduler.cc  ${CMAKE_SOURCE_DIR}/src/common/TrackedOp.cc
   ${CMAKE_SOURCE_DIR}/src/common/MemoryModel.cc
   ${CMAKE_SOURCE_DIR}/src/osdc/Journaler.cc
   ${CMAKE_SOURCE_DIR}/src/mgr/MDSPerfMetricTypes.cc)
 add_library(mds STATIC ${mds_srcs})
 target_link_libraries(mds PRIVATE
-  heap_profiler cpu_profiler osdc ${LUA_LIBRARIES})
+  legacy-option-headers Boost::url
+  heap_profiler cpu_profiler osdc ${LUA_LIBRARIES}
+  PUBLIC dmclock::dmclock)
 target_include_directories(mds PRIVATE "${LUA_INCLUDE_DIR}")

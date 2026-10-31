@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include <string_view>
 #include "auth/Crypto.h"
@@ -122,6 +122,22 @@ std::string gen_rand_alphanumeric_plain(CephContext *cct, size_t size)
   std::string str;
   str.resize(size + 1);
   gen_rand_alphanumeric_plain(cct, str.data(), str.size());
+  str.pop_back(); // pop the extra \0
+  return str;
+}
+
+void gen_rand_numeric(CephContext *cct, char *dest, size_t size) /* size should be the required string size + 1 */
+{
+  static constexpr char table[] = "0123456789";
+  choose_from(cct->random(), table, dest, size-1);
+  dest[size-1] = 0;
+}
+
+std::string gen_rand_numeric(CephContext *cct, size_t size)
+{
+  std::string str;
+  str.resize(size + 1);
+  gen_rand_numeric(cct, str.data(), str.size());
   str.pop_back(); // pop the extra \0
   return str;
 }

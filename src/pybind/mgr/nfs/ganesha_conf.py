@@ -1,10 +1,13 @@
-from typing import cast, List, Dict, Any, Optional, TYPE_CHECKING
+import errno
+from typing import cast, List, Dict, Any, Optional, Set, TYPE_CHECKING
 from os.path import isabs
 
 from mgr_module import NFS_GANESHA_SUPPORTED_FSALS
 
-from .exception import NFSInvalidOperation, FSNotFound
+from .exception import NFSException, NFSInvalidOperation, FSNotFound
 from .utils import check_fs
+from .qos_conf import QOS
+from .ganesha_raw_conf import RawBlock
 
 if TYPE_CHECKING:
     from nfs.module import Module
@@ -53,25 +56,11 @@ def _validate_sec_type(sec_type: str) -> None:
             f"SecType {sec_type} invalid, valid types are {valid_sec_types}")
 
 
-class RawBlock():
-    def __init__(self, block_name: str, blocks: List['RawBlock'] = [], values: Dict[str, Any] = {}):
-        if not values:  # workaround mutable default argument
-            values = {}
-        if not blocks:  # workaround mutable default argument
-            blocks = []
-        self.block_name = block_name
-        self.blocks = blocks
-        self.values = values
-
-    def __eq__(self, other: Any) -> bool:
-        if not isinstance(other, RawBlock):
-            return False
-        return self.block_name == other.block_name and \
-            self.blocks == other.blocks and \
-            self.values == other.values
-
-    def __repr__(self) -> str:
-        return f'RawBlock({self.block_name!r}, {self.blocks!r}, {self.values!r})'
+def _validate_xprtsec_type(xprtsec: str) -> None:
+    valid_xprtsec_types = ['none', 'tls', 'mtls']
+    if not isinstance(xprtsec, str) or xprtsec not in valid_xprtsec_types:
+        raise NFSInvalidOperation(
+            f"XprtSec {xprtsec} invalid, valid types are {valid_xprtsec_types}")
 
 
 class GaneshaConfParser:
@@ -179,8 +168,12 @@ class GaneshaConfParser:
 
 
 class FSAL(object):
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, cmount_path: Optional[str] = "/") -> None:
+        # By default, cmount_path is set to "/", allowing the export to mount at the root level.
+        # This ensures that the export path can be any complete path hierarchy within the Ceph filesystem.
+        # If multiple exports share the same cmount_path and FSAL options, they will share a single CephFS client.
         self.name = name
+        self.cmount_path = cmount_path
 
     @classmethod
     def from_dict(cls, fsal_dict: Dict[str, Any]) -> 'FSAL':
@@ -211,9 +204,11 @@ class CephFSFSAL(FSAL):
                  user_id: Optional[str] = None,
                  fs_name: Optional[str] = None,
                  sec_label_xattr: Optional[str] = None,
-                 cephx_key: Optional[str] = None) -> None:
+                 cephx_key: Optional[str] = None,
+                 cmount_path: Optional[str] = "/") -> None:
         super().__init__(name)
         assert name == 'CEPH'
+        self.cmount_path = cmount_path
         self.fs_name = fs_name
         self.user_id = user_id
         self.sec_label_xattr = sec_label_xattr
@@ -225,7 +220,8 @@ class CephFSFSAL(FSAL):
                    fsal_block.values.get('user_id'),
                    fsal_block.values.get('filesystem'),
                    fsal_block.values.get('sec_label_xattr'),
-                   fsal_block.values.get('secret_access_key'))
+                   fsal_block.values.get('secret_access_key'),
+                   cmount_path=fsal_block.values.get('cmount_path'))
 
     def to_fsal_block(self) -> RawBlock:
         result = RawBlock('FSAL', values={'name': self.name})
@@ -238,6 +234,8 @@ class CephFSFSAL(FSAL):
             result.values['sec_label_xattr'] = self.sec_label_xattr
         if self.cephx_key:
             result.values['secret_access_key'] = self.cephx_key
+        if self.cmount_path:
+            result.values['cmount_path'] = self.cmount_path
         return result
 
     @classmethod
@@ -246,7 +244,8 @@ class CephFSFSAL(FSAL):
                    fsal_dict.get('user_id'),
                    fsal_dict.get('fs_name'),
                    fsal_dict.get('sec_label_xattr'),
-                   fsal_dict.get('cephx_key'))
+                   fsal_dict.get('cephx_key'),
+                   fsal_dict.get('cmount_path'))
 
     def to_dict(self) -> Dict[str, str]:
         r = {'name': self.name}
@@ -256,6 +255,8 @@ class CephFSFSAL(FSAL):
             r['fs_name'] = self.fs_name
         if self.sec_label_xattr:
             r['sec_label_xattr'] = self.sec_label_xattr
+        if self.cmount_path:
+            r['cmount_path'] = self.cmount_path
         return r
 
 
@@ -308,6 +309,114 @@ class RGWFSAL(FSAL):
         if self.secret_access_key:
             r['secret_access_key'] = self.secret_access_key
         return r
+
+
+def _as_str_list(value: Any) -> List[str]:
+    """Normalise a stanza value into a list of strings.
+
+    A stanza holding a single element parses back as a scalar, so a pool of
+    one user has to read the same way as a pool of many.
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(v) for v in value]
+    return [str(value)]
+
+
+class CephUser:
+    """One CephX identity in a CEPH_USERS client-pool mapping."""
+    def __init__(self, user_id: str, secret_access_key: str, filesystem: str) -> None:
+        self.user_id = user_id
+        self.secret_access_key = secret_access_key
+        self.filesystem = filesystem
+
+
+class CephUsers:
+    """Ganesha CEPH_USERS block storing pool-mode CephX credentials.
+
+    Every filesystem that has a client pool contributes one USERS block, which
+    carries the pool as parallel Userids and Keys lists, the key of a user
+    being at the index of its id::
+
+        CEPH_USERS {
+            USERS {
+                Userids = "nfs.mync.cephfs.80bb977a", "nfs.mync.cephfs.80bb977a.pool.1";
+                Keys = "AQCTb...", "AQCVc...";
+                filesystem = "cephfs";
+            }
+        }
+
+    """
+    def __init__(self, users: Optional[List[CephUser]] = None) -> None:
+        self.users = users or []
+
+    @classmethod
+    def from_users_block(cls, block: RawBlock) -> List[CephUser]:
+        """Expand one USERS block into the identities it holds.
+        """
+        fs_name = str(block.values.get('filesystem', ''))
+        user_ids = _as_str_list(block.values.get('userids'))
+        keys = _as_str_list(block.values.get('keys'))
+        if len(keys) != len(user_ids):
+            raise NFSException(
+                f"CEPH_USERS block for filesystem {fs_name} is malformed: "
+                f"{len(user_ids)} Userids but {len(keys)} Keys. Ganesha rejects "
+                "a USERS block whose lists do not line up. Remove the "
+                "ceph-users-nfs.<cluster_id> object from the .nfs pool and "
+                f"recreate the exports of {fs_name} to rebuild its pool.",
+                -errno.EIO
+            )
+        return [CephUser(user_id, key, fs_name) for user_id, key in zip(user_ids, keys)]
+
+    @classmethod
+    def from_block(cls, block: RawBlock) -> 'CephUsers':
+        users: List[CephUser] = []
+        for b in block.blocks:
+            if b.block_name == 'USERS':
+                users.extend(cls.from_users_block(b))
+        return cls(users)
+
+    @classmethod
+    def from_raw(cls, raw: str) -> 'CephUsers':
+        if not raw:
+            return cls()
+        blocks = GaneshaConfParser(raw).parse()
+        for block in blocks:
+            if block.block_name == 'CEPH_USERS':
+                return cls.from_block(block)
+        return cls()
+
+    def _users_by_fs(self) -> Dict[str, List[CephUser]]:
+        """Group the identities per filesystem, keeping the pool order."""
+        grouped: Dict[str, List[CephUser]] = {}
+        for user in self.users:
+            grouped.setdefault(user.filesystem, []).append(user)
+        return grouped
+
+    def to_block(self) -> RawBlock:
+        blocks = [
+            RawBlock('USERS', values={
+                'Userids': [u.user_id for u in users],
+                'Keys': [u.secret_access_key for u in users],
+                'filesystem': fs_name,
+            })
+            for fs_name, users in self._users_by_fs().items()
+        ]
+        return RawBlock('CEPH_USERS', blocks=blocks)
+
+    def users_for_fs(self, fs_name: str) -> List[CephUser]:
+        return [u for u in self.users if u.filesystem == fs_name]
+
+    def remove_fs(self, fs_name: str) -> None:
+        self.users = [u for u in self.users if u.filesystem != fs_name]
+
+    def remove_users(self, fs_name: str, user_ids: Set[str]) -> None:
+        """Drop named identities from the pool of fs_name, keep the rest."""
+        self.users = [
+            u for u in self.users
+            if u.filesystem != fs_name or u.user_id not in user_ids
+        ]
 
 
 class Client:
@@ -363,7 +472,10 @@ class Export:
             transports: List[str],
             fsal: FSAL,
             clients: Optional[List[Client]] = None,
-            sectype: Optional[List[str]] = None) -> None:
+            sectype: Optional[List[str]] = None,
+            xprtsec: Optional[str] = None,
+            qos_block: Optional[QOS] = None,
+            kmip_key_id: Optional[str] = None) -> None:
         self.export_id = export_id
         self.path = path
         self.fsal = fsal
@@ -377,6 +489,9 @@ class Export:
         self.transports = transports
         self.clients: List[Client] = clients or []
         self.sectype = sectype
+        self.xprtsec = xprtsec
+        self.qos_block = qos_block
+        self.kmip_key_id = kmip_key_id
 
     @classmethod
     def from_export_block(cls, export_block: RawBlock, cluster_id: str) -> 'Export':
@@ -385,6 +500,10 @@ class Export:
 
         client_blocks = [b for b in export_block.blocks
                          if b.block_name == "CLIENT"]
+
+        qos_block = [b for b in export_block.blocks
+                     if b.block_name == "QOS_BLOCK"]
+        qos_block = QOS.from_qos_block(qos_block[0]) if qos_block else None
 
         protocols = export_block.values.get('protocols')
         if not isinstance(protocols, list):
@@ -401,6 +520,14 @@ class Export:
         # accept "sectype" too.
         sectype = (export_block.values.get("SecType")
                    or export_block.values.get("sectype") or None)
+        # If sectype was only a single value (e.g. "sys") we end
+        # up with a string instead of a list of strings here
+        # https://github.com/ceph/go-ceph/issues/1097
+        if sectype is not None and not isinstance(sectype, list):
+            sectype = [sectype]
+
+        xprtsec = export_block.values.get('XprtSec')
+
         return cls(export_block.values['export_id'],
                    export_block.values['path'],
                    cluster_id,
@@ -413,10 +540,19 @@ class Export:
                    FSAL.from_fsal_block(fsal_blocks[0]),
                    [Client.from_client_block(client)
                     for client in client_blocks],
-                   sectype=sectype)
+                   sectype=sectype,
+                   xprtsec=xprtsec,
+                   qos_block=qos_block,
+                   kmip_key_id=export_block.values.get('kmip_key_id')
+                   )
 
     def to_export_block(self) -> RawBlock:
-        values = {
+        # if kmip_key_id is present, it should be first line of export block
+        values: Dict[str, Any] = {}
+        if self.kmip_key_id:
+            values['kmip_key_id'] = self.kmip_key_id
+
+        values.update({
             'export_id': self.export_id,
             'path': self.path,
             'pseudo': self.pseudo,
@@ -426,9 +562,11 @@ class Export:
             'security_label': self.security_label,
             'protocols': self.protocols,
             'transports': self.transports,
-        }
+        })
         if self.sectype:
             values['SecType'] = self.sectype
+        if self.xprtsec:
+            values['XprtSec'] = self.xprtsec
         result = RawBlock("EXPORT", values=values)
         result.blocks = [
             self.fsal.to_fsal_block()
@@ -436,10 +574,16 @@ class Export:
             client.to_client_block()
             for client in self.clients
         ]
+        if self.qos_block:
+            result.blocks.append(self.qos_block.to_qos_block())
         return result
 
     @classmethod
     def from_dict(cls, export_id: int, ex_dict: Dict[str, Any]) -> 'Export':
+        if ex_dict.get('qos_block'):
+            qos_block = QOS.from_dict(ex_dict.get('qos_block', {}))
+        else:
+            qos_block = None
         return cls(export_id,
                    ex_dict.get('path', '/'),
                    ex_dict['cluster_id'],
@@ -451,7 +595,11 @@ class Export:
                    ex_dict.get('transports', ['TCP']),
                    FSAL.from_dict(ex_dict.get('fsal', {})),
                    [Client.from_dict(client) for client in ex_dict.get('clients', [])],
-                   sectype=ex_dict.get("sectype"))
+                   sectype=ex_dict.get("sectype"),
+                   xprtsec=ex_dict.get('XprtSec'),
+                   qos_block=qos_block,
+                   kmip_key_id=ex_dict.get('kmip_key_id')
+                   )
 
     def to_dict(self) -> Dict[str, Any]:
         values = {
@@ -469,6 +617,12 @@ class Export:
         }
         if self.sectype:
             values['sectype'] = self.sectype
+        if self.xprtsec:
+            values['XprtSec'] = self.xprtsec
+        if self.qos_block:
+            values['qos_block'] = self.qos_block.to_dict()
+        if self.kmip_key_id:
+            values['kmip_key_id'] = self.kmip_key_id
         return values
 
     def validate(self, mgr: 'Module') -> None:
@@ -488,7 +642,7 @@ class Export:
             if p not in [3, 4]:
                 raise NFSInvalidOperation(f"Invalid protocol {p}")
 
-        valid_transport = ["UDP", "TCP"]
+        valid_transport = ["UDP", "TCP", "RDMA"]
         for trans in self.transports:
             if trans.upper() not in valid_transport:
                 raise NFSInvalidOperation(f'{trans} is not a valid transport protocol')
@@ -511,6 +665,8 @@ class Export:
 
         for st in (self.sectype or []):
             _validate_sec_type(st)
+        if self.xprtsec:
+            _validate_xprtsec_type(self.xprtsec)
 
     def __eq__(self, other: Any) -> bool:
         if not isinstance(other, Export):
@@ -520,14 +676,15 @@ class Export:
 
 def _format_block_body(block: RawBlock, depth: int = 0) -> str:
     conf_str = ""
-    for blo in block.blocks:
-        conf_str += format_block(blo, depth)
-
     for key, val in block.values.items():
         if val is not None:
             conf_str += _indentation(depth)
             fval = _format_val(block.block_name, key, val)
             conf_str += '{} = {};\n'.format(key, fval)
+
+    for blo in block.blocks:
+        conf_str += format_block(blo, depth)
+
     return conf_str
 
 

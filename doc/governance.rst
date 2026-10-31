@@ -1,10 +1,14 @@
 .. _governance:
 
-============
- Governance
-============
+====================================
+ The Ceph Steering Committee Bylaws
+====================================
 
-The Ceph open source community is guided by a few different groups.
+The Ceph project is established as Ceph a Series of LF Projects, LLC, and is
+governed by its :ref:`technical-charter`.  This document records the roles and
+procedures that the Ceph Steering Committee (CSC) has adopted under the
+Charter, and is part of the project's CONTRIBUTING file for the purposes of the
+Charter.  Where the two conflict, the Charter prevails.
 
 Key principles
 ==============
@@ -21,15 +25,21 @@ Bodies
 Ceph Executive Council
 ======================
 
+The CSC elects three Co-Chairs (Charter section 2.f), who together form the
+Ceph Executive Council.
+
 Responsibilities
 ----------------
 
+ * Preside over CSC meetings
  * Arbiter in cases where decisions cannot be reached by consensus
  * Distribute key responsibilities amongst themselves or others
  * Point of contact for the project
- * Representatives for Ceph foundation board meetings
+ * Representatives for Ceph foundation board meetings; one member is
+   designated for a one-year term as the primary contact with the Ceph
+   Foundation
  * Ensure things get done
-
+   
 Membership
 ----------
 
@@ -37,19 +47,24 @@ Membership
  * Elected by the steering committee
  * Candidates self-nominate or are nominated by other members
  * Discussion of how roles/responsibilities may be delegated
- * Ranked-choice vote by the steering committee
- * 2 year terms, with one member being elected in even years, and the
-   other two in odd years
+ * Ranked-choice vote by the steering committee.  If the top three
+   candidates are employed by the same company or group of related
+   companies, the lowest ranked of them is passed over for the next
+   candidate.
+ * 1 year terms with all members elected yearly, before the current terms
+   end
  * Members may resign at any time, and the steering committee may vote
    to appoint a replacement for the rest of their term
- * members must involve >1 employer
+ * Members may not all be employed by the same company or group of related
+   companies.  If that happens during a term, the steering committee decides
+   which of them steps down.
 
 Current Members
 ^^^^^^^^^^^^^^^
 
-* Dan van der Ster <daniel.vanderster@cern.ch>
-* Josh Durgin <jdurgin@redhat.com>
+* Dan van der Ster <dan.vanderster@clyso.com>
 * Neha Ojha <nojha@redhat.com>
+* Patrick Donnelly <pdonnell@ibm.com>
 
 .. _csc:
 
@@ -60,50 +75,79 @@ Responsibilities
 ----------------
 
  * Elect executive council
- * Amend governance model (by majority vote)
+ * Amend governance model by supermajority vote
  * Meet regularly to discuss and decide on tactical and strategic projects
    and improvements
+ * Hold an annual election
 
 Membership
 ----------
 
- * Developers, users, community members
- * Voting members can be nominated and added/removed by existing
-   members (2/3 majority)
+The CSC chooses its own voting members as described below.  This is the
+alternative to Maintainer-based membership allowed by Charter section 2.b.
+
+ * Members may be developers, users, or other community members
+ * Members can be nominated and added/removed by existing members via a
+   supermajority vote
  * Anyone may attend steering committee meetings as a non-voting participant
- * Existing Ceph Leadership Team members are grandfathered in
- * Membership reflected by an email list and on the Ceph website and
-   docs
+ * The list below is the authoritative membership; the CSC email list and
+   the Ceph website follow it
+ * Members may resign at any time by email to the Co-Chairs
+
+.. note:: A "supermajority" is a 2/3 majority of votes on a particular item
+          in an election. Abstaining does not bias a vote.
+
+Voting
+------
+
+The CSC aims to decide by consensus.  When a vote is needed it follows
+Charter section 3: one vote per member, quorum is half of all members, and a
+decision needs a majority of those present at a meeting, or of all members
+for an electronic vote.  A supermajority requirement above raises that bar;
+it never lowers it.
 
 Current Members
 ^^^^^^^^^^^^^^^
 
+ * Adam C. Emerson <aemerson@redhat.com>
  * Adam King <adking@redhat.com>
+ * Afreen Misbah <afreen@ibm.com>
+ * Anthony D'Atri <anthony.datri@gmail.com>
+ * Aviv Caro <Aviv.Caro@ibm.com>
+ * Bill Scales <bill_scales@uk.ibm.com>
  * Casey Bodley <cbodley@redhat.com>
- * Dan van der Ster <daniel.vanderster@cern.ch>
- * David Orman <ormandj@iland.com>
- * Ernesto Puerta <epuerta@redhat.com>
+ * Dan van der Ster <dan.vanderster@clyso.com>
+ * David Orman <ormandj@1111systems.com>
+ * Ernesto Puerta <epuertat@redhat.com>
+ * Gaurav Sitlani <gsitlani@ibm.com>
  * Gregory Farnum <gfarnum@redhat.com>
+ * Guillaume Abrioux <gabrioux@redhat.com>
  * Haomai Wang <haomai@xsky.com>
- * Ilya Dryomov <idryomov@redhat.com>
  * Igor Fedotov <igor.fedotov@croit.io>
- * Jeff Layton <jlayton@redhat.com>
+ * Ilya Dryomov <idryomov@redhat.com>
+ * Joseph Mundackal <jmundackal@bloomberg.net>
  * Josh Durgin <jdurgin@redhat.com>
- * João Eduardo Luis <joao@suse.de>
- * Ken Dreyer <kdreyer@redhat.com>
- * Mark Nelson <mnelson@redhat.com>
+ * João Eduardo Luis <joao@clyso.com>
+ * Kyle Bader <kbader@ibm.com>
+ * Laura Flores <lflores@ibm.com>
+ * Mark Nelson <mark.a.nelson@gmail.com>
+ * Matan Breizman <mbreizma@redhat.com>
  * Matt Benjamin <mbenjami@redhat.com>
  * Mike Perez <miperez@redhat.com>
- * Myoungwon Oh <myoungwon.oh@samsung.com>
+ * Myoungwon Oh <ohmyoungwon@gmail.com>
  * Neha Ojha <nojha@redhat.com>
- * Patrick Donnelly <pdonnell@redhat.com>
- * Sam Just <sjust@redhat.com>
- * Vikhyat Umrao <vikhyat@redhat.com>
+ * Patrick Donnelly <pdonnell@ibm.com>
+ * Radoslaw Zarzynski <rzarzyns@redhat.com>
+ * Redouane Kachach <rkachach@redhat.com>
+ * Sage McTaggart <sagemct@ibm.com>
+ * Venky Shankar <vshankar@redhat.com>
+ * Vikhyat Umrao <vikhyat@ibm.com>
  * Xie Xingguo <xie.xingguo@zte.com.cn>
- * Yehuda Sadeh <yehuda@redhat.com>
+ * Yaarit Hatuka <yhatuka@ibm.com>
+ * Yehuda Sadeh <yehuda@ui.com>
  * Yingxin Cheng <yingxin.cheng@intel.com>
  * Yuri Weinstein <yweinste@redhat.com>
- * Zac Dover <zac.dover@gmail.com>
+ * Zac Dover <zac.dover@proton.me>
 
 .. _ctl:
 

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -14,6 +15,7 @@
 
 #include "DecayCounter.h"
 #include "Formatter.h"
+#include "StackStringStream.h"
 
 #include "include/encoding.h"
 
@@ -54,26 +56,44 @@ void DecayCounter::dump(ceph::Formatter *f) const
   f->dump_float("halflife", rate.get_halflife());
 }
 
-void DecayCounter::generate_test_instances(std::list<DecayCounter*>& ls)
+std::list<DecayCounter> DecayCounter::generate_test_instances()
 {
-  DecayCounter *counter = new DecayCounter();
-  counter->val = 3.0;
-  ls.push_back(counter);
-  counter = new DecayCounter();
-  ls.push_back(counter);
+  std::list<DecayCounter>ls;
+
+  DecayCounter counter;
+  counter.val = 3.0;
+  ls.push_back(std::move(counter));
+  counter = DecayCounter();
+  ls.push_back(std::move(counter));
+  return ls;
 }
 
 void DecayCounter::decay(double delta) const
 {
   auto now = clock::now();
-  double el = std::chrono::duration<double>(now - last_decay).count();
 
-  // calculate new value
-  double newval = val * exp(el * rate.k) + delta;
+  // calculate new value.  The clock is coarse, so hits in quick succession
+  // land on the tick of the last one: then nothing has decayed, and since
+  // exp(0) is exactly 1 the result is the same without calling it.
+  double newval;
+  if (now == last_decay) {
+    newval = val + delta;
+  } else {
+    double el = std::chrono::duration<double>(now - last_decay).count();
+    newval = val * exp(el * rate.k) + delta;
+  }
   if (newval < .01) {
     newval = 0.0;
   }
 
   val = newval;
   last_decay = now;
+}
+
+std::ostream& operator<<(std::ostream& out, const DecayCounter& d) {
+  CachedStackStringStream css;
+  css->precision(2);
+  double val = d.get();
+  *css << "[C " << std::scientific << val << "]";
+  return out << css->strv();
 }

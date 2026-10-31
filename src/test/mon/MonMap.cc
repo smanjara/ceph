@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -98,7 +99,7 @@ TEST_F(MonMapTest, DISABLED_build_initial_config_from_dns) {
 
 
 
-  boost::intrusive_ptr<CephContext> cct = new CephContext(CEPH_ENTITY_TYPE_MON);
+  boost::intrusive_ptr<CephContext> cct(new CephContext(CEPH_ENTITY_TYPE_MON), false);
   cct->_conf.set_val("mon_dns_srv_name", "cephmon");
   MonMap monmap;
   int r = monmap.build_initial(cct.get(), false, std::cerr);
@@ -135,7 +136,7 @@ TEST_F(MonMapTest, DISABLED_build_initial_config_from_dns_fail) {
       .WillOnce(Return(0));
 #endif
 
-  boost::intrusive_ptr<CephContext> cct = new CephContext(CEPH_ENTITY_TYPE_MON);
+  boost::intrusive_ptr<CephContext> cct(new CephContext(CEPH_ENTITY_TYPE_MON), false);
   // using default value of mon_dns_srv_name option
   MonMap monmap;
   int r = monmap.build_initial(cct.get(), false, std::cerr);
@@ -196,7 +197,7 @@ TEST_F(MonMapTest, DISABLED_build_initial_config_from_dns_with_domain) {
 
 
 
-  boost::intrusive_ptr<CephContext> cct = new CephContext(CEPH_ENTITY_TYPE_MON);
+  boost::intrusive_ptr<CephContext> cct(new CephContext(CEPH_ENTITY_TYPE_MON), false);
   cct->_conf.set_val("mon_dns_srv_name", "cephmon_ceph.com");
   MonMap monmap;
   int r = monmap.build_initial(cct.get(), false, std::cerr);
@@ -221,7 +222,7 @@ TEST_F(MonMapTest, DISABLED_build_initial_config_from_dns_with_domain) {
 }
 
 TEST(MonMapBuildInitial, build_initial_mon_host_from_dns) {
-  boost::intrusive_ptr<CephContext> cct = new CephContext(CEPH_ENTITY_TYPE_MON);
+  boost::intrusive_ptr<CephContext> cct(new CephContext(CEPH_ENTITY_TYPE_MON), false);
   cct->_conf.set_val("mon_host", "ceph.io");
   MonMap monmap;
   int r = monmap.build_initial(cct.get(), false, std::cerr);
@@ -233,7 +234,7 @@ TEST(MonMapBuildInitial, build_initial_mon_host_from_dns) {
 }
 
 TEST(MonMapBuildInitial, build_initial_mon_host_from_dns_fail) {
-  boost::intrusive_ptr<CephContext> cct = new CephContext(CEPH_ENTITY_TYPE_MON);
+  boost::intrusive_ptr<CephContext> cct(new CephContext(CEPH_ENTITY_TYPE_MON), false);
   cct->_conf.set_val("mon_host", "ceph.noname");
   MonMap monmap;
   int r = monmap.build_initial(cct.get(), false, std::cerr);

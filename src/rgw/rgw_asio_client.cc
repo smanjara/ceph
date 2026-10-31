@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/asio/write.hpp>
@@ -18,7 +18,9 @@ ClientIO::ClientIO(parser_type& parser, bool is_ssl,
   : parser(parser), is_ssl(is_ssl),
     local_endpoint(local_endpoint),
     remote_endpoint(remote_endpoint),
-    txbuf(*this)
+    txbuf(*this),
+    keepalive(parser.keep_alive()),
+    expect100continue(parser.get()[beast::http::field::expect] == "100-continue")
 {
 }
 
@@ -39,49 +41,39 @@ int ClientIO::init_env(CephContext *cct)
     const auto& value = header->value();
 
     if (field == beast::http::field::content_length) {
-      env.set("CONTENT_LENGTH", value.to_string());
+      env.set("CONTENT_LENGTH", std::string(value));
       continue;
     }
     if (field == beast::http::field::content_type) {
-      env.set("CONTENT_TYPE", value.to_string());
+      env.set("CONTENT_TYPE", std::string(value));
       continue;
     }
 
-    static const std::string_view HTTP_{"HTTP_"};
+    static constexpr std::string_view HTTP_{"HTTP_"};
 
-    char buf[name.size() + HTTP_.size() + 1];
-    auto dest = std::copy(std::begin(HTTP_), std::end(HTTP_), buf);
-    for (auto src = name.begin(); src != name.end(); ++src, ++dest) {
-      if (*src == '-') {
-        *dest = '_';
-      } else if (*src == '_') {
-        *dest = '-';
-      } else {
-        *dest = std::toupper(*src);
-      }
-    }
-    *dest = '\0';
-
-    env.set(buf, value.to_string());
+    std::string key{HTTP_};
+    key.reserve(name.size() + HTTP_.size());
+    uppercase_dash_transform(name, std::back_inserter(key), true);
+    env.set(std::move(key), std::string(value));
   }
 
   int major = request.version() / 10;
   int minor = request.version() % 10;
   env.set("HTTP_VERSION", std::to_string(major) + '.' + std::to_string(minor));
 
-  env.set("REQUEST_METHOD", request.method_string().to_string());
+  env.set("REQUEST_METHOD", std::string(request.method_string()));
 
   // split uri from query
   auto uri = request.target();
   auto pos = uri.find('?');
   if (pos != uri.npos) {
     auto query = uri.substr(pos + 1);
-    env.set("QUERY_STRING", query.to_string());
+    env.set("QUERY_STRING", std::string(query));
     uri = uri.substr(0, pos);
   }
-  env.set("SCRIPT_URI", uri.to_string());
+  env.set("SCRIPT_URI", std::string(uri));
 
-  env.set("REQUEST_URI", request.target().to_string());
+  env.set("REQUEST_URI", std::string(request.target()));
 
   char port_buf[16];
   snprintf(port_buf, sizeof(port_buf), "%d", local_endpoint.port());
@@ -108,6 +100,17 @@ void ClientIO::flush()
 
 size_t ClientIO::send_status(int status, const char* status_name)
 {
+  if (expect100continue && !sent100continue) {
+    // a client expecting 100-continue is not required to wait for the
+    // '100 Continue' response before sending the request body. if we
+    // complete the request before sending 100 Continue (for example, due
+    // to an authorization error), we don't know whether any following
+    // bytes on this connection correspond to this request's body or the
+    // next request's header. so we must disable keepalive and require the
+    // client to use a new tcp connection for any subsequent requests
+    keepalive = false;
+  }
+
   static constexpr size_t STATUS_BUF_SIZE = 128;
 
   char statusbuf[STATUS_BUF_SIZE];
@@ -119,10 +122,11 @@ size_t ClientIO::send_status(int status, const char* status_name)
 
 size_t ClientIO::send_100_continue()
 {
-  const char HTTTP_100_CONTINUE[] = "HTTP/1.1 100 CONTINUE\r\n\r\n";
-  const size_t sent = txbuf.sputn(HTTTP_100_CONTINUE,
-                                  sizeof(HTTTP_100_CONTINUE) - 1);
+  const char HTTP_100_CONTINUE[] = "HTTP/1.1 100 CONTINUE\r\n\r\n";
+  const size_t sent = txbuf.sputn(HTTP_100_CONTINUE,
+                                  sizeof(HTTP_100_CONTINUE) - 1);
   flush();
+  sent100continue = true;
   return sent;
 }
 
@@ -148,7 +152,7 @@ size_t ClientIO::complete_header()
     sent += txbuf.sputn(timestr, strlen(timestr));
   }
 
-  if (parser.keep_alive()) {
+  if (keep_alive()) {
     constexpr char CONN_KEEP_ALIVE[] = "Connection: Keep-Alive\r\n";
     sent += txbuf.sputn(CONN_KEEP_ALIVE, sizeof(CONN_KEEP_ALIVE) - 1);
   } else {

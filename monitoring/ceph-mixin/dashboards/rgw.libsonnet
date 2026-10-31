@@ -1,5 +1,4 @@
 local g = import 'grafonnet/grafana.libsonnet';
-local u = import 'utils.libsonnet';
 
 (import 'utils.libsonnet') {
   'radosgw-sync-overview.json':
@@ -24,10 +23,10 @@ local u = import 'utils.libsonnet';
             '{{source_zone}}'
           ),
         ]
-      ) + { gridPos: { x: x, y: y, w: w, h: h } };
+      ) + { type: 'timeseries' } + { fieldConfig: { defaults: { unit: formatY1, custom: { fillOpacity: 8, showPoints: 'never' } } } } + { gridPos: { x: x, y: y, w: w, h: h } };
 
     $.dashboardSchema(
-      'RGW Sync Overview',
+      'Ceph Object - Sync Overview',
       '',
       'rgw-sync-overview',
       'now-1h',
@@ -47,6 +46,20 @@ local u = import 'utils.libsonnet';
         'dashboard'
       )
     )
+    .addLinks([
+      $.addLinkSchema(
+        asDropdown=true,
+        icon='external link',
+        includeVars=true,
+        keepTime=true,
+        tags=[],
+        targetBlank=false,
+        title='Browse Dashboards',
+        tooltip='',
+        type='dashboards',
+        url=''
+      ),
+    ])
     .addRequired(
       type='grafana', id='grafana', name='Grafana', version='5.0.0'
     )
@@ -58,21 +71,6 @@ local u = import 'utils.libsonnet';
     )
     .addTemplate(
       $.addClusterTemplate()
-    )
-    .addTemplate(
-      $.addJobTemplate()
-    )
-    .addTemplate(
-      $.addTemplateSchema(
-        'rgw_servers',
-        '$datasource',
-        'label_values(ceph_rgw_metadata{%(matchers)s}, ceph_daemon)' % $.matchers(),
-        1,
-        true,
-        1,
-        '',
-        'RGW Server'
-      )
     )
     .addPanels([
       RgwSyncOverviewPanel(
@@ -86,7 +84,7 @@ local u = import 'utils.libsonnet';
         7
       ),
       RgwSyncOverviewPanel(
-        'Replication (objects) from Source Zone',
+        'Replication Rate (Objects/s) from Source Zone',
         'short',
         'Objects/s',
         'ceph_data_sync_from_zone_fetch_bytes_count',
@@ -115,6 +113,45 @@ local u = import 'utils.libsonnet';
         8,
         7
       ),
+      $.timeSeriesPanel(
+        lineInterpolation='linear',
+        lineWidth=1,
+        drawStyle='line',
+        axisPlacement='auto',
+        title='Replication(Time) Delta per shard',
+        datasource='$datasource',
+        gridPosition={ h: 7, w: 16, x: 8, y: 7 },
+        fillOpacity=0,
+        pointSize=5,
+        showPoints='auto',
+        unit='s',
+        displayMode='table',
+        showLegend=true,
+        placement='right',
+        tooltip={ mode: 'multi', sort: 'desc' },
+        stackingMode='none',
+        spanNulls=false,
+        decimals=2,
+        thresholdsMode='absolute',
+        sortBy='Last *',
+        sortDesc=true
+      )
+      .addCalcs(['lastNotNull'])
+      .addThresholds([
+        { color: 'green', value: null },
+        { color: 'red', value: 80 },
+      ])
+      .addTargets(
+        [
+          $.addTargetSchema(
+            expr='rate(ceph_rgw_sync_delta_sync_delta{%(matchers)s}[$__rate_interval])',
+            datasource='$datasource',
+            instant=false,
+            legendFormat='{{instance_id}} - {{shard_id}}',
+            range=true,
+          ),
+        ]
+      ),
     ]),
   'radosgw-overview.json':
     local RgwOverviewPanel(
@@ -140,7 +177,7 @@ local u = import 'utils.libsonnet';
         {},
         title,
         description,
-        'null',
+        'null as zero',
         false,
         formatY1,
         formatY2,
@@ -158,10 +195,10 @@ local u = import 'utils.libsonnet';
       )
       .addTargets(
         [$.addTargetSchema(expr1, legendFormat1)]
-      ) + { gridPos: { x: x, y: y, w: w, h: h } };
+      ) + { type: 'timeseries' } + { fieldConfig: { defaults: { unit: formatY1, custom: { fillOpacity: 8, showPoints: 'never' } } } } + { gridPos: { x: x, y: y, w: w, h: h } };
 
     $.dashboardSchema(
-      'RGW Overview',
+      'Ceph Object - Overview',
       '',
       'WAkugZpiz',
       'now-1h',
@@ -181,6 +218,20 @@ local u = import 'utils.libsonnet';
         'dashboard'
       )
     )
+    .addLinks([
+      $.addLinkSchema(
+        asDropdown=true,
+        icon='external link',
+        includeVars=true,
+        keepTime=true,
+        tags=[],
+        targetBlank=false,
+        title='Browse Dashboards',
+        tooltip='',
+        type='dashboards',
+        url=''
+      ),
+    ])
     .addRequired(
       type='grafana', id='grafana', name='Grafana', version='5.0.0'
     )
@@ -197,9 +248,6 @@ local u = import 'utils.libsonnet';
       $.addClusterTemplate()
     )
     .addTemplate(
-      $.addJobTemplate()
-    )
-    .addTemplate(
       $.addTemplateSchema(
         'rgw_servers',
         '$datasource',
@@ -208,7 +256,7 @@ local u = import 'utils.libsonnet';
         true,
         1,
         '',
-        'RGW Server'
+        '.*'
       )
     )
     .addTemplate(
@@ -252,7 +300,7 @@ local u = import 'utils.libsonnet';
     .addPanels([
       $.addRowSchema(false,
                      true,
-                     'RGW Overview - All Gateways') +
+                     'Object Overview - All Gateways') +
       {
         gridPos: { x: 0, y: 0, w: 24, h: 1 },
       },
@@ -263,9 +311,9 @@ local u = import 'utils.libsonnet';
         'short',
         |||
           label_replace(
-            rate(ceph_rgw_get_initial_lat_sum{%(matchers)s}[$__rate_interval]) /
-              rate(ceph_rgw_get_initial_lat_count{%(matchers)s}[$__rate_interval]) *
-              on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{%(matchers)s},
+            rate(ceph_rgw_op_get_obj_lat_sum{%(matchers)s}[$__rate_interval]) /
+              rate(ceph_rgw_op_get_obj_lat_count{%(matchers)s}[$__rate_interval]) *
+              on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{ceph_daemon=~"$rgw_servers", %(matchers)s},
             "rgw_host", "$1", "ceph_daemon", "rgw.(.*)"
           )
         ||| % $.matchers(),
@@ -279,9 +327,9 @@ local u = import 'utils.libsonnet';
           $.addTargetSchema(
             |||
               label_replace(
-                rate(ceph_rgw_put_initial_lat_sum{%(matchers)s}[$__rate_interval]) /
-                  rate(ceph_rgw_put_initial_lat_count{%(matchers)s}[$__rate_interval]) *
-                  on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{%(matchers)s},
+                rate(ceph_rgw_op_put_obj_lat_sum{%(matchers)s}[$__rate_interval]) /
+                  rate(ceph_rgw_op_put_obj_lat_count{%(matchers)s}[$__rate_interval]) *
+                  on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{ceph_daemon=~"$rgw_servers", %(matchers)s},
                 "rgw_host", "$1", "ceph_daemon", "rgw.(.*)"
               )
             ||| % $.matchers(),
@@ -298,7 +346,7 @@ local u = import 'utils.libsonnet';
           sum by (rgw_host) (
             label_replace(
               rate(ceph_rgw_req{%(matchers)s}[$__rate_interval]) *
-                on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{%(matchers)s},
+                on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{ceph_daemon=~"$rgw_servers", %(matchers)s},
               "rgw_host", "$1", "ceph_daemon", "rgw.(.*)"
             )
           )
@@ -316,9 +364,9 @@ local u = import 'utils.libsonnet';
         'short',
         |||
           label_replace(
-            rate(ceph_rgw_get_initial_lat_sum{%(matchers)s}[$__rate_interval]) /
-              rate(ceph_rgw_get_initial_lat_count{%(matchers)s}[$__rate_interval]) *
-              on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{%(matchers)s},
+            rate(ceph_rgw_op_get_obj_lat_sum{%(matchers)s}[$__rate_interval]) /
+              rate(ceph_rgw_op_get_obj_lat_count{%(matchers)s}[$__rate_interval]) *
+              on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{ceph_daemon=~"$rgw_servers", %(matchers)s},
             "rgw_host", "$1", "ceph_daemon", "rgw.(.*)"
           )
         ||| % $.matchers(),
@@ -333,14 +381,14 @@ local u = import 'utils.libsonnet';
         'Total bytes transferred in/out of all radosgw instances within the cluster',
         'bytes',
         'short',
-        'sum(rate(ceph_rgw_get_b{%(matchers)s}[$__rate_interval]))' % $.matchers(),
+        'sum(rate(ceph_rgw_op_get_obj_bytes{%(matchers)s}[$__rate_interval]))' % $.matchers(),
         'GETs',
         0,
         8,
         8,
         6
       ).addTargets(
-        [$.addTargetSchema('sum(rate(ceph_rgw_put_b{%(matchers)s}[$__rate_interval]))' % $.matchers(),
+        [$.addTargetSchema('sum(rate(ceph_rgw_op_put_obj_bytes{%(matchers)s}[$__rate_interval]))' % $.matchers(),
                            'PUTs')]
       ),
       RgwOverviewPanel(
@@ -350,9 +398,9 @@ local u = import 'utils.libsonnet';
         'short',
         |||
           label_replace(sum by (instance_id) (
-            rate(ceph_rgw_get_b{%(matchers)s}[$__rate_interval]) +
-              rate(ceph_rgw_put_b{%(matchers)s}[$__rate_interval])) *
-              on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{%(matchers)s},
+            rate(ceph_rgw_op_get_obj_bytes{%(matchers)s}[$__rate_interval]) +
+              rate(ceph_rgw_op_put_obj_bytes{%(matchers)s}[$__rate_interval])) *
+              on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{ceph_daemon=~"$rgw_servers", %(matchers)s},
             "rgw_host", "$1", "ceph_daemon", "rgw.(.*)"
           )
         ||| % $.matchers(),
@@ -369,9 +417,9 @@ local u = import 'utils.libsonnet';
         'short',
         |||
           label_replace(
-            rate(ceph_rgw_put_initial_lat_sum{%(matchers)s}[$__rate_interval]) /
-              rate(ceph_rgw_put_initial_lat_count{%(matchers)s}[$__rate_interval]) *
-              on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{%(matchers)s},
+            rate(ceph_rgw_op_put_obj_lat_sum{%(matchers)s}[$__rate_interval]) /
+              rate(ceph_rgw_op_put_obj_lat_count{%(matchers)s}[$__rate_interval]) *
+              on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{ceph_daemon=~"$rgw_servers", %(matchers)s},
             "rgw_host", "$1", "ceph_daemon", "rgw.(.*)"
           )
         ||| % $.matchers(),
@@ -382,7 +430,7 @@ local u = import 'utils.libsonnet';
         6
       ),
       $.addRowSchema(
-        false, true, 'RGW Overview - HAProxy Metrics'
+        false, true, 'Object Overview - HAProxy Metrics'
       ) + { gridPos: { x: 0, y: 12, w: 9, h: 12 } },
       RgwOverviewPanel(
         'Total responses by HTTP code',
@@ -640,6 +688,46 @@ local u = import 'utils.libsonnet';
           transform: 'negative-Y',
         },
       ]),
+      $.addRowSchema(false,
+                     true,
+                     'Object Overview - Bucket Notification') +
+      {
+        gridPos: { x: 0, y: 27, w: 24, h: 1 },
+      },
+      RgwOverviewPanel(
+        'Pending Notifications by Topic',
+        'Shows the number of pending notifications in each Object topic queue, indicating how many messages are waiting to be delivered',
+        '',
+        'short',
+        |||
+          (
+           ceph_rgw_topic_persistent_topic_len
+          )
+        |||,
+        '{{topic}}',
+        0,
+        28,
+        12,
+        8
+      )
+      + { options: { legend: { calcs: ['lastNotNull'], displayMode: 'list', placement: 'right', showLegend: true, sortDesc: true } } },
+      RgwOverviewPanel(
+        'Pending Notifications Size by Topic',
+        'Shows the total size of pending notifications stored per Object topic, reflecting how much data is waiting to be delivered.',
+        'bytes',
+        'short',
+        |||
+          (
+           ceph_rgw_topic_persistent_topic_size
+          )
+        |||,
+        '{{topic}}',
+        12,
+        28,
+        12,
+        8
+      )
+      + { options: { legend: { calcs: ['lastNotNull'], displayMode: 'list', placement: 'right', showLegend: true, sortDesc: true } } },
     ]),
   'radosgw-detail.json':
     local RgwDetailsPanel(aliasColors,
@@ -658,7 +746,7 @@ local u = import 'utils.libsonnet';
       $.graphPanelSchema(aliasColors,
                          title,
                          description,
-                         'null',
+                         'null as zero',
                          false,
                          formatY1,
                          formatY2,
@@ -669,10 +757,10 @@ local u = import 'utils.libsonnet';
                          '$datasource')
       .addTargets(
         [$.addTargetSchema(expr1, legendFormat1), $.addTargetSchema(expr2, legendFormat2)]
-      ) + { gridPos: { x: x, y: y, w: w, h: h } };
+      ) + { type: 'timeseries' } + { fieldConfig: { defaults: { unit: formatY1, custom: { fillOpacity: 8, showPoints: 'never' } } } } + { gridPos: { x: x, y: y, w: w, h: h } };
 
     $.dashboardSchema(
-      'RGW Instance Detail',
+      'Ceph Object - Instance Details',
       '',
       'x5ARzZtmk',
       'now-1h',
@@ -692,6 +780,20 @@ local u = import 'utils.libsonnet';
         'dashboard'
       )
     )
+    .addLinks([
+      $.addLinkSchema(
+        asDropdown=true,
+        icon='external link',
+        includeVars=true,
+        keepTime=true,
+        tags=[],
+        targetBlank=false,
+        title='Browse Dashboards',
+        tooltip='',
+        type='dashboards',
+        url=''
+      ),
+    ])
     .addRequired(
       type='grafana', id='grafana', name='Grafana', version='5.0.0'
     )
@@ -714,9 +816,6 @@ local u = import 'utils.libsonnet';
       $.addClusterTemplate()
     )
     .addTemplate(
-      $.addJobTemplate()
-    )
-    .addTemplate(
       $.addTemplateSchema('rgw_servers',
                           '$datasource',
                           'label_values(ceph_rgw_metadata{%(matchers)s}, ceph_daemon)' % $.matchers(),
@@ -736,15 +835,15 @@ local u = import 'utils.libsonnet';
         'short',
         |||
           sum by (instance_id) (
-            rate(ceph_rgw_get_initial_lat_sum{%(matchers)s}[$__rate_interval]) /
-              rate(ceph_rgw_get_initial_lat_count{%(matchers)s}[$__rate_interval])
-          ) * on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{%(matchers)s, ceph_daemon=~"$rgw_servers"}
+            rate(ceph_rgw_op_get_obj_lat_sum{%(matchers)s}[$__rate_interval]) /
+              rate(ceph_rgw_op_get_obj_lat_count{%(matchers)s}[$__rate_interval])
+          ) * on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{ceph_daemon=~"$rgw_servers", %(matchers)s}
         ||| % $.matchers(),
         |||
           sum by (instance_id) (
-            rate(ceph_rgw_put_initial_lat_sum{%(matchers)s}[$__rate_interval]) /
-              rate(ceph_rgw_put_initial_lat_count{%(matchers)s}[$__rate_interval])
-          ) * on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{%(matchers)s, ceph_daemon=~"$rgw_servers"}
+            rate(ceph_rgw_op_put_obj_lat_sum{%(matchers)s}[$__rate_interval]) /
+              rate(ceph_rgw_op_put_obj_lat_count{%(matchers)s}[$__rate_interval])
+          ) * on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{ceph_daemon=~"$rgw_servers", %(matchers)s}
         ||| % $.matchers(),
         'GET {{ceph_daemon}}',
         'PUT {{ceph_daemon}}',
@@ -760,13 +859,13 @@ local u = import 'utils.libsonnet';
         'bytes',
         'short',
         |||
-          rate(ceph_rgw_get_b{%(matchers)s}[$__rate_interval]) *
-            on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{%(matchers)s, ceph_daemon=~"$rgw_servers"}
+          rate(ceph_rgw_op_get_obj_bytes{%(matchers)s}[$__rate_interval]) *
+            on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{ceph_daemon=~"$rgw_servers", %(matchers)s}
         ||| % $.matchers(),
         |||
-          rate(ceph_rgw_put_b{%(matchers)s}[$__rate_interval]) *
+          rate(ceph_rgw_op_put_obj_bytes{%(matchers)s}[$__rate_interval]) *
             on (instance_id) group_left (ceph_daemon)
-            ceph_rgw_metadata{%(matchers)s, ceph_daemon=~"$rgw_servers"}
+            ceph_rgw_metadata{ceph_daemon=~"$rgw_servers", %(matchers)s}
         ||| % $.matchers(),
         'GETs {{ceph_daemon}}',
         'PUTs {{ceph_daemon}}',
@@ -789,11 +888,11 @@ local u = import 'utils.libsonnet';
         'short',
         |||
           rate(ceph_rgw_failed_req{%(matchers)s}[$__rate_interval]) *
-            on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{%(matchers)s,ceph_daemon=~"$rgw_servers"}
+            on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{ceph_daemon=~"$rgw_servers", %(matchers)s}
         ||| % $.matchers(),
         |||
           rate(ceph_rgw_get{%(matchers)s}[$__rate_interval]) *
-            on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{%(matchers)s, ceph_daemon=~"$rgw_servers"}
+            on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{ceph_daemon=~"$rgw_servers", %(matchers)s}
         ||| % $.matchers(),
         'Requests Failed {{ceph_daemon}}',
         'GETs {{ceph_daemon}}',
@@ -807,7 +906,7 @@ local u = import 'utils.libsonnet';
           $.addTargetSchema(
             |||
               rate(ceph_rgw_put{%(matchers)s}[$__rate_interval]) *
-                on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{%(matchers)s, ceph_daemon=~"$rgw_servers"}
+                on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{ceph_daemon=~"$rgw_servers", %(matchers)s}
             ||| % $.matchers(),
             'PUTs {{ceph_daemon}}'
           ),
@@ -819,39 +918,76 @@ local u = import 'utils.libsonnet';
                     rate(ceph_rgw_get{%(matchers)s}[$__rate_interval]) +
                       rate(ceph_rgw_put{%(matchers)s}[$__rate_interval])
                   )
-              ) * on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{%(matchers)s, ceph_daemon=~"$rgw_servers"}
+              ) * on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{ceph_daemon=~"$rgw_servers", %(matchers)s}
             ||| % $.matchers(),
             'Other {{ceph_daemon}}'
           ),
         ]
       ),
-      $.simplePieChart(
-        {
-          GETs: '#7eb26d',
-          'Other (HEAD,POST,DELETE)': '#447ebc',
-          PUTs: '#eab839',
-          Requests: '#3f2b5b',
-          Failures: '#bf1b00',
-        }, '', 'Workload Breakdown'
-      )
+
+      $.pieChartPanel('Workload Breakdown',
+                      '',
+                      '$datasource',
+                      { x: 20, y: 1, w: 4, h: 8 },
+                      'table',
+                      'bottom',
+                      true,
+                      [],
+                      { mode: 'single', sort: 'none' },
+                      'pie',
+                      ['percent', 'value'],
+                      'palette-classic',
+                      overrides=[
+                        {
+                          matcher: { id: 'byName', options: 'Failures' },
+                          properties: [
+                            { id: 'color', value: { mode: 'fixed', fixedColor: '#bf1b00' } },
+                          ],
+                        },
+                        {
+                          matcher: { id: 'byName', options: 'GETs' },
+                          properties: [
+                            { id: 'color', value: { mode: 'fixed', fixedColor: '#7eb26d' } },
+                          ],
+                        },
+                        {
+                          matcher: { id: 'byName', options: 'Other (HEAD,POST,DELETE)' },
+                          properties: [
+                            { id: 'color', value: { mode: 'fixed', fixedColor: '#447ebc' } },
+                          ],
+                        },
+                        {
+                          matcher: { id: 'byName', options: 'PUTs' },
+                          properties: [
+                            { id: 'color', value: { mode: 'fixed', fixedColor: '#eab839' } },
+                          ],
+                        },
+                        {
+                          matcher: { id: 'byName', options: 'Requests' },
+                          properties: [
+                            { id: 'color', value: { mode: 'fixed', fixedColor: '#3f2b5b' } },
+                          ],
+                        },
+                      ],
+                      reduceOptions={ values: false, calcs: ['lastNotNull'], fields: '' })
       .addTarget($.addTargetSchema(
         |||
           rate(ceph_rgw_failed_req{%(matchers)s}[$__rate_interval]) *
-            on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{%(matchers)s, ceph_daemon=~"$rgw_servers"}
+            on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{ceph_daemon=~"$rgw_servers", %(matchers)s}
         ||| % $.matchers(),
         'Failures {{ceph_daemon}}'
       ))
       .addTarget($.addTargetSchema(
         |||
           rate(ceph_rgw_get{%(matchers)s}[$__rate_interval]) *
-            on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{%(matchers)s, ceph_daemon=~"$rgw_servers"}
+            on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{ceph_daemon=~"$rgw_servers", %(matchers)s}
         ||| % $.matchers(),
         'GETs {{ceph_daemon}}'
       ))
       .addTarget($.addTargetSchema(
         |||
           rate(ceph_rgw_put{%(matchers)s}[$__rate_interval]) *
-            on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{%(matchers)s, ceph_daemon=~"$rgw_servers"}
+            on (instance_id) group_left (ceph_daemon) ceph_rgw_metadata{ceph_daemon=~"$rgw_servers", %(matchers)s}
         ||| % $.matchers(),
         'PUTs {{ceph_daemon}}'
       ))
@@ -864,9 +1000,9 @@ local u = import 'utils.libsonnet';
                   rate(ceph_rgw_put{%(matchers)s}[$__rate_interval])
               )
           ) * on (instance_id) group_left (ceph_daemon)
-            ceph_rgw_metadata{%(matchers)s, ceph_daemon=~"$rgw_servers"}
+            ceph_rgw_metadata{ceph_daemon=~"$rgw_servers", %(matchers)s}
         ||| % $.matchers(),
         'Other (DELETE,LIST) {{ceph_daemon}}'
-      )) + { gridPos: { x: 20, y: 1, w: 4, h: 8 } },
+      )),
     ]),
 }

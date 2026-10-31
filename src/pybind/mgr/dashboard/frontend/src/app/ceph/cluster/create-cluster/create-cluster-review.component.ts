@@ -1,18 +1,22 @@
-import { Component, OnInit } from '@angular/core';
+import { Component, OnInit, ViewEncapsulation } from '@angular/core';
 
 import _ from 'lodash';
 
 import { CephServiceService } from '~/app/shared/api/ceph-service.service';
 import { HostService } from '~/app/shared/api/host.service';
 import { OsdService } from '~/app/shared/api/osd.service';
+import { CdTableFetchDataContext } from '~/app/shared/models/cd-table-fetch-data-context';
 import { CephServiceSpec } from '~/app/shared/models/service.interface';
 import { DimlessBinaryPipe } from '~/app/shared/pipes/dimless-binary.pipe';
+import { AuthStorageService } from '~/app/shared/services/auth-storage.service';
 import { WizardStepsService } from '~/app/shared/services/wizard-steps.service';
 
 @Component({
   selector: 'cd-create-cluster-review',
   templateUrl: './create-cluster-review.component.html',
-  styleUrls: ['./create-cluster-review.component.scss']
+  styleUrls: ['./create-cluster-review.component.scss'],
+  standalone: false,
+  encapsulation: ViewEncapsulation.None
 })
 export class CreateClusterReviewComponent implements OnInit {
   hosts: object[] = [];
@@ -22,13 +26,16 @@ export class CreateClusterReviewComponent implements OnInit {
   services: Array<CephServiceSpec> = [];
   totalCPUs = 0;
   totalMemory = 0;
+  deploymentDescText: string = '-';
+  isSimpleDeployment = true;
 
   constructor(
     public wizardStepsService: WizardStepsService,
     public cephServiceService: CephServiceService,
     private dimlessBinary: DimlessBinaryPipe,
     public hostService: HostService,
-    private osdService: OsdService
+    private osdService: OsdService,
+    private authStorageService: AuthStorageService
   ) {}
 
   ngOnInit() {
@@ -39,7 +46,9 @@ export class CreateClusterReviewComponent implements OnInit {
     let dbDevices = 0;
     let dbDeviceCapacity = 0;
 
-    this.hostService.list('true').subscribe((resp: object[]) => {
+    this.isSimpleDeployment = this.osdService.isDeployementModeSimple;
+    const hostContext = new CdTableFetchDataContext(() => undefined);
+    this.hostService.list(hostContext.toParams(), 'true').subscribe((resp: object[]) => {
       this.hosts = resp;
       this.hostsCount = this.hosts.length;
       _.forEach(this.hosts, (hostKey) => {
@@ -63,6 +72,21 @@ export class CreateClusterReviewComponent implements OnInit {
     if (this.osdService.osdDevices['db']) {
       dbDevices = this.osdService.osdDevices['db']?.length;
       dbDeviceCapacity = this.osdService.osdDevices['db']['capacity'];
+    }
+
+    if (this.isSimpleDeployment && this.authStorageService.getPermissions().osd?.read) {
+      this.osdService.getDeploymentOptions().subscribe((optionsObj) => {
+        if (!_.isEmpty(optionsObj)) {
+          Object.keys(optionsObj.options).forEach((option) => {
+            if (
+              this.osdService.selectedFormValues &&
+              this.osdService.selectedFormValues.get('deploymentOption').value === option
+            ) {
+              this.deploymentDescText = optionsObj.options[option].desc;
+            }
+          });
+        }
+      });
     }
 
     this.totalDevices = dataDevices + walDevices + dbDevices;

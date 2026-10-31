@@ -16,9 +16,11 @@ Contributing to Ceph: A Guide for Developers
    What is Merged and When <merging>
    Issue tracker <issue-tracker>
    Basic workflow <basic-workflow>
+   Building and testing a CVE fix <cve>
    Tests: Unit Tests <tests-unit-tests>
    Tests: Integration Tests (Teuthology) <testing_integration_tests/index>
    Tests: Running Tests (Locally) <running-tests-locally>
+   Tests: Windows <tests-windows>
    Ceph Dashboard Developer Documentation (formerly HACKING.rst) <dash-devel>
    Tracing Developer Documentation <jaegertracing>
    Cephadm Developer Documentation  <../cephadm/index>

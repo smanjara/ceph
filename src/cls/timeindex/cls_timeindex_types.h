@@ -1,12 +1,12 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_CLS_TIMEINDEX_TYPES_H
 #define CEPH_CLS_TIMEINDEX_TYPES_H
 
+#include "common/Formatter.h"
 #include "include/encoding.h"
 #include "include/types.h"
-
 #include "include/utime.h"
 
 class JSONObj;
@@ -39,7 +39,7 @@ struct cls_timeindex_entry {
   }
 
   void dump(ceph::Formatter *f) const;
-  static void generate_test_instances(std::list<cls_timeindex_entry*>& o);
+  static std::list<cls_timeindex_entry> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(cls_timeindex_entry)
 

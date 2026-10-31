@@ -14,11 +14,12 @@ from ..security import Scope
 from ..services.cephfs import CephFS
 from ..services.exception import DashboardException, handle_cephfs_error, \
     serialize_dashboard_exception
+from ..tools import str_to_bool
 from . import APIDoc, APIRouter, BaseController, Endpoint, EndpointDoc, \
     ReadPermission, RESTController, Task, UIRouter
 from ._version import APIVersion
 
-logger = logging.getLogger('controllers.nfs')
+logger = logging.getLogger(__name__)
 
 
 class NFSException(DashboardException):
@@ -48,6 +49,28 @@ EXPORT_SCHEMA = {
         'access_type': (str, 'Client access type'),
         'squash': (str, 'Client squash policy')
     }], 'List of client configurations'),
+}
+
+
+CLUSTER_SCHEMA = {
+    'name': (str, 'Cluster identifier'),
+    'deployment_type': (str, 'Deployment type (standalone, active-active, or active-passive)'),
+    'virtual_ip': (str, 'Virtual IP address', True),
+    'backend': ([{
+        'hostname': (str, 'Backend hostname'),
+        'ip': (str, 'Backend IP address'),
+        'port': (int, 'Backend port', True),
+        'status': (str, 'Backend daemon status', True)
+    }], 'List of NFS backend daemons'),
+    'placement': ({
+        'hosts': ([str], 'List of hosts', True),
+        'count': (int, 'Number of daemons', True),
+        'label': (str, 'Host label', True)
+    }, 'Orchestrator placement specification'),
+    'enable_rdma': (bool, 'Whether RDMA transport is enabled for the cluster'),
+    'ingress_mode': (str, 'Ingress mode', True),
+    'port': (int, 'Ingress port', True),
+    'monitor_port': (int, 'Monitor port', True),
 }
 
 
@@ -87,7 +110,17 @@ def NfsTask(name, metadata, wait_for):  # noqa: N802
 class NFSGaneshaCluster(RESTController):
     @ReadPermission
     @RESTController.MethodMap(version=APIVersion.EXPERIMENTAL)
-    def list(self):
+    @EndpointDoc("List NFS-Ganesha clusters",
+                 parameters={
+                     'info': (bool, 'If true, return detailed cluster info including '
+                              'backends, placement, and enable_rdma')
+                 },
+                 responses={200: [CLUSTER_SCHEMA]})
+    def list(self, info: Optional[bool] = False):
+        if str_to_bool(info):
+            return [
+                {"name": key, **value} for key, value in mgr.remote('nfs', 'cluster_info').items()
+            ]
         return mgr.remote('nfs', 'cluster_ls')
 
 
@@ -109,11 +142,11 @@ class NFSGaneshaExports(RESTController):
         export['fsal'] = schema_fsal_info
         return export
 
-    @EndpointDoc("List all NFS-Ganesha exports",
+    @EndpointDoc("List all or cluster specific NFS-Ganesha exports",
                  responses={200: [EXPORT_SCHEMA]})
-    def list(self) -> List[Dict[str, Any]]:
+    def list(self, cluster_id=None) -> List[Dict[str, Any]]:
         exports = []
-        for export in mgr.remote('nfs', 'export_ls'):
+        for export in mgr.remote('nfs', 'export_ls', cluster_id, True):
             exports.append(self._get_schema_export(export))
 
         return exports
@@ -127,10 +160,6 @@ class NFSGaneshaExports(RESTController):
     @RESTController.MethodMap(version=APIVersion(2, 0))  # type: ignore
     def create(self, path, cluster_id, pseudo, access_type,
                squash, security_label, protocols, transports, fsal, clients) -> Dict[str, Any]:
-        export_mgr = mgr.remote('nfs', 'fetch_nfs_export_obj')
-        if export_mgr.get_export_by_pseudo(cluster_id, pseudo):
-            raise DashboardException(msg=f'Pseudo {pseudo} is already in use.',
-                                     component='nfs')
         if hasattr(fsal, 'user_id'):
             fsal.pop('user_id')  # mgr/nfs does not let you customize user_id
         raw_ex = {
@@ -145,11 +174,13 @@ class NFSGaneshaExports(RESTController):
             'fsal': fsal,
             'clients': clients
         }
-        ret, _, err = export_mgr.apply_export(cluster_id, json.dumps(raw_ex))
-        if ret == 0:
-            return self._get_schema_export(
-                export_mgr.get_export_by_pseudo(cluster_id, pseudo))
-        raise NFSException(f"Export creation failed {err}")
+        result = mgr.remote('nfs', 'export_apply', cluster_id, json.dumps(raw_ex))
+        if result.has_error:
+            raise NFSException(
+                result.mgr_status_value() or 'Failed to create export'
+            )
+
+        return self._get_schema_export(raw_ex)
 
     @EndpointDoc("Get an NFS-Ganesha export",
                  parameters={
@@ -191,12 +222,18 @@ class NFSGaneshaExports(RESTController):
             'clients': clients
         }
 
-        export_mgr = mgr.remote('nfs', 'fetch_nfs_export_obj')
-        ret, _, err = export_mgr.apply_export(cluster_id, json.dumps(raw_ex))
-        if ret == 0:
-            return self._get_schema_export(
-                export_mgr.get_export_by_pseudo(cluster_id, pseudo))
-        raise NFSException(f"Failed to update export: {err}")
+        existing_export = mgr.remote('nfs', 'export_get', cluster_id, export_id)
+        if existing_export and raw_ex:
+            ss_export_fsal = existing_export.get('fsal', {})
+            for key, value in ss_export_fsal.items():
+                raw_ex['fsal'][key] = value
+
+        result = mgr.remote('nfs', 'export_apply', cluster_id, json.dumps(raw_ex))
+        if result.has_error:
+            raise NFSException(
+                result.mgr_status_value() or 'Failed to update export'
+            )
+        return self._get_schema_export(raw_ex)
 
     @NfsTask('delete', {'cluster_id': '{cluster_id}',
                         'export_id': '{export_id}'}, 2.0)

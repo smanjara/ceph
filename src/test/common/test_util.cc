@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -31,12 +32,12 @@ TEST(util, collect_sys_info)
 
   map<string, string> sys_info;
 
-  CephContext *cct = (new CephContext(CEPH_ENTITY_TYPE_CLIENT))->get();
-  collect_sys_info(&sys_info, cct);
+  boost::intrusive_ptr<CephContext> cct{new CephContext(CEPH_ENTITY_TYPE_CLIENT), false};
+
+  collect_sys_info(&sys_info, cct.get());
 
   ASSERT_TRUE(sys_info.find("distro") != sys_info.end());
   ASSERT_TRUE(sys_info.find("distro_description") != sys_info.end());
-
-  cct->put();
 }
+
 #endif
