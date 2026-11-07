@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_OSD_INTERNAL_TYPES_H
 #define CEPH_OSD_INTERNAL_TYPES_H
@@ -7,6 +7,7 @@
 #include "osd_types.h"
 #include "OpRequest.h"
 #include "object_state.h"
+#include "Watch.h" // for WatchRef
 
 /*
   * keep tabs on object modifications that are in flight.
@@ -25,6 +26,14 @@ struct SnapSetContext {
   explicit SnapSetContext(const hobject_t& o) :
     oid(o), ref(0), registered(false), exists(true) { }
 };
+
+inline std::ostream& operator<<(std::ostream& out, const SnapSetContext& ssc)
+{
+  return out << "ssc(" << ssc.oid << " snapset: " << ssc.snapset
+             << " ref: " << ssc.ref << " registered: "
+             << ssc.registered << " exists: " << ssc.exists << ")";
+}
+
 struct ObjectContext;
 typedef std::shared_ptr<ObjectContext> ObjectContextRef;
 
@@ -180,9 +189,8 @@ public:
   }
 
   /// in-progress copyfrom ops for this object
-  bool blocked:1;
-  bool requeue_scrub_on_unblock:1;    // true if we need to requeue scrub on unblock
-
+  bool blocked;
+  bool requeue_scrub_on_unblock;    // true if we need to requeue scrub on unblock
 };
 
 inline std::ostream& operator<<(std::ostream& out, const ObjectState& obs)

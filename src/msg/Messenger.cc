@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <netdb.h>
 
@@ -10,6 +10,24 @@
 
 #include "msg/async/AsyncMessenger.h"
 
+#define dout_subsys ceph_subsys_ms
+
+std::vector<std::string> Messenger::get_tracked_keys() const noexcept {
+  static constexpr auto as_sv = std::to_array<std::string_view>({
+      "ms_shutdown_timeout",
+  });
+  static_assert(std::is_sorted(as_sv.begin(), as_sv.end()),
+                "keys are not sorted!");
+  return {as_sv.begin(), as_sv.end()};
+}
+
+void Messenger::handle_conf_change(const ConfigProxy& conf, const std::set<std::string>& changed) {
+  ldout(cct, 2) << __func__ << ": " << changed << dendl;
+  if (changed.count("ms_shutdown_timeout")) {
+    shutdown_timeout = conf.get_val<std::chrono::milliseconds>("ms_shutdown_timeout");
+  }
+}
+
 Messenger *Messenger::create_client_messenger(CephContext *cct, std::string lname)
 {
   std::string public_msgr_type = cct->_conf->ms_public_type.empty() ? cct->_conf.get_val<std::string>("ms_type") : cct->_conf->ms_public_type;
@@ -18,18 +36,13 @@ Messenger *Messenger::create_client_messenger(CephContext *cct, std::string lnam
 			   std::move(lname), nonce);
 }
 
-uint64_t Messenger::get_pid_nonce()
-{
-  uint64_t nonce = getpid();
-  if (nonce == 1 || getenv("CEPH_USE_RANDOM_NONCE")) {
-    // we're running in a container; use a random number instead!
-    nonce = ceph::util::generate_random_number<uint64_t>();
-  }
-  return nonce;
-}
-
 uint64_t Messenger::get_random_nonce()
 {
+  // in the past the logic here was more complex -- we were trying
+  // to use the PID but, in the containerized world, it turned out
+  // unreliable. To deal with this, we started guessing whether we
+  // run in a container or not, and of course, got manual lever to
+  // intervene if guessed wrong (CEPH_USE_RANDOM_NONCE).
   return ceph::util::generate_random_number<uint64_t>();
 }
 
@@ -63,6 +76,13 @@ Messenger::Messenger(CephContext *cct_, entity_name_t w)
 {
   auth_registry.refresh_config();
   comp_registry.refresh_config();
+  cct->_conf.add_observer(this);
+  shutdown_timeout = cct->_conf.get_val<std::chrono::milliseconds>("ms_shutdown_timeout");
+}
+
+Messenger::~Messenger()
+{
+  cct->_conf.remove_observer(this);
 }
 
 void Messenger::set_endpoint_addr(const entity_addr_t& a,
@@ -104,8 +124,9 @@ int get_default_crc_flags(const ConfigProxy& conf)
   return r;
 }
 
-int Messenger::bindv(const entity_addrvec_t& addrs)
+int Messenger::bindv(const entity_addrvec_t& bind_addrs,
+                     std::optional<entity_addrvec_t> public_addrs)
 {
-  return bind(addrs.legacy_addr());
+  return bind(bind_addrs.legacy_addr(), std::move(public_addrs));
 }
 

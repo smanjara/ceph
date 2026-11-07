@@ -8,7 +8,7 @@ CephFS health messages
 Cluster health checks
 =====================
 
-The Ceph monitor daemons will generate health messages in response
+The Ceph Monitor daemons will generate health messages in response
 to certain states of the file system map structure (and the enclosed MDS maps).
 
 Message: mds rank(s) *ranks* have failed
@@ -22,23 +22,23 @@ its stored metadata, and cannot start again until it is repaired.
 
 Message: mds cluster is degraded
 Description: One or more MDS ranks are not currently up and running, clients
-may pause metadata IO until this situation is resolved.  This includes
+may pause metadata I/O until this situation is resolved.  This includes
 ranks being failed or damaged, and additionally includes ranks
 which are running on an MDS but have not yet made it to the *active*
 state (e.g. ranks currently in *replay* state).
 
 Message: mds *names* are laggy
 Description: The named MDS daemons have failed to send beacon messages
-to the monitor for at least ``mds_beacon_grace`` (default 15s), while
+to the Monitor for at least ``mds_beacon_grace`` (default 15s), while
 they are supposed to send beacon messages every ``mds_beacon_interval``
-(default 4s).  The daemons may have crashed.  The Ceph monitor will
+(default 4s).  The daemons may have crashed.  The Ceph Monitor will
 automatically replace laggy daemons with standbys if any are available.
 
 Message: insufficient standby daemons available
 Description: One or more file systems are configured to have a certain number
 of standby daemons available (including daemons in standby-replay) but the
 cluster does not have enough standby daemons. The standby daemons not in replay
-count towards any file system (i.e. they may overlap). This warning can
+count towards any file system (i.e. they may overlap). This warning can be
 configured by setting ``ceph fs set <fs> standby_count_wanted <count>``.  Use
 zero for ``count`` to disable.
 
@@ -48,7 +48,7 @@ Daemon-reported health checks
 
 MDS daemons can identify a variety of unwanted conditions, and
 indicate these to the operator in the output of ``ceph status``.
-These conditions have human readable messages, and additionally
+These conditions have human-readable messages, and additionally
 a unique code starting with ``MDS_``.
 
 .. highlight:: console
@@ -130,7 +130,9 @@ other daemons, please see :ref:`health-checks`.
     from properly cleaning up resources used by client requests.  This message
     appears if a client appears to have more than ``max_completed_requests``
     (default 100000) requests that are complete on the MDS side but haven't
-    yet been accounted for in the client's *oldest tid* value.
+    yet been accounted for in the client's *oldest tid* value. The last tid
+    used by the MDS to trim completed client requests (or flush) is included
+    as part of `session ls` (or `client ls`) command as a debug aid.
 
 ``MDS_DAMAGE``
 --------------
@@ -141,7 +143,7 @@ other daemons, please see :ref:`health-checks`.
     Corrupt or missing metadata was encountered when reading
     from the metadata pool.  This message indicates that the damage was
     sufficiently isolated for the MDS to continue operating, although
-    client accesses to the damaged subtree will return IO errors.  Use
+    client accesses to the damaged subtree will return I/O errors.  Use
     the ``damage ls`` admin socket command to get more detail on the damage.
     This message appears as soon as any damage is encountered.
 
@@ -238,3 +240,119 @@ other daemons, please see :ref:`health-checks`.
   Description
     All MDS ranks are unavailable resulting in the file system to be completely
     offline.
+
+``MDS_CLIENTS_LAGGY``
+----------------------------
+  Message
+    "Client *ID* is laggy; not evicted because some OSD(s) is/are laggy"
+
+  Description
+    If OSD(s) is laggy (due to certain conditions like network cut-off, etc)
+    then it might make clients laggy(session might get idle or cannot flush
+    dirty data for cap revokes). If ``defer_client_eviction_on_laggy_osds`` is
+    set to true (default true), client eviction will not take place and thus
+    this health warning will be generated.
+
+``MDS_CLIENTS_BROKEN_ROOTSQUASH``
+---------------------------------
+  Message
+    "X client(s) with broken root_squash implementation (MDS_CLIENTS_BROKEN_ROOTSQUASH)"
+
+  Description
+    A bug was discovered in root_squash which would potentially lose changes made by a
+    client restricted with root_squash caps. The fix required a change to the protocol
+    and a client upgrade is required.
+
+    This is a HEALTH_ERR warning because of the danger of inconsistency and lost
+    data. It is recommended to either upgrade your clients, discontinue using
+    root_squash in the interim, or silence the warning if desired.
+
+    To evict and permanently block broken clients from connecting to the
+    cluster, set the ``required_client_feature`` bit ``client_mds_auth_caps``.
+
+``MDS_ESTIMATED_REPLAY_TIME``
+-----------------------------
+  Message
+    HEALTH_WARN Replay: x% complete. Estimated time remaining *x* seconds
+
+  Description
+    When an MDS journal replay takes more than 30 seconds, this message indicates the estimated time to completion.
+
+
+.. _cephfs-large-omap-objects:
+
+Large omap objects in the metadata pool
+=======================================
+
+Deep scrub raises the ``LARGE_OMAP_OBJECTS`` health warning (see
+:ref:`health-checks`) for an object with more omap keys than
+:confval:`osd_deep_scrub_large_omap_object_key_threshold` or more omap data
+than :confval:`osd_deep_scrub_large_omap_object_value_sum_threshold`. In a
+CephFS metadata pool, such an object is usually a directory fragment
+(dirfrag): the MDS stores the entries of each fragment as the omap keys of one
+object. With the default settings, the MDS splits a fragment long before it
+has that many entries (see :doc:`/cephfs/dirfrags`), but a fragment whose
+entries are large can exceed the size threshold with few entries. Snapshots
+and large extended attributes are common causes. If the object is in an RGW
+pool instead, it is usually a bucket index shard: see
+:ref:`rgw_dynamic_bucket_index_resharding`.
+
+To find the directory, search the cluster log for ``Large omap object
+found``. The message names the object, for example::
+
+    cluster [WRN] Large omap object found. Object: 10:bbf5850a:::10000000007.00000000:head PG: 10.5d Key count: 7060 Size (bytes): 1249291802
+
+Tentacle and earlier releases print the raw hash first and the placement
+group in parentheses, as in ``PG: 10.50a1afdd (10.5d)``.
+
+The object name, ``10000000007.00000000`` here, is the directory's inode
+number in hexadecimal, a period, and the ID of the fragment. The directory's
+path is recorded in the backtrace that is stored with the object
+``<inode>.00000000``. To read it, run commands of the following form:
+
+.. prompt:: bash #
+
+   rados -p <metadata_pool> getxattr <inode>.00000000 parent > parent.bin
+   ceph-dencoder type inode_backtrace_t import parent.bin decode dump_json
+
+The ``ancestors`` list in the output names the directory and each directory
+above it, starting with the directory itself. Each entry gives a name
+(``dname``) and the inode number of the directory that contains it
+(``dirino``).
+
+To have the MDS split the fragment, scrub the directory:
+
+.. prompt:: bash #
+
+   ceph tell mds.<fsname>:0 scrub start <path>
+
+After scrubbing a directory fragment, the MDS splits it if it has more than
+:confval:`mds_bal_split_size` entries. A fragment that is too large only in
+bytes is not split this way. To split it explicitly, list the directory's
+fragments and split the one named in the warning (see
+:ref:`MDS daemon commands <cephfs-mds-daemon-commands-dirfrags>`):
+
+.. prompt:: bash #
+
+   ceph tell mds.<fsname>:<rank> dirfrag ls <path>
+   ceph tell mds.<fsname>:<rank> dirfrag split <path> <frag> 3
+
+Here ``<frag>`` is the ``str`` value of the fragment in the ``dirfrag ls``
+output, and ``<rank>`` is the rank of the MDS that holds the directory, which
+is 0 when the file system has one active MDS. The last argument is a number of
+bits: the fragment is split into two to the power of that number of
+fragments, so ``3`` makes eight. The MDS splits by the same number of bits
+when it splits a fragment on its own, as set by :confval:`mds_bal_split_bits`,
+which defaults to 3. Both commands act only on a directory that is in that
+MDS's cache, so run them soon after the scrub.
+
+The warning clears after the next deep scrub of the placement group that the
+message names. To clear it sooner, run ``ceph pg deep-scrub <pgid>``.
+
+The MDS never fragments the root directory, whose object is
+``1.00000000``, or directories inside stray directories, and it does not
+split stray directories on its own. The stray directories' objects are
+``600.00000000`` through ``609.00000000`` for rank 0.
+For the root directory, move its entries into subdirectories. For stray
+directories, evaluate the strays with a recursive scrub of ``~mdsdir`` (see
+:ref:`mds-scrub`).

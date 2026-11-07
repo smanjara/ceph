@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "test/librbd/test_fixture.h"
 #include "test/librbd/test_support.h"
@@ -10,6 +10,8 @@
 #include "librbd/internal.h"
 #include "librbd/io/ReadResult.h"
 #include "test/librados/crimson_utils.h"
+
+#include <shared_mutex> // for std::shared_lock
 
 void register_test_deep_copy() {
 }
@@ -513,7 +515,6 @@ TEST_F(TestDeepCopy, Stress)
 
 TEST_F(TestDeepCopy, NoSnaps_LargerDstObjSize)
 {
-  SKIP_IF_CRIMSON();
   uint64_t order = m_src_ictx->order + 1;
   ASSERT_EQ(0, m_opts.set(RBD_IMAGE_OPTION_ORDER, order));
 
@@ -522,7 +523,6 @@ TEST_F(TestDeepCopy, NoSnaps_LargerDstObjSize)
 
 TEST_F(TestDeepCopy, Snaps_LargerDstObjSize)
 {
-  SKIP_IF_CRIMSON();
   uint64_t order = m_src_ictx->order + 1;
   ASSERT_EQ(0, m_opts.set(RBD_IMAGE_OPTION_ORDER, order));
 
@@ -553,7 +553,6 @@ TEST_F(TestDeepCopy, CloneFlatten_LargerDstObjSize)
 
 TEST_F(TestDeepCopy, Stress_LargerDstObjSize)
 {
-  SKIP_IF_CRIMSON();
   uint64_t order = m_src_ictx->order + 1 + rand() % 2;
   ASSERT_EQ(0, m_opts.set(RBD_IMAGE_OPTION_ORDER, order));
 

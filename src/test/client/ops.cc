@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -35,5 +36,11 @@ TEST_F(TestClient, CheckZeroReclaimFlag) {
   ASSERT_EQ(client->check_unknown_reclaim_flag(0), true);
 }
 TEST_F(TestClient, CheckUnknownReclaimFlag) {
+  ASSERT_EQ(client->check_unknown_reclaim_flag(2), true);
+}
+TEST_F(TestClient, CheckNegativeReclaimFlagUnmasked) {
   ASSERT_EQ(client->check_unknown_reclaim_flag(-1 & ~MClientReclaim::FLAG_FINISH), true);
+}
+TEST_F(TestClient, CheckNegativeReclaimFlag) {
+  ASSERT_EQ(client->check_unknown_reclaim_flag(-1), true);
 }

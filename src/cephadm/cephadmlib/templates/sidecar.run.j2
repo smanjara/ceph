@@ -1,0 +1,20 @@
+#!/bin/sh
+# {{ comment }}
+
+set -e
+if [ "$1" = stop ] || [ "$1" = poststop ]; then
+    ! {{ sidecar.stop_cmd() | map('shellquote') | join(' ') }}
+    ! {{ ctx.container_engine.path }} inspect {{ sidecar.cname | shellquote }} &>/dev/null
+    exit $?
+fi
+{% if sidecar.pre_start_shell -%}
+{{ sidecar.pre_start_shell }}
+{% endif %}
+
+! {{ sidecar.rm_cmd() | map('shellquote') | join(' ') }} 2> /dev/null
+{%- if has_podman_engine %}
+! {{ sidecar.rm_cmd(storage=True) | map('shellquote') | join(' ') }} 2> /dev/null
+{%- endif %}
+
+exec {{ sidecar.run_cmd() | map('shellquote') | join(' ') }}
+

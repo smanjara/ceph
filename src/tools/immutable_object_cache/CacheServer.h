@@ -1,21 +1,21 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_CACHE_CACHE_SERVER_H
 #define CEPH_CACHE_CACHE_SERVER_H
 
-#include <boost/asio.hpp>
-#include <boost/asio/error.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/local/stream_protocol.hpp>
 
 #include "Types.h"
 #include "SocketCommon.h"
 #include "CacheSession.h"
 
 
-using boost::asio::local::stream_protocol;
-
 namespace ceph {
 namespace immutable_obj_cache {
+
+using boost::asio::local::stream_protocol;
 
 class CacheServer {
  public:
@@ -33,7 +33,7 @@ class CacheServer {
 
  private:
   CephContext* cct;
-  boost::asio::io_service m_io_service;
+  boost::asio::io_context m_io_service;
   ProcessMsg m_server_process_msg;
   stream_protocol::endpoint m_local_path;
   stream_protocol::acceptor m_acceptor;

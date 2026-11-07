@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include "rgw_arn.h"
 #include "rgw_common.h"
@@ -95,6 +95,7 @@ boost::optional<Service> to_service(const smatch::value_type& s,
     { "route53", Service::route53 },
     { "route53domains", Service::route53domains },
     { "s3", Service::s3 },
+    { "s3vectors", Service::s3vectors },
     { "sdb", Service::sdb },
     { "servicecatalog", Service::servicecatalog },
     { "ses", Service::ses },
@@ -264,6 +265,7 @@ std::string ARN::to_string() const {
     { Service::route53, "route53" },
     { Service::route53domains, "route53domains" },
     { Service::s3, "s3" },
+    { Service::s3vectors, "s3vectors" },
     { Service::sdb, "sdb" },
     { Service::servicecatalog, "servicecatalog" },
     { Service::ses, "ses" },
@@ -328,15 +330,15 @@ bool ARN::match(const ARN& candidate) const {
     return false;
   }
 
-  if (!match_policy(region, candidate.region, MATCH_POLICY_ARN)) {
+  if (!match_wildcards(region, candidate.region, MATCH_CASE_INSENSITIVE)) {
     return false;
   }
 
-  if (!match_policy(account, candidate.account, MATCH_POLICY_ARN)) {
+  if (!match_wildcards(account, candidate.account, MATCH_CASE_INSENSITIVE)) {
     return false;
   }
 
-  if (!match_policy(resource, candidate.resource, MATCH_POLICY_RESOURCE)) {
+  if (!match_wildcards(resource, candidate.resource, 0)) {
     return false;
   }
 

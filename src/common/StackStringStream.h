@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -18,10 +19,9 @@
 #include <boost/container/small_vector.hpp>
 
 #include <algorithm>
-#include <iostream>
 #include <memory>
 #include <ostream>
-#include <sstream>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -77,6 +77,8 @@ protected:
     if (traits_type::not_eof(c)) {
       char str = traits_type::to_char_type(c);
       vec.push_back(str);
+      setp(vec.data(), vec.data() + vec.size());
+      pbump(vec.size());
       return c;
     } else {
       return traits_type::eof();
@@ -129,11 +131,11 @@ public:
   using osptr = std::unique_ptr<sss>;
 
   CachedStackStringStream() {
-    if (cache.destructed || cache.c.empty()) {
+    if (cache().destructed || cache().c.empty()) {
       osp = std::make_unique<sss>();
     } else {
-      osp = std::move(cache.c.back());
-      cache.c.pop_back();
+      osp = std::move(cache().c.back());
+      cache().c.pop_back();
       osp->reset();
     }
   }
@@ -142,8 +144,8 @@ public:
   CachedStackStringStream(CachedStackStringStream&&) = delete;
   CachedStackStringStream& operator=(CachedStackStringStream&&) = delete;
   ~CachedStackStringStream() {
-    if (!cache.destructed && cache.c.size() < max_elems) {
-      cache.c.emplace_back(std::move(osp));
+    if (!cache().destructed && cache().c.size() < max_elems) {
+      cache().c.emplace_back(std::move(osp));
     }
   }
 
@@ -185,7 +187,11 @@ private:
     bool destructed = false;
   };
 
-  inline static thread_local Cache cache;
+  static Cache& cache() {
+    static thread_local Cache c;
+    return c;
+  }
+
   osptr osp;
 };
 

@@ -1,10 +1,13 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "mon/Monitor.h"
 #include "mon/KVMonitor.h"
+#include "mon/Paxos.h"
+#include "common/debug.h"
 #include "include/stringify.h"
 #include "messages/MKVData.h"
+#include "messages/MMonCommand.h"
 
 #define dout_subsys ceph_subsys_mon
 #undef dout_prefix
@@ -320,7 +323,7 @@ update:
     goto reply;
   }
   force_immediate_propose();  // faster response
-  wait_for_finished_proposal(
+  wait_for_commit(
     op,
     new Monitor::C_Command(
       mon, op, 0, ss.str(), odata,
@@ -368,6 +371,8 @@ int KVMonitor::validate_osd_destroy(
 
 void KVMonitor::do_osd_destroy(int32_t id, uuid_d& uuid)
 {
+  ceph_assert(is_writeable());
+
   string dmcrypt_prefix = _get_dmcrypt_prefix(uuid, "");
   string daemon_prefix =
     "daemon-private/osd." + stringify(id) + "/";
@@ -416,6 +421,7 @@ void KVMonitor::do_osd_new(
   const string& dmcrypt_key)
 {
   ceph_assert(paxos.is_plugged());
+  ceph_assert(is_writeable());
 
   string dmcrypt_key_prefix = _get_dmcrypt_prefix(uuid, "luks");
   bufferlist dmcrypt_key_value;

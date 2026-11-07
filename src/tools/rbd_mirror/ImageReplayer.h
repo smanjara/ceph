@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_RBD_MIRROR_IMAGE_REPLAYER_H
 #define CEPH_RBD_MIRROR_IMAGE_REPLAYER_H
@@ -127,7 +127,7 @@ protected:
    * REPLAYING
    *    |
    *    v
-   * JOURNAL_REPLAY_SHUT_DOWN
+   * REPLAY_SHUT_DOWN
    *    |
    *    v
    * LOCAL_IMAGE_CLOSE
@@ -142,7 +142,7 @@ protected:
   bool on_start_interrupted();
   bool on_start_interrupted(ceph::mutex& lock);
 
-  void on_stop_journal_replay(int r = 0, const std::string &desc = "");
+  void on_stop_replay(int r = 0, const std::string &desc = "");
 
   bool on_replay_interrupted();
 

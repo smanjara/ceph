@@ -5,18 +5,17 @@ import { ReactiveFormsModule } from '@angular/forms';
 import { Router, Routes } from '@angular/router';
 import { RouterTestingModule } from '@angular/router/testing';
 
-import { ToastrModule } from 'ngx-toastr';
 import { of } from 'rxjs';
 
 import { RoleService } from '~/app/shared/api/role.service';
 import { ScopeService } from '~/app/shared/api/scope.service';
-import { LoadingPanelComponent } from '~/app/shared/components/loading-panel/loading-panel.component';
 import { CdFormGroup } from '~/app/shared/forms/cd-form-group';
 import { NotificationService } from '~/app/shared/services/notification.service';
 import { SharedModule } from '~/app/shared/shared.module';
 import { configureTestBed, FormHelper } from '~/testing/unit-test-helper';
 import { RoleFormComponent } from './role-form.component';
 import { RoleFormModel } from './role-form.model';
+import { USER } from '~/app/shared/constants/app.constants';
 
 describe('RoleFormComponent', () => {
   let component: RoleFormComponent;
@@ -27,24 +26,20 @@ describe('RoleFormComponent', () => {
   let router: Router;
   const setUrl = (url: string) => Object.defineProperty(router, 'url', { value: url });
 
-  @Component({ selector: 'cd-fake', template: '' })
+  @Component({ selector: 'cd-fake', template: '', standalone: false })
   class FakeComponent {}
 
   const routes: Routes = [{ path: 'roles', component: FakeComponent }];
 
-  configureTestBed(
-    {
-      imports: [
-        RouterTestingModule.withRoutes(routes),
-        HttpClientTestingModule,
-        ReactiveFormsModule,
-        ToastrModule.forRoot(),
-        SharedModule
-      ],
-      declarations: [RoleFormComponent, FakeComponent]
-    },
-    [LoadingPanelComponent]
-  );
+  configureTestBed({
+    imports: [
+      RouterTestingModule.withRoutes(routes),
+      HttpClientTestingModule,
+      ReactiveFormsModule,
+      SharedModule
+    ],
+    declarations: [RoleFormComponent, FakeComponent]
+  });
 
   beforeEach(() => {
     fixture = TestBed.createComponent(RoleFormComponent);
@@ -87,6 +82,10 @@ describe('RoleFormComponent', () => {
       expect(component.mode).toBeUndefined();
     });
 
+    it('should set submit action to Create Role', () => {
+      expect(component.submitAction).toBe('Create Role');
+    });
+
     it('should submit', () => {
       const role: RoleFormModel = {
         name: 'role1',
@@ -101,79 +100,19 @@ describe('RoleFormComponent', () => {
       roleReq.flush({});
       expect(router.navigate).toHaveBeenCalledWith(['/user-management/roles']);
     });
-
-    it('should check all perms for a scope', () => {
-      formHelper.setValue('scopes_permissions', { cephfs: ['read'] });
-      component.onClickCellCheckbox('grafana', 'scope');
-      const scopes_permissions = form.getValue('scopes_permissions');
-      expect(Object.keys(scopes_permissions)).toContain('grafana');
-      expect(scopes_permissions['grafana']).toEqual(['create', 'delete', 'read', 'update']);
-    });
-
-    it('should uncheck all perms for a scope', () => {
-      formHelper.setValue('scopes_permissions', { cephfs: ['read', 'create', 'update', 'delete'] });
-      component.onClickCellCheckbox('cephfs', 'scope');
-      const scopes_permissions = form.getValue('scopes_permissions');
-      expect(Object.keys(scopes_permissions)).not.toContain('cephfs');
-    });
-
-    it('should uncheck all scopes and perms', () => {
-      component.scopes = ['cephfs', 'grafana'];
-      formHelper.setValue('scopes_permissions', {
-        cephfs: ['read', 'delete'],
-        grafana: ['update']
-      });
-      component.onClickHeaderCheckbox('scope', ({
-        target: { checked: false }
-      } as unknown) as Event);
-      const scopes_permissions = form.getValue('scopes_permissions');
-      expect(scopes_permissions).toEqual({});
-    });
-
-    it('should check all scopes and perms', () => {
-      component.scopes = ['cephfs', 'grafana'];
-      formHelper.setValue('scopes_permissions', {
-        cephfs: ['create', 'update'],
-        grafana: ['delete']
-      });
-      component.onClickHeaderCheckbox('scope', ({ target: { checked: true } } as unknown) as Event);
-      const scopes_permissions = form.getValue('scopes_permissions');
-      const keys = Object.keys(scopes_permissions);
-      expect(keys).toEqual(['cephfs', 'grafana']);
-      keys.forEach((key) => {
-        expect(scopes_permissions[key].sort()).toEqual(['create', 'delete', 'read', 'update']);
-      });
-    });
-
-    it('should check if column is checked', () => {
-      component.scopes_permissions = [
-        { scope: 'a', read: true, create: true, update: true, delete: true },
-        { scope: 'b', read: false, create: true, update: false, delete: true }
-      ];
-      expect(component.isRowChecked('a')).toBeTruthy();
-      expect(component.isRowChecked('b')).toBeFalsy();
-      expect(component.isRowChecked('c')).toBeFalsy();
-    });
-
-    it('should check if header is checked', () => {
-      component.scopes_permissions = [
-        { scope: 'a', read: true, create: true, update: false, delete: true },
-        { scope: 'b', read: false, create: true, update: false, delete: true }
-      ];
-      expect(component.isHeaderChecked('read')).toBeFalsy();
-      expect(component.isHeaderChecked('create')).toBeTruthy();
-      expect(component.isHeaderChecked('update')).toBeFalsy();
-    });
   });
 
   describe('edit mode', () => {
+    let formHelper: FormHelper;
+
     const role: RoleFormModel = {
       name: 'role1',
       description: 'Role 1',
       scopes_permissions: { osd: ['read', 'create'] }
     };
-    const scopes = ['osd', 'user'];
+    const scopes = ['osd', USER];
     beforeEach(() => {
+      formHelper = new FormHelper(form);
       spyOn(roleService, 'get').and.callFake(() => of(role));
       spyOn(TestBed.inject(ScopeService), 'list').and.callFake(() => of(scopes));
       setUrl('/user-management/roles/edit/role1');
@@ -203,10 +142,15 @@ describe('RoleFormComponent', () => {
       expect(component.mode).toBe('editing');
     });
 
+    it('should set submit action to Save changes', () => {
+      expect(component.submitAction).toBe('Save changes');
+    });
+
     it('should submit', () => {
-      component.onClickCellCheckbox('osd', 'update');
-      component.onClickCellCheckbox('osd', 'create');
-      component.onClickCellCheckbox('user', 'read');
+      formHelper.setValue('scopes_permissions', {
+        osd: ['read', 'update'],
+        user: ['read']
+      });
       component.submit();
       const roleReq = httpTesting.expectOne(`api/role/${role.name}`);
       expect(roleReq.request.method).toBe('PUT');

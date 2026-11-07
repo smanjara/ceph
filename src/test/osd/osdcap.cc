@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -1338,6 +1339,77 @@ TEST(OSDCap, AllowProfile) {
                              {{"rbd", "child_detach", true, true, true}}, addr));
   ASSERT_FALSE(cap.is_capable("abc", "", {}, "rbd_header.ABC", false, false,
                               {{"rbd", "other function", true, true, true}}, addr));
+
+  cap.grants.clear();
+  ASSERT_TRUE(cap.parse("profile rbd pool pool1 namespace ns1", nullptr));
+  ASSERT_TRUE(cap.is_capable("pool1", "", {}, "rbd_info", false, false,
+                             {{"rbd", "metadata_list", true, false, true}},
+                             addr));
+  ASSERT_TRUE(cap.is_capable("pool1", "ns1", {}, "rbd_info", false, false,
+                             {{"rbd", "metadata_list", true, false, true}},
+                             addr));
+  ASSERT_FALSE(cap.is_capable("pool1", "ns2", {}, "rbd_info", false, false,
+                              {{"rbd", "metadata_list", true, false, true}},
+                              addr));
+  ASSERT_FALSE(cap.is_capable("pool2", "", {}, "rbd_info", false, false,
+                              {{"rbd", "metadata_list", true, false, true}},
+                              addr));
+  ASSERT_FALSE(cap.is_capable("pool1", "", {}, "asdf", false, false,
+                              {{"rbd", "metadata_list", true, false, true}},
+                              addr));
+  ASSERT_FALSE(cap.is_capable("pool1", "", {}, "rbd_info", false, false,
+                              {{"rbd", "other_method", true, false, true}},
+                              addr));
+
+  cap.grants.clear();
+  ASSERT_TRUE(cap.parse("profile rbd-read-only pool pool1 namespace ns1",
+                        nullptr));
+  ASSERT_TRUE(cap.is_capable("pool1", "", {}, "rbd_info", false, false,
+                             {{"rbd", "metadata_list", true, false, true}},
+                             addr));
+  ASSERT_TRUE(cap.is_capable("pool1", "ns1", {}, "rbd_info", false, false,
+                             {{"rbd", "metadata_list", true, false, true}},
+                             addr));
+  ASSERT_FALSE(cap.is_capable("pool1", "ns2", {}, "rbd_info", false, false,
+                              {{"rbd", "metadata_list", true, false, true}},
+                              addr));
+  ASSERT_FALSE(cap.is_capable("pool2", "", {}, "rbd_info", false, false,
+                              {{"rbd", "metadata_list", true, false, true}},
+                              addr));
+  ASSERT_FALSE(cap.is_capable("pool1", "", {}, "asdf", false, false,
+                              {{"rbd", "metadata_list", true, false, true}},
+                              addr));
+  ASSERT_FALSE(cap.is_capable("pool1", "", {}, "rbd_info", false, false,
+                              {{"rbd", "other_method", true, false, true}},
+                              addr));
+
+  // RGW: rwx on pools tagged with the rgw application
+  cap.grants.clear();
+  ASSERT_TRUE(cap.parse("profile rgw", NULL));
+  ASSERT_FALSE(cap.allow_all());
+  ASSERT_TRUE(cap.is_capable("foo", "", {{"rgw", {}}}, "asdf", true, true, {},
+                             addr));
+  ASSERT_TRUE(cap.is_capable("foo", "", {{"rgw", {{"k", "v"}}}}, "asdf", true,
+                             true, {}, addr));
+  ASSERT_TRUE(cap.is_capable("foo", "ns", {{"rgw", {}}}, "asdf", true, true, {},
+                             addr));
+  ASSERT_TRUE(cap.is_capable("foo", "", {{"rgw", {}}}, "asdf", false, true,
+                             {{"rgw", "", true, true, true}}, addr));
+  ASSERT_FALSE(cap.is_capable("foo", "", {}, "asdf", true, false, {}, addr));
+  ASSERT_FALSE(cap.is_capable("foo", "", {{"rbd", {}}}, "asdf", true, false, {},
+                              addr));
+  ASSERT_FALSE(cap.is_capable("foo", "", {{"rgw", {}}}, "asdf", false, true,
+                              {{"rgw", "", true, true, false}}, addr));
+
+  // pool restriction narrows the tag scope
+  cap.grants.clear();
+  ASSERT_TRUE(cap.parse("profile rgw pool=zone.rgw.log", NULL));
+  ASSERT_TRUE(cap.is_capable("zone.rgw.log", "", {{"rgw", {}}}, "asdf", true,
+                             true, {}, addr));
+  ASSERT_FALSE(cap.is_capable("other", "", {{"rgw", {}}}, "asdf", true, true,
+                              {}, addr));
+  ASSERT_FALSE(cap.is_capable("zone.rgw.log", "", {}, "asdf", true, true, {},
+                              addr));
 }
 
 TEST(OSDCap, network) {

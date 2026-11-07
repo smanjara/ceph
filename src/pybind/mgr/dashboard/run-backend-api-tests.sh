@@ -47,7 +47,16 @@ setup_teuthology() {
     ${TEUTHOLOGY_PYTHON_BIN:-/usr/bin/python3} -m venv venv
     source venv/bin/activate
     pip install -U pip 'setuptools>=12,<60'
-    pip install "git+https://github.com/ceph/teuthology@9e4bf63#egg=teuthology[test]"
+
+    local TEUTH_REF="${TEUTH_REF:-f3d1e601d9123cd8c839d1c32745a294ec8dd15d}"
+    printf "Cloning teuthology at ref %s\n" "$TEUTH_REF"
+    git clone https://github.com/ceph/teuthology
+    pushd teuthology
+    git checkout -q "$TEUTH_REF"
+    pip install -r requirements.txt
+    pip install -e '.[test]'
+    popd
+
     pushd $CURR_DIR
     pip install -r requirements.txt -c constraints.txt
     popd
@@ -134,7 +143,7 @@ run_teuthology_tests() {
     export CEPH_OUT_CLIENT_DIR=${LOCAL_BUILD_DIR}/out/client
     find . -iname "*${COVERAGE_FILE}*" -type f -delete
 
-    python ../qa/tasks/vstart_runner.py --ignore-missing-binaries --no-verbose $OPTIONS $(echo $TEST_CASES) ||
+    python ../qa/tasks/vstart_runner.py --ignore-missing-binaries --no-verbose --debug $OPTIONS $(echo $TEST_CASES) ||
       on_tests_error
 
     deactivate

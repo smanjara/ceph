@@ -1,444 +1,266 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <sys/mman.h>
 #include <string.h>
 
 #include <fcntl.h>
+#include <seastar/coroutine/parallel_for_each.hh>
 
 #include "crimson/common/log.h"
-#include "crimson/common/errorator-loop.h"
+#include "crimson/common/errorator-utils.h"
 
 #include "include/buffer.h"
 #include "rbm_device.h"
 #include "nvme_block_device.h"
 #include "block_rb_manager.h"
-
-namespace {
-  seastar::logger& logger() {
-    return crimson::get_logger(ceph_subsys_seastore_tm);
-  }
-}
-
-namespace crimson::os::seastore::random_block_device {
 #include "crimson/os/seastore/logging.h"
 SET_SUBSYS(seastore_device);
 
-RBMDevice::mkfs_ret RBMDevice::mkfs(device_config_t config) {
-  LOG_PREFIX(RBMDevice::mkfs);
-  return stat_device(
-  ).handle_error(
-    mkfs_ertr::pass_further{},
-    crimson::ct_error::assert_all{
-    "Invalid error stat_device in RBMDevice::mkfs"}
-  ).safe_then([this, FNAME, config=std::move(config)](auto st) {
-    super.block_size = st.block_size;
-    super.size = st.size;
-
-    super.feature |= RBM_BITMAP_BLOCK_CRC;
-    super.config = std::move(config);
-    DEBUG("super {} ", super);
-    // write super block
-    return write_rbm_header(
-    ).safe_then([] {
-      return mkfs_ertr::now();
-    }).handle_error(
-      mkfs_ertr::pass_further{},
-      crimson::ct_error::assert_all{
-      "Invalid error write_rbm_header in RBMDevice::mkfs"
-    });
-  });
-}
-
-write_ertr::future<> RBMDevice::write_rbm_header()
-{
-  bufferlist meta_b_header;
-  super.crc = 0;
-  encode(super, meta_b_header);
-  // If NVMeDevice supports data protection, CRC for checksum is not required
-  // NVMeDevice is expected to generate and store checksum internally.
-  // CPU overhead for CRC might be saved.
-  if (is_data_protection_enabled()) {
-    super.crc = -1;
-  } else {
-    super.crc = meta_b_header.crc32c(-1);
-  }
-
-  bufferlist bl;
-  encode(super, bl);
-  auto iter = bl.begin();
-  auto bp = bufferptr(ceph::buffer::create_page_aligned(super.block_size));
-  assert(bl.length() < super.block_size);
-  iter.copy(bl.length(), bp.c_str());
-
-  return write(RBM_START_ADDRESS, bp);
-}
-
-read_ertr::future<rbm_metadata_header_t> RBMDevice::read_rbm_header(
-  rbm_abs_addr addr)
-{
-  LOG_PREFIX(RBMDevice::read_rbm_header);
-  bufferptr bptr =
-    bufferptr(ceph::buffer::create_page_aligned(RBM_SUPERBLOCK_SIZE));
-  bptr.zero();
-  return read(
-    addr,
-    bptr
-  ).safe_then([length=bptr.length(), this, bptr, FNAME]()
-    -> read_ertr::future<rbm_metadata_header_t> {
-    bufferlist bl;
-    bl.append(bptr);
-    auto p = bl.cbegin();
-    rbm_metadata_header_t super_block;
-    try {
-      decode(super_block, p);
-    }
-    catch (ceph::buffer::error& e) {
-      DEBUG("read_rbm_header: unable to decode rbm super block {}",
-	    e.what());
-      return crimson::ct_error::enoent::make();
-    }
-    checksum_t crc = super_block.crc;
-    bufferlist meta_b_header;
-    super_block.crc = 0;
-    encode(super_block, meta_b_header);
-    assert(ceph::encoded_sizeof<rbm_metadata_header_t>(super_block) <
-	super_block.block_size);
-
-    // Do CRC verification only if data protection is not supported.
-    if (is_data_protection_enabled() == false) {
-      if (meta_b_header.crc32c(-1) != crc) {
-	DEBUG("bad crc on super block, expected {} != actual {} ",
-	      meta_b_header.crc32c(-1), crc);
-	return crimson::ct_error::input_output_error::make();
-      }
-    } else {
-      ceph_assert_always(crc == (checksum_t)-1);
-    }
-    super_block.crc = crc;
-    super = super_block;
-    DEBUG("got {} ", super);
-    return read_ertr::future<rbm_metadata_header_t>(
-      read_ertr::ready_future_marker{},
-      super_block
-    );
-  });
-}
-
-}
-
 namespace crimson::os::seastore::random_block_device::nvme {
+
+seastar::future<> NVMeBlockDevice::start(uint32_t shard_nums)
+{
+  device_shard_nums = shard_nums;
+  auto num_shard_services = (device_shard_nums + seastar::this_smp_shard_count() - 1 ) / seastar::this_smp_shard_count();
+  LOG_PREFIX(NVMeBlockDevice::start);
+  DEBUG("device_shard_nums={} seastar::smp={}, num_shard_services={}", device_shard_nums, seastar::this_smp_shard_count(), num_shard_services);
+  return shard_devices.start(
+    num_shard_services,
+    device_path,
+    get_device_type(),
+    get_device_id());
+}
+
+seastar::future<> NVMeBlockDevice::stop()
+{
+  return shard_devices.stop();
+}
+
+Device& NVMeBlockDevice::get_sharded_device(store_index_t store_index)
+{
+  assert(store_index < shard_devices.local().mshard_devices.size());
+  return *shard_devices.local().mshard_devices[store_index];
+}
+
+NVMeBlockDevice::mkfs_ret NVMeBlockDevice::mkfs(device_config_t config) {
+  using crimson::common::get_conf;
+  co_await shard_devices.local().mshard_devices[0]->do_primary_mkfs(config,
+    seastar::this_smp_shard_count(),
+    get_conf<Option::size_t>("seastore_cbjournal_size") 
+  );
+}
 
 open_ertr::future<> NVMeBlockDevice::open(
   const std::string &in_path,
   seastar::open_flags mode) {
-  return seastar::do_with(in_path, [this, mode](auto& in_path) {
-    return seastar::file_stat(in_path).then([this, mode, in_path](auto stat) {
-      super.size = stat.size;
-      super.block_size = stat.block_size;
-      return seastar::open_file_dma(in_path, mode).then([=, this](auto file) {
-        device = file;
-        logger().debug("open");
-        // Get SSD's features from identify_controller and namespace command.
-        // Do identify_controller first, and then identify_namespace.
-        return identify_controller().safe_then([this, in_path, mode](
-          auto id_controller_data) {
-          support_multistream = id_controller_data.oacs.support_directives;
-          if (support_multistream) {
-            stream_id_count = WRITE_LIFE_MAX;
-          }
-          awupf = id_controller_data.awupf + 1;
-          return identify_namespace().safe_then([this, in_path, mode] (
-            auto id_namespace_data) {
-            // LBA format provides LBA size which is power of 2. LBA is the
-            // minimum size of read and write.
-            super.block_size = (1 << id_namespace_data.lbaf0.lbads);
-            atomic_write_unit = awupf * super.block_size;
-            data_protection_type = id_namespace_data.dps.protection_type;
-            data_protection_enabled = (data_protection_type > 0);
-            if (id_namespace_data.nsfeat.opterf == 1){
-              // NPWG and NPWA is 0'based value
-              write_granularity = super.block_size * (id_namespace_data.npwg + 1);
-              write_alignment = super.block_size * (id_namespace_data.npwa + 1);
-            }
-            return open_for_io(in_path, mode);
-          });
-        }).handle_error(crimson::ct_error::input_output_error::handle([this, in_path, mode]{
-          logger().error("open: id ctrlr failed. open without ioctl");
-          return open_for_io(in_path, mode);
-        }), crimson::ct_error::pass_further_all{});
-      });
-    });
-  });
+  LOG_PREFIX(NVMeBlockDevice::open);
+  driver = make_nvme_io_driver(in_path);
+  co_await driver->open(in_path, mode
+  ).handle_error(
+    open_ertr::pass_further{},
+    crimson::ct_error::assert_all("Invalid error in NVMeBlockDevice::open"));
+  // Combine the raw identify-derived capabilities with this device's superblock
+  // block size (the on-disk logical block size) to compute the write
+  // granularity / alignment / atomic-write-unit, exactly as before. The math
+  // stays here because it depends on super.block_size, which the driver does
+  // not own.
+  const auto &caps = driver->get_caps();
+  if (caps.ctrl_identified) {
+    awupf = caps.awupf;
+    if (caps.ns_identified) {
+      atomic_write_unit = awupf * super.block_size;
+      if (caps.opterf) {
+	// NPWG and NPWA is 0'based value
+	write_granularity = super.block_size * (caps.npwg + 1);
+	write_alignment = super.block_size * (caps.npwa + 1);
+      }
+    } else {
+      DEBUG("identify_namespace failed.\
+	Proceeding to open the device normally without adding device-specific information.");
+    }
+  } else {
+    DEBUG("identify_controller failed.\
+      Proceeding to open the device normally without adding device-specific information.");
+  }
+  // PI is activated on the driver once the superblock that records it is
+  // available: in try_enable_end_to_end_protection() during mkfs, and in
+  // mount() after read_rbm_superblock. super is not yet loaded here on the
+  // mount path, so there is nothing to push at open() time.
 }
 
-open_ertr::future<> NVMeBlockDevice::open_for_io(
-  const std::string& in_path,
-  seastar::open_flags mode) {
-  io_device.resize(stream_id_count);
-  return seastar::do_for_each(io_device, [=, this](auto &target_device) {
-    return seastar::open_file_dma(in_path, mode).then([this](
-      auto file) {
-      io_device[stream_index_to_open] = file;
-      return io_device[stream_index_to_open].fcntl(
-        F_SET_FILE_RW_HINT,
-        (uintptr_t)&stream_index_to_open).then([this](auto ret) {
-        stream_index_to_open++;
-        return seastar::now();
-      });
+NVMeBlockDevice::mount_ret NVMeBlockDevice::mount()
+{
+  LOG_PREFIX(NVMeBlockDevice::mount);
+  DEBUG("mount");
+  co_await shard_devices.invoke_on_all([](auto &local_device) {
+    return seastar::do_for_each(local_device.mshard_devices, [](auto& mshard_device) {
+      return mshard_device->do_shard_mount(
+      ).handle_error(
+        crimson::ct_error::assert_all(
+          "Invalid error in NVMeBlockDevice::do_shard_mount"
+      ));
     });
   });
+
+  // Superblocks are loaded now: activate PI on each shard's driver if the
+  // device was formatted with end-to-end data protection, so subsequent I/O
+  // uses the PI command path.
+  co_await shard_devices.invoke_on_all([](auto &local_device) {
+    for (auto& mshard_device : local_device.mshard_devices) {
+      if (mshard_device->is_end_to_end_data_protection()) {
+        mshard_device->driver->set_protection_info(
+          true, mshard_device->super.nvme_block_size);
+      }
+    }
+    return seastar::now();
+  });
+
+  if (is_end_to_end_data_protection()) {
+    // Validate the attached device actually supports the PI the superblock
+    // expects. A throwaway driver performs the identify.
+    auto io_driver = make_nvme_io_driver(device_path);
+    co_await io_driver->open(device_path,
+      seastar::open_flags::rw | seastar::open_flags::dsync
+    ).handle_error(crimson::ct_error::assert_all(
+      "Invalid error open in NVMeBlockDevice::mount PI-validate"));
+    auto id_ns_data = co_await io_driver->identify_namespace();
+    co_await io_driver->close();
+    assert(id_ns_data);
+    auto id_namespace_data = *id_ns_data;
+    if (id_namespace_data.dps.protection_type !=
+	nvme_format_nvm_command_t::PROTECT_INFORMATION_TYPE_2) {
+      ERROR("seastore was formated with end-to-end-data-protection \
+	but the device being mounted to use seastore does not support \
+	the functionality. Please check the device.");
+      ceph_abort();
+    }
+    if (id_namespace_data.lbaf[id_namespace_data.flbas.lba_index].ms !=
+	nvme_identify_namespace_data_t::METASIZE_FOR_CHECKSUM_OFFLOAD) {
+      ERROR("seastore was formated with end-to-end-data-protection \
+	but the formatted device meta size is wrong. Please check the device.");
+      ceph_abort();
+    }
+  }
 }
 
 write_ertr::future<> NVMeBlockDevice::write(
   uint64_t offset,
-  bufferptr &bptr,
+  bufferptr bptr,
   uint16_t stream) {
-  logger().debug(
-      "block: write offset {} len {}",
-      offset,
-      bptr.length());
-  auto length = bptr.length();
-
-  assert((length % super.block_size) == 0);
-  uint16_t supported_stream = stream;
-  if (stream >= stream_id_count) {
-    supported_stream = WRITE_LIFE_NOT_SET;
-  }
-  return io_device[supported_stream].dma_write(
-    offset, bptr.c_str(), length).handle_exception(
-    [](auto e) -> write_ertr::future<size_t> {
-    logger().error("write: dma_write got error{}", e);
-    return crimson::ct_error::input_output_error::make();
-  }).then([length](auto result) -> write_ertr::future<> {
-    if (result != length) {
-      logger().error("write: dma_write got error with not proper length");
-      return crimson::ct_error::input_output_error::make();
-    }
-    return write_ertr::now();
-  });
+  LOG_PREFIX(NVMeBlockDevice::write);
+  DEBUG("block: write offset {} len {}", offset, bptr.length());
+  assert((bptr.length() % super.block_size) == 0);
+  // bptr is a by-value parameter: co_await (rather than returning the future)
+  // keeps it alive in this coroutine frame for the duration of the driver call.
+  co_await driver->write(get_device_id(), offset, bptr, stream);
 }
 
 read_ertr::future<> NVMeBlockDevice::read(
   uint64_t offset,
   bufferptr &bptr) {
-  logger().debug(
-      "block: read offset {} len {}",
-      offset,
-      bptr.length());
-  auto length = bptr.length();
+  return driver->read(get_device_id(), offset, bptr.length(), bptr);
+}
 
-  assert((length % super.block_size) == 0);
-
-  return device.dma_read(offset, bptr.c_str(), length).handle_exception(
-    [](auto e) -> read_ertr::future<size_t> {
-      logger().error("read: dma_read got error{}", e);
-      return crimson::ct_error::input_output_error::make();
-    }).then([length](auto result) -> read_ertr::future<> {
-      if (result != length) {
-        logger().error("read: dma_read got error with not proper length");
-        return crimson::ct_error::input_output_error::make();
-      }
-      return read_ertr::now();
-    });
+read_ertr::future<> NVMeBlockDevice::_readv(
+  uint64_t offset,
+  std::vector<bufferptr> ptrs) {
+  return driver->readv(get_device_id(), offset, std::move(ptrs));
 }
 
 write_ertr::future<> NVMeBlockDevice::writev(
   uint64_t offset,
   ceph::bufferlist bl,
   uint16_t stream) {
-  logger().debug(
-    "block: write offset {} len {}",
-    offset,
-    bl.length());
-
-  uint16_t supported_stream = stream;
-  if (stream >= stream_id_count) {
-    supported_stream = WRITE_LIFE_NOT_SET;
-  }
-  bl.rebuild_aligned(super.block_size);
-
-  return seastar::do_with(
-    bl.prepare_iovs(),
-    std::move(bl),
-    [this, supported_stream, offset](auto& iovs, auto& bl)
-  {
-    return write_ertr::parallel_for_each(
-      iovs,
-      [this, supported_stream, offset](auto& p) mutable
-    {
-      auto off = offset + p.offset;
-      auto len = p.length;
-      auto& iov = p.iov;
-      return io_device[supported_stream].dma_write(off, std::move(iov)
-      ).handle_exception(
-        [this, off, len](auto e) -> write_ertr::future<size_t>
-      {
-        logger().error("{} poffset={}~{} dma_write got error -- {}",
-                       device_id_printer_t{get_device_id()}, off, len, e);
-        return crimson::ct_error::input_output_error::make();
-      }).then([this, off, len](size_t written) -> write_ertr::future<> {
-        if (written != len) {
-          logger().error("{} poffset={}~{} dma_write len={} inconsistent",
-                         device_id_printer_t{get_device_id()}, off, len, written);
-          return crimson::ct_error::input_output_error::make();
-        }
-        return write_ertr::now();
-      });
-    });
-  });
+  LOG_PREFIX(NVMeBlockDevice::writev);
+  DEBUG("block: write offset {} len {}", offset, bl.length());
+  // bl is a by-value parameter: co_await keeps it (and the iovecs the driver
+  // builds from it) alive for the duration of the driver call.
+  co_await driver->writev(
+    get_device_id(), offset, std::move(bl), super.block_size, stream);
 }
 
 Device::close_ertr::future<> NVMeBlockDevice::close() {
-  logger().debug(" close ");
-  return device.close().then([this]() {
-    return seastar::do_for_each(io_device, [](auto target_device) {
-      return target_device.close();
-    });
-  });
-}
-
-nvme_command_ertr::future<nvme_identify_controller_data_t>
-NVMeBlockDevice::identify_controller() {
-  return seastar::do_with(
-    nvme_admin_command_t(),
-    nvme_identify_controller_data_t(),
-    [this](auto &admin_command, auto &data) {
-    admin_command.common.opcode = nvme_admin_command_t::OPCODE_IDENTIFY;
-    admin_command.common.addr = (uint64_t)&data;
-    admin_command.common.data_len = sizeof(data);
-    admin_command.identify.cns = nvme_identify_command_t::CNS_CONTROLLER;
-
-    return pass_admin(admin_command).safe_then([&data](auto status) {
-      return seastar::make_ready_future<nvme_identify_controller_data_t>(
-        std::move(data));
-      });
-  });
+  LOG_PREFIX(NVMeBlockDevice::close);
+  DEBUG("close");
+  if (!driver) {
+    return close_ertr::now();
+  }
+  return driver->close();
 }
 
 discard_ertr::future<> NVMeBlockDevice::discard(uint64_t offset, uint64_t len) {
-  return device.discard(offset, len);
+  return driver->discard(offset, len);
 }
 
-nvme_command_ertr::future<nvme_identify_namespace_data_t>
-NVMeBlockDevice::identify_namespace() {
-  return get_nsid().safe_then([this](auto nsid) {
-    return seastar::do_with(
-      nvme_admin_command_t(),
-      nvme_identify_namespace_data_t(),
-      [this, nsid](auto &admin_command, auto &data) {
-      admin_command.common.opcode = nvme_admin_command_t::OPCODE_IDENTIFY;
-      admin_command.common.addr = (uint64_t)&data;
-      admin_command.common.data_len = sizeof(data);
-      admin_command.common.nsid = nsid;
-      admin_command.identify.cns = nvme_identify_command_t::CNS_NAMESPACE;
-
-      return pass_admin(admin_command).safe_then([&data](auto status){
-        return seastar::make_ready_future<nvme_identify_namespace_data_t>(
-          std::move(data));
-      });
-    });
-  });
-}
-
-nvme_command_ertr::future<int> NVMeBlockDevice::get_nsid() {
-  return device.ioctl(NVME_IOCTL_ID, nullptr);
-}
-
-nvme_command_ertr::future<int> NVMeBlockDevice::pass_admin(
-  nvme_admin_command_t& admin_cmd) {
-  return device.ioctl(NVME_IOCTL_ADMIN_CMD, &admin_cmd).handle_exception(
-    [](auto e)->nvme_command_ertr::future<int> {
-      logger().error("pass_admin: ioctl failed");
-      return crimson::ct_error::input_output_error::make();
-    });
-}
-
-nvme_command_ertr::future<int> NVMeBlockDevice::pass_through_io(
-  nvme_io_command_t& io_cmd) {
-  return device.ioctl(NVME_IOCTL_IO_CMD, &io_cmd);
-}
-
-}
-
-namespace crimson::os::seastore::random_block_device {
-
-EphemeralRBMDeviceRef create_test_ephemeral(uint64_t journal_size, uint64_t data_size) {
-  return EphemeralRBMDeviceRef(
-    new EphemeralRBMDevice(journal_size + data_size + 
-	random_block_device::RBMDevice::get_journal_start(),
-	EphemeralRBMDevice::TEST_BLOCK_SIZE));
-}
-
-open_ertr::future<> EphemeralRBMDevice::open(
-  const std::string &in_path,
-   seastar::open_flags mode) {
-  if (buf) {
-    return open_ertr::now();
+nvme_command_ertr::future<> NVMeBlockDevice::try_enable_end_to_end_protection() {
+  LOG_PREFIX(NVMeBlockDevice::try_enable_end_to_end_protection);
+  if (!driver->supports_end_to_end_protection()) {
+    INFO("the I/O transport does not support enabling end to end data "
+         "protection, mkfs() will be done without this functionality.");
+    co_return;
+  }
+  auto id_ns_data = co_await driver->identify_namespace();
+  if (!id_ns_data) {
+    INFO("the device does not support end to end data protection,\
+      mkfs() will be done without this functionality.");
+    co_return;
+  }
+  auto id_namespace_data = *id_ns_data;
+  if (!id_namespace_data.nlbaf) {
+    INFO("the device does not support end to end data protection,\
+      mkfs() will be done without this functionality.");
+    co_return;
+  }
+  int lba_format_index = -1;
+  for (int i = 0; i < id_namespace_data.nlbaf; i++) {
+    // TODO: enable other types of end to end data protection
+    // Note that the nvme device will generate crc if the namespace
+    // is formatted with meta size 8
+    // The nvme device can provide other types of data protections.
+    // But, for now, we only consider the checksum offload in the device side.
+    if (id_namespace_data.lbaf[i].ms ==
+	nvme_identify_namespace_data_t::METASIZE_FOR_CHECKSUM_OFFLOAD) {
+      lba_format_index = i;
+      super.nvme_block_size = (1 << id_namespace_data.lbaf[i].lbads);
+      break;
+    }
+  }
+  if (lba_format_index == -1) {
+    INFO("the device does not support end to end data protection,\
+      mkfs() will be done without this functionality.");
+    co_return;
   }
 
-  logger().debug(
-    "Initializing test memory device {}",
-    size);
+  auto nsid = driver->get_namespace_id();
+  nvme_admin_command_t cmd{};
+  cmd.common.opcode = nvme_admin_command_t::OPCODE_FORMAT_NVM;
+  cmd.common.nsid = nsid;
+  // TODO: configure other protect information types (2 or 3) see above
+  cmd.format.pi = nvme_format_nvm_command_t::PROTECT_INFORMATION_TYPE_2;
+  cmd.format.lbaf = lba_format_index;
+  auto ret = co_await driver->pass_admin(cmd);
+  if (ret != 0) {
+    ERROR(
+      "formt nvm command to use end-to-end-protection fails : {}", ret);
+    ceph_abort();
+  }
 
-  void* addr = ::mmap(
-    nullptr,
-    size,
-    PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS,
-    -1,
-    0);
-
-  buf = (char*)addr;
-
-  ::memset(buf, 0, size);
-  return open_ertr::now();
+  id_ns_data = co_await driver->identify_namespace();
+  assert(id_ns_data);
+  id_namespace_data = *id_ns_data;
+  ceph_assert(id_namespace_data.dps.protection_type ==
+     nvme_format_nvm_command_t::PROTECT_INFORMATION_TYPE_2);
+  super.set_end_to_end_data_protection();
+  // Activate PI on the driver so the superblock write that follows in
+  // do_primary_mkfs() uses the PI command path.
+  driver->set_protection_info(true, super.nvme_block_size);
 }
 
-write_ertr::future<> EphemeralRBMDevice::write(
-  uint64_t offset,
-  bufferptr &bptr,
-  uint16_t stream) {
-  ceph_assert(buf);
-  logger().debug(
-    "EphemeralRBMDevice: write offset {} len {}",
-    offset,
-    bptr.length());
-
-  ::memcpy(buf + offset, bptr.c_str(), bptr.length());
-
-  return write_ertr::now();
-}
-
-read_ertr::future<> EphemeralRBMDevice::read(
-  uint64_t offset,
-  bufferptr &bptr) {
-  ceph_assert(buf);
-  logger().debug(
-    "EphemeralRBMDevice: read offset {} len {}",
-    offset,
-    bptr.length());
-
-  bptr.copy_in(0, bptr.length(), buf + offset);
-  return read_ertr::now();
-}
-
-Device::close_ertr::future<> EphemeralRBMDevice::close() {
-  logger().debug(" close ");
-  return close_ertr::now();
-}
-
-write_ertr::future<> EphemeralRBMDevice::writev(
-  uint64_t offset,
-  ceph::bufferlist bl,
-  uint16_t stream) {
-  ceph_assert(buf);
-  logger().debug(
-    "EphemeralRBMDevice: write offset {} len {}",
-    offset,
-    bl.length());
-
-  bl.begin().copy(bl.length(), buf + offset);
-  return write_ertr::now();
+nvme_command_ertr::future<> NVMeBlockDevice::initialize_nvme_features() {
+  if (!crimson::common::get_conf<bool>("seastore_disable_end_to_end_data_protection")) {
+    co_await try_enable_end_to_end_protection();
+  }
 }
 
 }

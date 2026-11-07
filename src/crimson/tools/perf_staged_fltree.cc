@@ -1,14 +1,16 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <boost/program_options.hpp>
 
 #include <seastar/core/app-template.hh>
 #include <seastar/core/thread.hh>
+#include <seastar/util/closeable.hh>
 
 #include "crimson/common/config_proxy.h"
 #include "crimson/common/log.h"
 #include "crimson/common/perf_counters_collection.h"
+#include "crimson/os/seastore/collection_manager/flat_collection_manager.h"
 #include "crimson/os/seastore/onode_manager/staged-fltree/tree_utils.h"
 #include "crimson/os/seastore/onode_manager/staged-fltree/node_extent_manager.h"
 
@@ -30,9 +32,12 @@ class PerfTree : public TMTestState {
   seastar::future<> run(KVPool<test_item_t>& kvs, double erase_ratio) {
     return tm_setup().then([this, &kvs, erase_ratio] {
       return seastar::async([this, &kvs, erase_ratio] {
+        auto collection_manager =
+          std::make_unique<crimson::os::seastore::collection_manager::FlatCollectionManager>(*tm);
         auto tree = std::make_unique<TreeBuilder<TRACK, ExtendedValue>>(kvs,
             (is_dummy ? NodeExtentManager::create_dummy(true)
-                      : NodeExtentManager::create_seastore(*tm)));
+                      : NodeExtentManager::create_seastore(
+                          *tm, coll_t::meta(), *collection_manager)));
         {
           auto t = create_mutate_transaction();
           with_trans_intr(*t, [&](auto &tr){
@@ -116,15 +121,11 @@ seastar::future<> run(const bpo::variables_map& config) {
 
     using crimson::common::sharded_conf;
     sharded_conf().start(EntityName{}, std::string_view{"ceph"}).get();
-    seastar::engine().at_exit([] {
-      return sharded_conf().stop();
-    });
+    auto sharded_conf_stop = seastar::deferred_stop(sharded_conf());
 
     using crimson::common::sharded_perf_coll;
     sharded_perf_coll().start().get();
-    seastar::engine().at_exit([] {
-      return sharded_perf_coll().stop();
-    });
+    auto sharded_perf_stop = seastar::deferred_stop(sharded_perf_coll());
 
     auto kvs = KVPool<test_item_t>::create_raw_range(
         ns_sizes, oid_sizes, onode_sizes,
@@ -132,7 +133,7 @@ seastar::future<> run(const bpo::variables_map& config) {
         {range1[0], range1[1]},
         {range0[0], range0[1]});
     PerfTree<TRACK> perf{is_dummy};
-    perf.run(kvs, erase_ratio).get0();
+    perf.run(kvs, erase_ratio).get();
   });
 }
 

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -213,7 +214,7 @@ TEST(LibRGW, LOOKUP_BUCKET) {
 }
 
 extern "C" {
-  static bool r2_cb(const char* name, void *arg, uint64_t offset,
+  static int r2_cb(const char* name, void *arg, uint64_t offset,
 		    struct stat *st, uint32_t st_mask,
 		    uint32_t flags) {
     // don't need arg--it would point to fids

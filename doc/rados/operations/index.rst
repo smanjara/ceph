@@ -8,9 +8,9 @@
 
 	<table><colgroup><col width="50%"><col width="50%"></colgroup><tbody valign="top"><tr><td><h3>High-level Operations</h3>
 
-High-level cluster operations consist primarily of starting, stopping, and
-restarting a cluster with the ``ceph`` service;  checking the cluster's health;
-and, monitoring an operating cluster.
+High-level cluster operations consist primarily of starting and stopping the
+Ceph daemons, checking the cluster's health, and monitoring an operating
+cluster.
 
 .. toctree::
 	:maxdepth: 1
@@ -20,7 +20,8 @@ and, monitoring an operating cluster.
 	monitoring
 	monitoring-osd-pg
 	user-management
-	pg-repair
+        pgcalc/index
+        fdcalc/index
 
 .. raw:: html
 
@@ -39,8 +40,13 @@ CRUSH algorithm.
 	erasure-code
 	cache-tiering
 	placement-groups
-	balancer
+        pg-states
+        pg-concepts
 	upmap
+        read-balancer
+        balancer
+	require-min-compat-client
+	require-osd-release
 	crush-map
 	crush-map-edits
 	stretch-mode
@@ -54,7 +60,7 @@ CRUSH algorithm.
 
 Low-level cluster operations consist of starting, stopping, and restarting a
 particular daemon within a cluster; changing the settings of a particular
-daemon or subsystem; and, adding a daemon to the cluster or removing a	daemon
+daemon or subsystem; and, adding a daemon to the cluster or removing a daemon
 from the cluster. The most common use cases for low-level operations include
 growing or shrinking the Ceph cluster and replacing legacy or failed hardware
 with new hardware.
@@ -74,9 +80,9 @@ with new hardware.
 
 	</td><td><h3>Troubleshooting</h3>
 
-Ceph is still on the leading edge, so you may encounter situations that require
-you to evaluate your Ceph configuration and modify your logging and debugging
-settings to identify and remedy issues you are encountering with your cluster.
+You may encounter situations that require you to evaluate your Ceph
+configuration and modify your logging and debugging settings to identify and
+remedy issues you are encountering with your cluster.
 
 .. toctree::
 	:maxdepth: 1

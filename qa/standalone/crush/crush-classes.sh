@@ -23,7 +23,7 @@ function run() {
 
     export CEPH_MON="127.0.0.1:7130" # git grep '\<7130\>' : there must be only one
     export CEPH_ARGS
-    CEPH_ARGS+="--fsid=$(uuidgen) --auth-supported=none "
+    CEPH_ARGS+="--fsid=$(uuidgen) --auth_cluster_required=none --auth_service_required=none --auth_client_required=none "
     CEPH_ARGS+="--mon-host=$CEPH_MON "
     #
     # Disable auto-class, so we can inject device class manually below
@@ -52,7 +52,7 @@ function get_osds_up() {
     local objectname=$2
 
     local osds=$(ceph --format xml osd map $poolname $objectname 2>/dev/null | \
-        $XMLSTARLET sel -t -m "//up/osd" -v . -o ' ')
+        xmlstarlet sel -t -m "//up/osd" -v . -o ' ')
     # get rid of the trailing space
     echo $osds
 }

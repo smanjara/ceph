@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -19,6 +20,8 @@
 
 #include "include/rados.h"
 
+#include "include/err.h"
+
 const boost::system::error_category& osd_category() noexcept;
 
 // Since the OSD mostly uses POSIX error codes plus a couple
@@ -27,7 +30,8 @@ const boost::system::error_category& osd_category() noexcept;
 
 enum class osd_errc {
   old_snapc = 85,  /* ORDERSNAP flag set; writer has old snapc*/
-  blocklisted = 108 /* blocklisted */
+  blocklisted = 108, /* blocklisted */
+  cmpext_mismatch = MAX_ERRNO /* cmpext failed */
 };
 
 namespace boost::system {

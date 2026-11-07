@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -68,6 +69,11 @@ private:
 
   uint64_t instance_id{0};
 
+  // Optional name suffix for objecter admin socket command.
+  // If empty, registers as "objecter_requests".
+  // If non-empty, registers as "objecter_requests.<name>".
+  std::string objecter_admin_socket_name;
+
   bool _dispatch(Message *m);
   bool ms_dispatch(Message *m) override;
 
@@ -96,13 +102,21 @@ private:
   int wait_for_osdmap();
 
 public:
-  boost::asio::io_context::strand finish_strand{poolctx.get_io_context()};
+  boost::asio::strand<boost::asio::io_context::executor_type>
+      finish_strand{poolctx.get_executor()};
 
   explicit RadosClient(CephContext *cct);
   ~RadosClient() override;
   int ping_monitor(std::string mon_id, std::string *result);
   int connect();
   void shutdown();
+
+  /// Set the name suffix for the objecter admin socket command.
+  /// Call before connect(). If non-empty, the command will be
+  /// registered as "objecter_requests.<name>" instead of "objecter_requests".
+  void set_objecter_admin_socket_name(std::string name) {
+    objecter_admin_socket_name = std::move(name);
+  }
 
   int watch_flush();
   int async_watch_flush(AioCompletionImpl *c);
@@ -131,7 +145,7 @@ public:
   int get_pool_stats(std::list<std::string>& ls, std::map<std::string,::pool_stat_t> *result,
     bool *per_pool);
   int get_fs_stats(ceph_statfs& result);
-  bool get_pool_is_selfmanaged_snaps_mode(const std::string& pool);
+  int pool_is_in_selfmanaged_snaps_mode(const std::string& pool);
 
   /*
   -1 was set as the default value and monitor will pickup the right crush rule with below order:
@@ -149,25 +163,25 @@ public:
 
   int blocklist_add(const std::string& client_address, uint32_t expire_seconds);
 
-  int mon_command(const std::vector<std::string>& cmd, const bufferlist &inbl,
+  int mon_command(std::vector<std::string> &&cmd, bufferlist &&inbl,
 	          bufferlist *outbl, std::string *outs);
-  void mon_command_async(const std::vector<std::string>& cmd, const bufferlist &inbl,
+  void mon_command_async(std::vector<std::string>&& cmd, bufferlist &&inbl,
                          bufferlist *outbl, std::string *outs, Context *on_finish);
   int mon_command(int rank,
-		  const std::vector<std::string>& cmd, const bufferlist &inbl,
+		  std::vector<std::string>&& cmd, bufferlist &&inbl,
 	          bufferlist *outbl, std::string *outs);
-  int mon_command(std::string name,
-		  const std::vector<std::string>& cmd, const bufferlist &inbl,
+  int mon_command(std::string&& name,
+		  std::vector<std::string>&& cmd, bufferlist &&inbl,
 	          bufferlist *outbl, std::string *outs);
-  int mgr_command(const std::vector<std::string>& cmd, const bufferlist &inbl,
+  int mgr_command(std::vector<std::string>&& cmd, bufferlist &&inbl,
 	          bufferlist *outbl, std::string *outs);
   int mgr_command(
-    const std::string& name,
-    const std::vector<std::string>& cmd, const bufferlist &inbl,
+    std::string&& name,
+    std::vector<std::string>&& cmd, bufferlist &&inbl,
     bufferlist *outbl, std::string *outs);
-  int osd_command(int osd, std::vector<std::string>& cmd, const bufferlist& inbl,
+  int osd_command(int osd, std::vector<std::string>&& cmd, bufferlist&& inbl,
                   bufferlist *poutbl, std::string *prs);
-  int pg_command(pg_t pgid, std::vector<std::string>& cmd, const bufferlist& inbl,
+  int pg_command(pg_t pgid, std::vector<std::string>&& cmd, bufferlist&& inbl,
 	         bufferlist *poutbl, std::string *prs);
 
   void handle_log(MLog *m);
@@ -190,7 +204,7 @@ public:
   mon_feature_t get_required_monitor_features() const;
 
   int get_inconsistent_pgs(int64_t pool_id, std::vector<std::string>* pgs);
-  const char** get_tracked_conf_keys() const override;
+  std::vector<std::string> get_tracked_keys() const noexcept override;
   void handle_conf_change(const ConfigProxy& conf,
                           const std::set <std::string> &changed) override;
 };

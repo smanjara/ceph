@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -19,6 +20,10 @@
 #include "msg/Messenger.h"
 #include "mon/MonMap.h"
 #include "common/Graylog.h"
+
+#include <algorithm>
+#include <iterator>
+#include <sstream>
 
 #define dout_subsys ceph_subsys_monc
 
@@ -61,9 +66,16 @@ LogClient::LogClient(CephContext *cct, Messenger *m, MonMap *mm,
 
 void LogChannel::set_log_to_monitors(bool v)
 {
+  std::lock_guard l(channel_lock);
+  _set_log_to_monitors(v);
+}
+
+void LogChannel::_set_log_to_monitors(bool v)
+{
+  ceph_assert(ceph_mutex_is_locked(channel_lock));
   if (log_to_monitors != v) {
-    parent->reset();
     log_to_monitors = v;
+    parent->reset();
   }
 }
 
@@ -75,12 +87,17 @@ void LogChannel::update_config(const clog_targets_conf_t& conf_strings)
 		 << " log_prios " << conf_strings.log_prios
 		 << dendl;
 
+  // hold channel_lock so that a concurrent do_log() cannot decide to
+  // queue an entry for the monitors based on the old log_to_monitors
+  // and then queue it after we have reset the queue.
+  std::lock_guard l(channel_lock);
+
   bool to_monitors = (conf_strings.log_to_monitors == "true");
   bool to_syslog = (conf_strings.log_to_syslog == "true");
   bool to_graylog = (conf_strings.log_to_graylog == "true");
   auto graylog_port = atoi(conf_strings.log_to_graylog_port.c_str());
 
-  set_log_to_monitors(to_monitors);
+  _set_log_to_monitors(to_monitors);
   set_log_to_syslog(to_syslog);
   set_syslog_facility(conf_strings.log_channels);
   set_log_prio(conf_strings.log_prios);
@@ -186,13 +203,11 @@ void LogChannel::do_log(clog_type prio, const std::string& s)
 
   // log to syslog?
   if (do_log_to_syslog()) {
-    ldout(cct,0) << __func__ << " log to syslog"  << dendl;
     e.log_to_syslog(get_log_prio(), get_syslog_facility());
   }
 
   // log to graylog?
   if (do_log_to_graylog()) {
-    ldout(cct,0) << __func__ << " log to graylog"  << dendl;
     graylog->log_log_entry(&e);
   }
 }
@@ -212,7 +227,7 @@ ceph::ref_t<Message> LogClient::get_mon_log_message(bool flush)
 bool LogClient::are_pending()
 {
   std::lock_guard l(log_lock);
-  return last_log > last_log_sent;
+  return !log_queue.empty() && log_queue.back().seq > last_log_sent;
 }
 
 ceph::ref_t<Message> LogClient::_get_mon_log_message()
@@ -228,8 +243,21 @@ ceph::ref_t<Message> LogClient::_get_mon_log_message()
   if (last_log_sent == last_log)
     return {};
 
+  // last_log is bumped for *every* log entry, including those that are
+  // not queued for the monitors (see LogChannel::do_log()), and any
+  // channel sharing this LogClient may empty the queue via reset().
+  // last_log - last_log_sent is therefore not a count of queued entries
+  // that we have yet to send: find the first unsent entry -- if any --
+  // by walking the (seq-ordered) queue instead.
+  auto p = std::find_if(log_queue.begin(), log_queue.end(),
+			[this](const LogEntry& e) {
+			  return e.seq > last_log_sent;
+			});
+  if (p == log_queue.end())
+    return {};
+
   // limit entries per message
-  unsigned num_unsent = last_log - last_log_sent;
+  unsigned num_unsent = (unsigned)std::distance(p, log_queue.end());
   unsigned num_send;
   if (cct->_conf->mon_client_max_log_entries_per_message > 0)
     num_send = std::min(num_unsent, (unsigned)cct->_conf->mon_client_max_log_entries_per_message);
@@ -241,12 +269,7 @@ ceph::ref_t<Message> LogClient::_get_mon_log_message()
 		<< " unsent " << num_unsent
 		<< " sending " << num_send << dendl;
   ceph_assert(num_unsent <= log_queue.size());
-  std::deque<LogEntry>::iterator p = log_queue.begin();
   std::deque<LogEntry> o;
-  while (p->seq <= last_log_sent) {
-    ++p;
-    ceph_assert(p != log_queue.end());
-  }
   while (num_send--) {
     ceph_assert(p != log_queue.end());
     o.push_back(*p);

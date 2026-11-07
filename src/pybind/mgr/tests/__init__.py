@@ -97,10 +97,10 @@ if 'UNITTEST' in os.environ:
             })
             return val
 
-        def _ceph_get(self, data_name):
+        def _ceph_get(self, data_name, mutable=False):
             return self.mock_store_get('_ceph_get', data_name, mock.MagicMock())
 
-        def _ceph_send_command(self, res, svc_type, svc_id, command, tag, inbuf):
+        def _ceph_send_command(self, res, svc_type, svc_id, command, tag, inbuf, *, one_shot=False):
 
             cmd = json.loads(command)
             getattr(self, '_mon_commands_sent', []).append(cmd)
@@ -213,13 +213,29 @@ if 'UNITTEST' in os.environ:
         class MockObjectNotFound(Exception):
             pass
 
+        class MockCephFSError(Exception):
+            pass
+
+        class MockCephFSOSError(MockCephFSError):
+            pass
+
+        class MockCephFSObjectNotFound(MockCephFSOSError):
+            pass
+
+        class MockCephFSNoData(MockCephFSOSError):
+            pass
+
         sys.modules.update({
             'rados': mock.MagicMock(
                 Error=MockRadosError,
                 OSError=MockRadosError,
                 ObjectNotFound=MockObjectNotFound),
             'rbd': mock.Mock(),
-            'cephfs': mock.Mock(),
+            'cephfs': mock.Mock(
+                Error=MockCephFSError,
+                OSError=MockCephFSOSError,
+                ObjectNotFound=MockCephFSObjectNotFound,
+                NoData=MockCephFSNoData),
         })
 
     # Unconditionally mock the rados objects when we're imported

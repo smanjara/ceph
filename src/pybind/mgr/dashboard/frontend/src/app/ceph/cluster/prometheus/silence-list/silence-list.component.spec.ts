@@ -4,16 +4,16 @@ import { BrowserAnimationsModule } from '@angular/platform-browser/animations';
 import { RouterTestingModule } from '@angular/router/testing';
 
 import { NgbNavModule } from '@ng-bootstrap/ng-bootstrap';
-import { ToastrModule } from 'ngx-toastr';
+
 import { of } from 'rxjs';
 
 import { PrometheusService } from '~/app/shared/api/prometheus.service';
-import { CriticalConfirmationModalComponent } from '~/app/shared/components/critical-confirmation-modal/critical-confirmation-modal.component';
+import { DeleteConfirmationModalComponent } from '~/app/shared/components/delete-confirmation-modal/delete-confirmation-modal.component';
 import { TableActionsComponent } from '~/app/shared/datatable/table-actions/table-actions.component';
 import { NotificationType } from '~/app/shared/enum/notification-type.enum';
 import { Permission } from '~/app/shared/models/permissions';
 import { AuthStorageService } from '~/app/shared/services/auth-storage.service';
-import { ModalService } from '~/app/shared/services/modal.service';
+import { ModalCdsService } from '~/app/shared/services/modal-cds.service';
 import { NotificationService } from '~/app/shared/services/notification.service';
 import { SharedModule } from '~/app/shared/shared.module';
 import { configureTestBed, PermissionHelper } from '~/testing/unit-test-helper';
@@ -31,7 +31,6 @@ describe('SilenceListComponent', () => {
     imports: [
       BrowserAnimationsModule,
       SharedModule,
-      ToastrModule.forRoot(),
       RouterTestingModule,
       HttpClientTestingModule,
       NgbNavModule
@@ -55,6 +54,13 @@ describe('SilenceListComponent', () => {
     expect(component).toBeTruthy();
   });
 
+  it('should create for read-only prometheus users', () => {
+    (authStorageService.getPermissions as jasmine.Spy).and.callFake(() => ({
+      prometheus: new Permission(['read'])
+    }));
+    expect(() => TestBed.createComponent(SilenceListComponent)).not.toThrow();
+  });
+
   it('should test all TableActions combinations', () => {
     const permissionHelper: PermissionHelper = new PermissionHelper(component.permission);
     const tableActions: TableActionsComponent = permissionHelper.setPermissionsAndGetActions(
@@ -64,35 +70,75 @@ describe('SilenceListComponent', () => {
     expect(tableActions).toEqual({
       'create,update,delete': {
         actions: ['Create', 'Recreate', 'Edit', 'Expire'],
-        primary: { multiple: 'Create', executing: 'Edit', single: 'Edit', no: 'Create' }
+        primary: {
+          multiple: 'Create',
+          executing: 'Create',
+          single: 'Create',
+          no: 'Create'
+        }
       },
       'create,update': {
         actions: ['Create', 'Recreate', 'Edit'],
-        primary: { multiple: 'Create', executing: 'Edit', single: 'Edit', no: 'Create' }
+        primary: {
+          multiple: 'Create',
+          executing: 'Create',
+          single: 'Create',
+          no: 'Create'
+        }
       },
       'create,delete': {
         actions: ['Create', 'Recreate', 'Expire'],
-        primary: { multiple: 'Create', executing: 'Expire', single: 'Expire', no: 'Create' }
+        primary: {
+          multiple: 'Create',
+          executing: 'Create',
+          single: 'Create',
+          no: 'Create'
+        }
       },
       create: {
         actions: ['Create', 'Recreate'],
-        primary: { multiple: 'Create', executing: 'Create', single: 'Create', no: 'Create' }
+        primary: {
+          multiple: 'Create',
+          executing: 'Create',
+          single: 'Create',
+          no: 'Create'
+        }
       },
       'update,delete': {
         actions: ['Edit', 'Expire'],
-        primary: { multiple: 'Edit', executing: 'Edit', single: 'Edit', no: 'Edit' }
+        primary: {
+          multiple: '',
+          executing: '',
+          single: '',
+          no: ''
+        }
       },
       update: {
         actions: ['Edit'],
-        primary: { multiple: 'Edit', executing: 'Edit', single: 'Edit', no: 'Edit' }
+        primary: {
+          multiple: 'Edit',
+          executing: 'Edit',
+          single: 'Edit',
+          no: 'Edit'
+        }
       },
       delete: {
         actions: ['Expire'],
-        primary: { multiple: 'Expire', executing: 'Expire', single: 'Expire', no: 'Expire' }
+        primary: {
+          multiple: 'Expire',
+          executing: 'Expire',
+          single: 'Expire',
+          no: 'Expire'
+        }
       },
       'no-permissions': {
         actions: [],
-        primary: { multiple: '', executing: '', single: '', no: '' }
+        primary: {
+          multiple: '',
+          executing: '',
+          single: '',
+          no: ''
+        }
       }
     });
   });
@@ -103,7 +149,7 @@ describe('SilenceListComponent', () => {
 
     const expireSilence = () => {
       component.expireSilence();
-      const deletion: CriticalConfirmationModalComponent = component.modalRef.componentInstance;
+      const deletion: DeleteConfirmationModalComponent = component.modalRef.componentInstance;
       // deletion.modalRef = new BsModalRef();
       deletion.ngOnInit();
       deletion.callSubmitAction();
@@ -119,7 +165,7 @@ describe('SilenceListComponent', () => {
       const mockObservable = () => of([]);
       spyOn(component, 'refresh').and.callFake(mockObservable);
       spyOn(prometheusService, 'expireSilence').and.callFake(mockObservable);
-      spyOn(TestBed.inject(ModalService), 'show').and.callFake((deletionClass, config) => {
+      spyOn(TestBed.inject(ModalCdsService), 'show').and.callFake((deletionClass, config) => {
         return {
           componentInstance: Object.assign(new deletionClass(), config)
         };

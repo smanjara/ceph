@@ -1,10 +1,11 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
-#ifndef RGW_SYNC_MODULE_AWS_H
-#define RGW_SYNC_MODULE_AWS_H
+#pragma once
 
 #include "rgw_sync_module.h"
+
+struct rgw_bucket_entry_owner;
 
 struct rgw_sync_aws_multipart_part_info {
   int part_num{0};
@@ -107,5 +108,3 @@ class RGWAWSSyncModule : public RGWSyncModule {
   bool supports_data_export() override { return false;}
   int create_instance(const DoutPrefixProvider *dpp, CephContext *cct, const JSONFormattable& config, RGWSyncModuleInstanceRef *instance) override;
 };
-
-#endif /* RGW_SYNC_MODULE_AWS_H */

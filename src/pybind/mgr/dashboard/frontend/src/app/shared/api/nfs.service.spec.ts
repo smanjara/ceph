@@ -27,8 +27,9 @@ describe('NfsService', () => {
   });
 
   it('should call list', () => {
-    service.list().subscribe();
-    const req = httpTesting.expectOne('api/nfs-ganesha/export');
+    let cluster_id = 'test';
+    service.list(cluster_id).subscribe();
+    const req = httpTesting.expectOne('api/nfs-ganesha/export?cluster_id=test');
     expect(req.request.method).toBe('GET');
   });
 
@@ -56,6 +57,18 @@ describe('NfsService', () => {
     service.delete('hostName', 'exportId').subscribe();
     const req = httpTesting.expectOne('api/nfs-ganesha/export/hostName/exportId');
     expect(req.request.method).toBe('DELETE');
+  });
+
+  it('should call listClusters with info by default', () => {
+    service.listClusters().subscribe();
+    const req = httpTesting.expectOne('api/nfs-ganesha/cluster?info=true');
+    expect(req.request.method).toBe('GET');
+  });
+
+  it('should call listClusters without info when requested', () => {
+    service.listClusters(false).subscribe();
+    const req = httpTesting.expectOne('api/nfs-ganesha/cluster?info=false');
+    expect(req.request.method).toBe('GET');
   });
 
   it('should call lsDir', () => {

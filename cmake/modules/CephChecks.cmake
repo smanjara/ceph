@@ -1,9 +1,3 @@
-if(CMAKE_COMPILER_IS_GNUCXX)
-  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 8.1)
-    message(FATAL_ERROR "GCC 8.1+ required due to C++17 requirements")
-  endif()
-endif()
-
 #Check Includes
 include(CheckIncludeFiles)
 include(CheckIncludeFileCXX)
@@ -81,7 +75,14 @@ check_symbol_exists(res_nquery "resolv.h" HAVE_RES_NQUERY)
 check_symbol_exists(F_SETPIPE_SZ "linux/fcntl.h" CEPH_HAVE_SETPIPE_SZ)
 check_symbol_exists(__func__ "" HAVE_FUNC)
 check_symbol_exists(__PRETTY_FUNCTION__ "" HAVE_PRETTY_FUNC)
-check_symbol_exists(getentropy "unistd.h" HAVE_GETENTROPY)
+CHECK_INCLUDE_FILES("sys/random.h" HAVE_SYS_RANDOM_H)
+check_symbol_exists(getentropy "unistd.h" HAVE_GETENTROPY_UNISTD)
+if(HAVE_SYS_RANDOM_H)
+  check_symbol_exists(getentropy "sys/random.h" HAVE_GETENTROPY_SYS_RANDOM)
+endif()
+if(HAVE_GETENTROPY_UNISTD OR HAVE_GETENTROPY_SYS_RANDOM)
+  set(HAVE_GETENTROPY ON)
+endif()
 
 include(CheckCXXSourceCompiles)
 check_cxx_source_compiles("
@@ -145,8 +146,25 @@ else(NOT CMAKE_CROSSCOMPILING)
   message(STATUS "Assuming unaligned access is supported")
 endif(NOT CMAKE_CROSSCOMPILING)
 
+# Clang warns on deprecated specialization used in system
+# headers. but libstdc++-12 uses deprecated get_temporary_buffer<>
+# to implement templated stable_sort(), which is turn used by
+# googletest. see https://github.com/llvm/llvm-project/issues/76515
+# Let's detect it, so we can disable -Wdeprecated-declarations when
+# building googletest.
+cmake_push_check_state(RESET)
+set(CMAKE_REQUIRED_FLAGS "-Werror=deprecated-declarations")
+check_cxx_source_compiles("
+#include <algorithm>
+int main() { std::stable_sort((int *)0, (int*)0); }
+" COMPILER_IGNORES_DEPRECATED_DECL_IN_SYSTEM_HEADERS)
+cmake_pop_check_state()
+
 set(version_script_source "v1 { }; v2 { } v1;")
-file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/version_script.txt "${version_script_source}")
+file(CONFIGURE
+  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/version_script.txt
+  CONTENT "${version_script_source}"
+  @ONLY)
 cmake_push_check_state(RESET)
 set(CMAKE_REQUIRED_FLAGS "-Werror -Wl,--version-script=${CMAKE_CURRENT_BINARY_DIR}/version_script.txt")
 check_c_source_compiles("
@@ -183,3 +201,12 @@ try_compile(HAVE_LINK_EXCLUDE_LIBS
   ${CMAKE_CURRENT_BINARY_DIR}
   SOURCES ${CMAKE_CURRENT_LIST_DIR}/CephCheck_link.c
   LINK_LIBRARIES "-Wl,--exclude-libs,ALL")
+
+# Mold linker applies --exclude-libs after version script processing,
+# which hides .symver-aliased symbols (e.g. rados_*) even when the
+# version script lists them as global.  Disable --exclude-libs for Mold;
+# version scripts already control symbol visibility.
+if(HAVE_LINK_EXCLUDE_LIBS AND USING_MOLD_LINKER)
+  message(STATUS "Mold linker -- disabling --exclude-libs (incompatible with .symver)")
+  set(HAVE_LINK_EXCLUDE_LIBS FALSE CACHE INTERNAL "" FORCE)
+endif()

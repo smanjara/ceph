@@ -6,12 +6,18 @@
     "plugins/index.js"
   ],
   "compilerOptions": {
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "typeRoots": [
+      "../node_modules",
+      "../node_modules/@types"
+    ],
     "sourceMap": false,
     "types": [
       "cypress",
-      "cypress-axe",
-      "@applitools/eyes-cypress"
+      "cypress-axe"
     ],
-    "target": "es6"
+    "target": "ES2022",
+    "skipLibCheck": true
   }
 }

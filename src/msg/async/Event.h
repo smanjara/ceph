@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -44,6 +45,7 @@
 #include <atomic>
 #include <mutex>
 #include <condition_variable>
+#include <vector>
 
 #include "common/ceph_time.h"
 #include "common/dout.h"
@@ -97,11 +99,7 @@ class EventCenter {
   using clock_type = ceph::coarse_mono_clock;
 
   struct AssociatedCenters {
-    EventCenter *centers[MAX_EVENTCENTER];
-    AssociatedCenters() {
-      // FIPS zeroization audit 20191115: this memset is not security related.
-      memset(centers, 0, MAX_EVENTCENTER * sizeof(EventCenter*));
-    }
+    EventCenter *centers[MAX_EVENTCENTER]{};
   };
 
   struct FileEvent {
@@ -163,7 +161,12 @@ class EventCenter {
   pthread_t owner = 0;
   std::mutex external_lock;
   std::atomic_ulong external_num_events;
-  std::deque<EventCallbackRef> external_events;
+  std::vector<EventCallbackRef> external_events;
+  // Scratch buffers reused across process_events() calls to avoid
+  // allocating.  This relies on std::vector::clear() keeping the
+  // capacity; a std::deque would free its blocks as it drains.
+  std::vector<EventCallbackRef> external_events_process;
+  std::vector<FiredFileEvent> fired_events;
   std::vector<FileEvent> file_events;
   EventDriver *driver;
   std::multimap<clock_type::time_point, TimeEvent> time_events;
@@ -205,7 +208,7 @@ class EventCenter {
 
   // Used by internal thread
   int create_file_event(int fd, int mask, EventCallbackRef ctxt);
-  uint64_t create_time_event(uint64_t milliseconds, EventCallbackRef ctxt);
+  uint64_t create_time_event(uint64_t microseconds, EventCallbackRef ctxt);
   void delete_file_event(int fd, int mask);
   void delete_time_event(uint64_t id);
   int process_events(unsigned timeout_microseconds, ceph::timespan *working_dur = nullptr);

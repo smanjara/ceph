@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -17,15 +18,9 @@
 #include "common/Formatter.h"
 #include "common/safe_io.h"
 
-#ifndef  WITH_SEASTAR
-#include "filestore/FileStore.h"
-#endif
 #include "memstore/MemStore.h"
 #if defined(WITH_BLUESTORE)
 #include "bluestore/BlueStore.h"
-#endif
-#ifndef WITH_SEASTAR
-#include "kstore/KStore.h"
 #endif
 
 using std::string;
@@ -46,7 +41,6 @@ std::unique_ptr<ObjectStore> ObjectStore::create(
   return nullptr;
 }
 
-#ifndef WITH_SEASTAR
 std::unique_ptr<ObjectStore> ObjectStore::create(
   CephContext *cct,
   const string& type,
@@ -54,46 +48,33 @@ std::unique_ptr<ObjectStore> ObjectStore::create(
   const string& journal,
   osflagbits_t flags)
 {
-  if (type == "filestore" || (type == "random" && rand() % 2)) {
-    return std::make_unique<FileStore>(cct, data, journal, flags);
-  }
-  if (type == "kstore" &&
-      cct->check_experimental_feature_enabled("kstore")) {
-    return std::make_unique<KStore>(cct, data);
+  if (type == "filestore") {
+    lgeneric_derr(cct) << __func__ << ": FileStore has been deprecated and is no longer supported" << dendl;
+    return nullptr;
   }
   return create(cct, type, data);
 }
-#endif
+
 
 int ObjectStore::probe_block_device_fsid(
   CephContext *cct,
   const string& path,
   uuid_d *fsid)
 {
-  int r;
-
 #if defined(WITH_BLUESTORE)
   // first try bluestore -- it has a crc on its header and will fail
   // reliably.
-  r = BlueStore::get_block_device_fsid(cct, path, fsid);
+  int r = BlueStore::get_block_device_fsid(cct, path, fsid);
   if (r == 0) {
     lgeneric_dout(cct, 0) << __func__ << " " << path << " is bluestore, "
 			  << *fsid << dendl;
     return r;
+  } else {
+    return -EINVAL;
   }
-#endif
-
-#ifndef WITH_SEASTAR
-  // okay, try FileStore (journal).
-  r = FileStore::get_block_device_fsid(cct, path, fsid);
-  if (r == 0) {
-    lgeneric_dout(cct, 0) << __func__ << " " << path << " is filestore, "
-			  << *fsid << dendl;
-    return r;
-  }
-#endif
-
+#else
   return -EINVAL;
+#endif
 }
 
 int ObjectStore::write_meta(const std::string& key,
@@ -122,4 +103,9 @@ int ObjectStore::read_meta(const std::string& key,
   }
   *value = string(buf, r);
   return 0;
+}
+
+int ObjectStore::get_ideal_list_max()
+{
+  return cct->_conf->osd_objectstore_ideal_list_max;
 }

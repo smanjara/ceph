@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -11,17 +12,17 @@
  * Foundation.  See file COPYING.
  */
 
-#include "MDSUtility.h"
-#include "RoleSelector.h"
 #include <vector>
 
-#include "mds/mdstypes.h"
+#include "include/rados/librados.hpp"
 #include "mds/LogEvent.h"
 #include "mds/events/EMetaBlob.h"
-
-#include "include/rados/librados.hpp"
+#include "mds/mdstypes.h"
 
 #include "JournalFilter.h"
+#include "MDSUtility.h"
+#include "ProgressTracker.h"
+#include "RoleSelector.h"
 
 class JournalScanner;
 
@@ -33,6 +34,7 @@ class JournalScanner;
 class JournalTool : public MDSUtility
 {
   private:
+    std::unique_ptr<ProgressTracker> progress_tracker;
     MDSRoleSelector role_selector;
     // Bit hacky, use this `rank` member to control behaviour of the
     // various main_ functions.
@@ -72,13 +74,17 @@ class JournalTool : public MDSUtility
         bool const dry_run,
         std::set<inodeno_t> *consumed_inos);
 
+    struct BoundaryMatch {
+      uint64_t pos = std::numeric_limits<uint64_t>::max();
+      uint32_t event_type = 0;
+    };
+
     // Splicing
     int erase_region(JournalScanner const &jp, uint64_t const pos, uint64_t const length);
 
     // Backing store helpers
     void encode_fullbit_as_inode(
         const EMetaBlob::fullbit &fb,
-        const bool bare,
         bufferlist *out_bl);
     int consume_inos(const std::set<inodeno_t> &inos);
 
@@ -92,10 +98,19 @@ class JournalTool : public MDSUtility
     // executed on all ranks.
     bool can_execute_for_all_ranks(const std::string &mode,
                                    const std::string &command);
+
+  std::string_view get_event_name_str(uint32_t event_type);
+
   public:
     static void usage();
+    int recover_header(bool dry_run);
+
     JournalTool() :
-      rank(0), other_pool(false) {}
+      rank(0), other_pool(false)
+    {
+      progress_tracker =
+          std::make_unique<ProgressTracker>("Journal processing");
+    }
     int main(std::vector<const char*> &argv);
 };
 

@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -34,6 +35,11 @@
 
 #define LARGEST_VECTOR_WORDSIZE 16
 #define talloc(type, num) (type *) malloc(sizeof(type)*(num))
+
+/* The new EC API work for Clay requires significant testing. We ignore all
+ * deprecated function use in this file until that refactor is done.
+ */
+IGNORE_DEPRECATED
 
 using namespace std;
 using namespace ceph;
@@ -87,14 +93,20 @@ int ErasureCodeClay::init(ErasureCodeProfile &profile,
 
 }
 
-unsigned int ErasureCodeClay::get_chunk_size(unsigned int object_size) const
+unsigned int ErasureCodeClay::get_chunk_size(unsigned int stripe_width) const
 {
   unsigned int alignment_scalar_code = pft.erasure_code->get_chunk_size(1);
   unsigned int alignment = sub_chunk_no * k * alignment_scalar_code;
   
-  return round_up_to(object_size, alignment) / k;
+  return round_up_to(stripe_width, alignment) / k;
 }
 
+size_t ErasureCodeClay::get_minimum_granularity()
+{
+  return mds.erasure_code->get_minimum_granularity();
+}
+
+[[deprecated]]
 int ErasureCodeClay::minimum_to_decode(const set<int> &want_to_read,
 				       const set<int> &available,
 				       map<int, vector<pair<int, int>>> *minimum)
@@ -106,6 +118,7 @@ int ErasureCodeClay::minimum_to_decode(const set<int> &want_to_read,
   }
 }
 
+[[deprecated]]
 int ErasureCodeClay::decode(const set<int> &want_to_read,
 			    const map<int, bufferlist> &chunks,
 			    map<int, bufferlist> *decoded, int chunk_size)
@@ -155,6 +168,46 @@ int ErasureCodeClay::encode_chunks(const set<int> &want_to_encode,
   }
   return res;
 }
+
+#if 0 \
+/* This code was partially tested, so keeping code, but we need more
+ * refactoring and testing before it is ready for production.
+ */
+int ErasureCodeClay::encode_chunks(const std::map<int, bufferptr> &in, 
+                                   std::map<int, bufferptr> &out)
+{
+  map<int, bufferlist> chunks;
+  set<int> parity_chunks;
+  unsigned int size = 0;
+  auto& nonconst_in = const_cast<std::map<int, bufferptr>&>(in);
+
+  for (auto &&[shard, ptr] : nonconst_in) {
+    if (size == 0) size = ptr.length();
+    else ceph_assert(size == ptr.length());
+    chunks[shard].append(nonconst_in[shard]);
+  }
+
+  for (auto &&[shard, ptr] : out) {
+    if (size == 0) size = ptr.length();
+    else ceph_assert(size == ptr.length());
+    chunks[shard+nu].append(out[shard]);
+    parity_chunks.insert(shard+nu);
+  }
+
+  for (int i = k; i < k + nu; i++) {
+    bufferptr buf(buffer::create_aligned(size, SIMD_ALIGN));
+    buf.zero();
+    chunks[i].push_back(std::move(buf));
+  }
+
+  int res = decode_layered(parity_chunks, &chunks);
+  for (int i = k ; i < k + nu; i++) {
+    // need to clean some of the intermediate chunks here!!
+    chunks[i].clear();
+  }
+  return res;
+}
+#endif
 
 int ErasureCodeClay::decode_chunks(const set<int> &want_to_read,
 				   const map<int, bufferlist> &chunks,
@@ -261,9 +314,9 @@ int ErasureCodeClay::parse(ErasureCodeProfile &profile,
       }
     }
   }
-  if ((d < k) || (d > k + m - 1)) {
+  if ((d < k + 1) || (d > k + m - 1)) {
     *ss << "value of d " << d
-        << " must be within [ " << k << "," << k+m-1 << "]" << std::endl;
+        << " must be within [" << k + 1 << "," << k + m - 1 << "]" << std::endl;
     err = -EINVAL;
     return err;
   }
@@ -306,7 +359,14 @@ int ErasureCodeClay::is_repair(const set<int> &want_to_read,
 
   if (includes(available_chunks.begin(), available_chunks.end(),
                want_to_read.begin(), want_to_read.end())) return 0;
+  // Oops, before the attempt to EC partial reads the fellowing
+  // condition was always true as `get_want_to_read_shards()` yields
+  // entire stripe. Unfortunately, we built upon this assumption and
+  // even `ECUtil::decode()` asserts on chunks being multiply of
+  // `chunk_size`.
+  // XXX: for now returning 0 and knocking the optimization out.
   if (want_to_read.size() > 1) return 0;
+  else return 0;
 
   int i = *want_to_read.begin();
   int lost_node_id = (i < k) ? i: i+nu;
@@ -471,7 +531,6 @@ int ErasureCodeClay::repair_one_lost_chunk(map<int, bufferlist> &recovered_data,
   int z_vec[t];
   map<int, set<int> > ordered_planes;
   map<int, int> repair_plane_to_ind;
-  int count_retrieved_sub_chunks = 0;
   int plane_ind = 0;
 
   bufferptr buf(buffer::create_aligned(sub_chunksize, SIMD_ALIGN));
@@ -492,7 +551,7 @@ int ErasureCodeClay::repair_one_lost_chunk(map<int, bufferlist> &recovered_data,
       }
       ceph_assert(order > 0);
       ordered_planes[order].insert(j);
-      // to keep track of a sub chunk within helper buffer recieved
+      // to keep track of a sub chunk within helper buffer received
       repair_plane_to_ind[j] = plane_ind;
       plane_ind++;
     }
@@ -507,7 +566,7 @@ int ErasureCodeClay::repair_one_lost_chunk(map<int, bufferlist> &recovered_data,
     }
   }
 
-  int lost_chunk;
+  int lost_chunk = 0;
   int count = 0;
   for ([[maybe_unused]] auto& [node, bl] : recovered_data) {
     lost_chunk = node;
@@ -558,8 +617,15 @@ int ErasureCodeClay::repair_one_lost_chunk(map<int, bufferlist> &recovered_data,
 	      pftsubchunks[i1] = temp_buf;
 	      pftsubchunks[i2].substr_of(U_buf[node_xy], z*sub_chunksize, sub_chunksize);
 	      pftsubchunks[i3] = known_subchunks[i3];
-	      for (int i=0; i<3; i++) {
-		pftsubchunks[i].rebuild_aligned(SIMD_ALIGN);
+	      for (auto& [idx, bl] : pftsubchunks) {
+		if (pft_erasures.count(idx)) {
+		  // written in place, see decode_uncoupled()
+		  ceph_assert(bl.is_contiguous());
+		} else {
+		  // helper data comes straight from the read reply and may be
+		  // misaligned; inputs can safely be copied
+		  bl.rebuild_aligned(SIMD_ALIGN);
+		}
 	      }
 	      pft.erasure_code->decode_chunks(pft_erasures, known_subchunks, &pftsubchunks);
 	    } else {
@@ -574,8 +640,15 @@ int ErasureCodeClay::repair_one_lost_chunk(map<int, bufferlist> &recovered_data,
 		pftsubchunks[i1] = known_subchunks[i1];
 		pftsubchunks[i2].substr_of(U_buf[node_xy], z*sub_chunksize, sub_chunksize);
 		pftsubchunks[i3].substr_of(temp_buf, 0, sub_chunksize);
-		for (int i=0; i<3; i++) {
-		  pftsubchunks[i].rebuild_aligned(SIMD_ALIGN);
+		for (auto& [idx, bl] : pftsubchunks) {
+		  if (pft_erasures.count(idx)) {
+		    // written in place, see decode_uncoupled()
+		    ceph_assert(bl.is_contiguous());
+		  } else {
+		    // helper data comes straight from the read reply and may be
+		    // misaligned; inputs can safely be copied
+		    bl.rebuild_aligned(SIMD_ALIGN);
+		  }
 		}
 		pft.erasure_code->decode_chunks(pft_erasures, known_subchunks, &pftsubchunks);
 	      } else {
@@ -615,7 +688,6 @@ int ErasureCodeClay::repair_one_lost_chunk(map<int, bufferlist> &recovered_data,
 	    memcpy(&coupled_chunk[z*sub_chunksize],
 		   &uncoupled_chunk[z*sub_chunksize],
 		   sub_chunksize);
-	    count_retrieved_sub_chunks++;
 	  } else {
 	    ceph_assert(y == lost_chunk / q);
 	    ceph_assert(node_sw == lost_chunk);
@@ -628,8 +700,15 @@ int ErasureCodeClay::repair_one_lost_chunk(map<int, bufferlist> &recovered_data,
 	    pftsubchunks[i1].substr_of(recovered_data[node_sw], z_sw*sub_chunksize, sub_chunksize);
 	    pftsubchunks[i2] = known_subchunks[i2];
 	    pftsubchunks[i3] = temp_buf;
-	    for (int i=0; i<3; i++) {
-	      pftsubchunks[i].rebuild_aligned(SIMD_ALIGN);
+	    for (auto& [idx, bl] : pftsubchunks) {
+	      if (pft_erasures.count(idx)) {
+	        // written in place, see decode_uncoupled()
+	        ceph_assert(bl.is_contiguous());
+	      } else {
+	        // helper data comes straight from the read reply and may be
+	        // misaligned; inputs can safely be copied
+	        bl.rebuild_aligned(SIMD_ALIGN);
+	      }
 	    }
 	    pft.erasure_code->decode_chunks(pft_erasures, known_subchunks, &pftsubchunks);
 	  }
@@ -750,8 +829,14 @@ int ErasureCodeClay::decode_uncoupled(const set<int>& erased_chunks, int z, int 
     } else {
       all_subchunks[i].substr_of(U_buf[i], z*sc_size, sc_size);
     }
-    all_subchunks[i].rebuild_aligned_size_and_memory(sc_size, SIMD_ALIGN);
-    assert(all_subchunks[i].is_contiguous());
+  }
+  // The erased sub-chunks are views into U_buf that the scalar MDS decode
+  // writes in place, so they must not be moved. A sub-chunk is only aligned
+  // to sc_size, which can be smaller than SIMD_ALIGN (32 bytes for k=12 m=4
+  // d=15); realigning such a view silently copies it and the decoded data is
+  // lost.
+  for (auto e : erased_chunks) {
+    ceph_assert(all_subchunks[e].is_contiguous());
   }
 
   mds.erasure_code->decode_chunks(erased_chunks, known_subchunks, &all_subchunks);
@@ -802,8 +887,9 @@ void ErasureCodeClay::recover_type1_erasure(map<int, bufferlist>* chunks,
   pftsubchunks[i2] = known_subchunks[i2];
   pftsubchunks[i3].push_back(ptr);
 
-  for (int i=0; i<3; i++) {
-    pftsubchunks[i].rebuild_aligned_size_and_memory(sc_size, SIMD_ALIGN);
+  for (auto e : erased_chunks) {
+    // written in place, see decode_uncoupled()
+    ceph_assert(pftsubchunks[e].is_contiguous());
   }
 
   pft.erasure_code->decode_chunks(erased_chunks, known_subchunks, &pftsubchunks);
@@ -830,8 +916,9 @@ void ErasureCodeClay::get_coupled_from_uncoupled(map<int, bufferlist>* chunks,
   pftsubchunks[2] = uncoupled_subchunks[2];
   pftsubchunks[3] = uncoupled_subchunks[3];
 
-  for (int i=0; i<3; i++) {
-    pftsubchunks[i].rebuild_aligned_size_and_memory(sc_size, SIMD_ALIGN);
+  for (auto e : erased_chunks) {
+    // written in place, see decode_uncoupled()
+    ceph_assert(pftsubchunks[e].is_contiguous());
   }
   pft.erasure_code->decode_chunks(erased_chunks, uncoupled_subchunks, &pftsubchunks);
 }
@@ -862,8 +949,9 @@ void ErasureCodeClay::get_uncoupled_from_coupled(map<int, bufferlist>* chunks,
   pftsubchunks[1] = coupled_subchunks[1];
   pftsubchunks[i2].substr_of(U_buf[node_xy], z * sc_size, sc_size);
   pftsubchunks[i3].substr_of(U_buf[node_sw], z_sw * sc_size, sc_size);
-  for (int i=0; i<3; i++) {
-    pftsubchunks[i].rebuild_aligned_size_and_memory(sc_size, SIMD_ALIGN);
+  for (auto e : erased_chunks) {
+    // written in place, see decode_uncoupled()
+    ceph_assert(pftsubchunks[e].is_contiguous());
   }
   pft.erasure_code->decode_chunks(erased_chunks, coupled_subchunks, &pftsubchunks);
 }
@@ -890,3 +978,5 @@ void ErasureCodeClay::get_plane_vector(int z, int* z_vec)
     z = (z - z_vec[t-1-i]) / q;
   }
 }
+
+END_IGNORE_DEPRECATED

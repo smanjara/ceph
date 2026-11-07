@@ -1,9 +1,11 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <iostream>
 #include "LogOperation.h"
 #include "librbd/cache/pwl/Types.h"
+#include "common/debug.h"
+#include "common/perf_counters.h"
 
 #define dout_subsys ceph_subsys_rbd_pwl
 #undef dout_prefix
@@ -146,7 +148,7 @@ void GenericWriteLogOperation::appending() {
   }
 }
 
-/* Called when the write log operation is completed in all log replicas */
+/* Called when the write log operation is completed */
 void GenericWriteLogOperation::complete(int result) {
   appending();
   Context *on_persist = nullptr;
@@ -189,14 +191,14 @@ WriteLogOperation::WriteLogOperation(WriteLogOperationSet &set,
 
 WriteLogOperation::~WriteLogOperation() { }
 
-void WriteLogOperation::init(bool has_data, std::vector<WriteBufferAllocation>::iterator allocation,
+void WriteLogOperation::init(bool has_data,
                              uint64_t current_sync_gen,
                              uint64_t last_op_sequence_num,
                              bufferlist &write_req_bl, uint64_t buffer_offset,
                              bool persist_on_flush) {
   log_entry->init(has_data, current_sync_gen, last_op_sequence_num,
                   persist_on_flush);
-  buffer_alloc = &(*allocation);
+  m_perfcounter->inc(l_librbd_pwl_log_op_bytes, log_entry->write_bytes());
   bl.substr_of(write_req_bl, buffer_offset, log_entry->write_bytes());
   log_entry->init_cache_bl(write_req_bl, buffer_offset,
                            log_entry->write_bytes());
@@ -211,7 +213,7 @@ std::ostream &WriteLogOperation::format(std::ostream &os) const {
   } else {
     os << ", log_entry=nullptr";
   }
-  os << ", bl=[" << bl << "], buffer_alloc=" << buffer_alloc;
+  os << ", bl=[" << bl << "]";
   return os;
 }
 
@@ -266,8 +268,7 @@ WriteLogOperationSet::~WriteLogOperationSet() { }
 
 std::ostream &operator<<(std::ostream &os,
                          const WriteLogOperationSet &s) {
-  os << "cell=" << (void*)s.cell
-     << ", extent_ops_appending=" << s.extent_ops_appending
+  os << "extent_ops_appending=" << s.extent_ops_appending
      << ", extent_ops_persist=" << s.extent_ops_persist;
   return os;
 }

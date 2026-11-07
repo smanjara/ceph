@@ -9,6 +9,10 @@ import { of as observableOf, throwError } from 'rxjs';
 import { configureTestBed } from '~/testing/unit-test-helper';
 import { MgrModuleService } from '../api/mgr-module.service';
 import { ModuleStatusGuardService } from './module-status-guard.service';
+import { AuthStorageService } from './auth-storage.service';
+
+import { CdDatePipe } from '../pipes/cd-date.pipe';
+import { SharedModule } from '../shared.module';
 
 describe('ModuleStatusGuardService', () => {
   let service: ModuleStatusGuardService;
@@ -17,8 +21,9 @@ describe('ModuleStatusGuardService', () => {
   let route: ActivatedRouteSnapshot;
   let ngZone: NgZone;
   let mgrModuleService: MgrModuleService;
+  let authStorageService: AuthStorageService;
 
-  @Component({ selector: 'cd-foo', template: '' })
+  @Component({ selector: 'cd-foo', template: '', standalone: false })
   class FooComponent {}
 
   const fakeService = {
@@ -36,11 +41,12 @@ describe('ModuleStatusGuardService', () => {
   ) => {
     let result: boolean;
     spyOn(httpClient, 'get').and.returnValue(observableOf(getResult));
+    spyOn(authStorageService, 'getPermissions').and.returnValue({
+      configOpt: { read: configOptPermission }
+    } as any);
     const orchBackend = { orchestrator: backend };
     const getConfigSpy = spyOn(mgrModuleService, 'getConfig');
-    configOptPermission
-      ? getConfigSpy.and.returnValue(observableOf(orchBackend))
-      : getConfigSpy.and.returnValue(throwError({}));
+    getConfigSpy.and.returnValue(configOptPermission ? observableOf(orchBackend) : throwError({}));
     ngZone.run(() => {
       service.canActivateChild(route).subscribe((resp) => {
         result = resp;
@@ -53,8 +59,12 @@ describe('ModuleStatusGuardService', () => {
   };
 
   configureTestBed({
-    imports: [RouterTestingModule.withRoutes(routes)],
-    providers: [ModuleStatusGuardService, { provide: HttpClient, useValue: fakeService }],
+    imports: [RouterTestingModule.withRoutes(routes), SharedModule],
+    providers: [
+      ModuleStatusGuardService,
+      { provide: HttpClient, useValue: fakeService },
+      CdDatePipe
+    ],
     declarations: [FooComponent]
   });
 
@@ -62,6 +72,7 @@ describe('ModuleStatusGuardService', () => {
     service = TestBed.inject(ModuleStatusGuardService);
     httpClient = TestBed.inject(HttpClient);
     mgrModuleService = TestBed.inject(MgrModuleService);
+    authStorageService = TestBed.inject(AuthStorageService);
     router = TestBed.inject(Router);
     route = new ActivatedRouteSnapshot();
     route.url = [];
@@ -96,7 +107,7 @@ describe('ModuleStatusGuardService', () => {
     testCanActivate({ available: true, message: 'foo' }, true, '/', 'rook');
   }));
 
-  it('should redirect to the "redirectTo" link for user without sufficient permission', fakeAsync(() => {
-    testCanActivate({ available: true, message: 'foo' }, true, '/foo', 'rook', false);
+  it('should skip backend check for user without config-opt permission', fakeAsync(() => {
+    testCanActivate({ available: true, message: 'foo' }, true, '/', 'rook', false);
   }));
 });

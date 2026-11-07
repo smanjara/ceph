@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "block_driver.h"
 
@@ -37,6 +37,7 @@ private:
   size_t size = 0;
   const config_t config;
   std::unique_ptr<crimson::os::FuturizedStore> fs;
+  crimson::os::FuturizedStore::Shard* sharded_fs;
 
   struct pg_analogue_t {
     crimson::os::CollectionRef collection;

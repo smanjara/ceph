@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -16,11 +17,16 @@
 #define CEPH_LOGCLIENT_H
 
 #include <atomic>
+#include <deque>
+#include <map>
+#include <string>
+
 #include "common/LogEntry.h"
 #include "common/ceph_mutex.h"
 #include "common/ostream_temp.h"
 #include "common/ref.h"
 #include "include/health.h"
+#include "include/uuid.h"
 
 class LogClient;
 class MLog;
@@ -180,6 +186,9 @@ private:
    * update config values from parsed k/v std::map for each config option
    */
   void update_config(const clog_targets_conf_t& conf_strings);
+
+  /// set log_to_monitors with channel_lock already held
+  void _set_log_to_monitors(bool v);
 
   clog_targets_conf_t parse_log_client_options(CephContext* conf_cct);
 };

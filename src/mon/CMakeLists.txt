@@ -1,5 +1,4 @@
 set(lib_mon_srcs
-  ${CMAKE_SOURCE_DIR}/src/auth/cephx/CephxKeyServer.cc
   ${CMAKE_SOURCE_DIR}/src/auth/cephx/CephxServiceHandler.cc
   ${CMAKE_SOURCE_DIR}/src/auth/AuthServiceHandler.cc
   Paxos.cc
@@ -11,6 +10,7 @@ set(lib_mon_srcs
   MgrMonitor.cc
   MgrStatMonitor.cc
   Monitor.cc
+  MonitorBackup.cc
   MonmapMonitor.cc
   LogMonitor.cc
   AuthMonitor.cc
@@ -21,6 +21,8 @@ set(lib_mon_srcs
   ConnectionTracker.cc
   HealthMonitor.cc
   KVMonitor.cc
+  NVMeofGwMon.cc
+  NVMeofGwMap.cc
   ../mds/MDSAuthCaps.cc
   ../mgr/mgr_commands.cc
   ../osd/OSDCap.cc
@@ -38,9 +40,10 @@ endif()
 add_library(mon STATIC
   ${lib_mon_srcs})
 target_link_libraries(mon
+  legacy-option-headers
   kv
   heap_profiler
-  fmt::fmt)
+  ${FMT_LIB})
 if(WITH_JAEGER)
   target_link_libraries(mon jaeger_base)
 endif()

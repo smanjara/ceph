@@ -1,10 +1,14 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "rgw_xml.h"
+#include "common/XMLFormatter.h"
+
 #include <gtest/gtest.h>
 #include <list>
 #include <stdexcept>
+
+using namespace ceph;
 
 struct NameAndStatus {
   // these are sub-tags
@@ -376,7 +380,7 @@ TEST(TestDecoder, BasicParsing)
   ASSERT_STREQ(to_string(result).c_str(), expected_output);
 }
 
-TEST(TestDecoder, MalfomedInput)
+TEST(TestDecoder, MalformedInput)
 {
   RGWXMLDecoder::XMLParser parser;
   ASSERT_TRUE(parser.init());

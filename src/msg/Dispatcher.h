@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -22,18 +23,25 @@
 #include "include/common_fwd.h"
 #include "msg/MessageRef.h"
 
+#include <variant>
+
 class Messenger;
 class Connection;
-class CryptoKey;
 class KeyStore;
 
 class Dispatcher {
 public:
+  /* Ordering of dispatch for a list of Dispatchers. */
+  using priority_t = uint32_t;
+  static constexpr priority_t PRIORITY_HIGH = std::numeric_limits<priority_t>::max() / 4;
+  static constexpr priority_t PRIORITY_DEFAULT = std::numeric_limits<priority_t>::max() / 2;
+  static constexpr priority_t PRIORITY_LOW = (std::numeric_limits<priority_t>::max() / 4) * 3;
+
   explicit Dispatcher(CephContext *cct_)
     : cct(cct_)
   {
   }
-  virtual ~Dispatcher() { }
+  virtual ~Dispatcher() = default;
 
   /**
    * The Messenger calls this function to query if you are capable
@@ -59,9 +67,11 @@ public:
    * @param m The message we want to fast dispatch.
    * @returns True if the message can be fast dispatched; false otherwise.
    */
-  virtual bool ms_can_fast_dispatch(const Message *m) const { return false; }
-  virtual bool ms_can_fast_dispatch2(const MessageConstRef& m) const {
-    return ms_can_fast_dispatch(m.get());
+  virtual bool ms_can_fast_dispatch(const Message* m) const {
+    return false;
+  }
+  virtual bool ms_can_fast_dispatch2(const Message& m) const {
+    return ms_can_fast_dispatch(&m);
   }
   /**
    * This function determines if a dispatcher is included in the
@@ -118,7 +128,24 @@ public:
   }
 
   /* ms_dispatch2 because otherwise the child must define both */
-  virtual bool ms_dispatch2(const MessageRef &m) {
+  struct HANDLED {};
+  struct UNHANDLED {};
+  struct ACKNOWLEDGED {};
+  typedef std::variant<bool, HANDLED, UNHANDLED, ACKNOWLEDGED> dispatch_result_t;
+
+  static inline dispatch_result_t fold_dispatch_result(dispatch_result_t r) {
+    if (std::holds_alternative<bool>(r)) {
+      if (std::get<bool>(r)) {
+        return HANDLED();
+      } else {
+        return UNHANDLED();
+      }
+    } else {
+      return r;
+    }
+  }
+
+  virtual dispatch_result_t ms_dispatch2(const MessageRef &m) {
     /* allow old style dispatch handling that expects a Message * with a floating ref */
     MessageRef mr(m);
     if (ms_dispatch(mr.get())) {
@@ -204,14 +231,19 @@ public:
   /**
    * handle successful authentication (msgr2)
    *
-   * Authenticated result/state will be attached to the Connection.
+   * Authenticated result/state will be attached to the Connection. This is
+   * called via the MonClient.
    *
-   * return 1 for success
-   * return 0 for no action (let another Dispatcher handle it)
-   * return <0 for failure (failure to parse caps, for instance)
+   * Do not acquire locks in this method! It is considered "fast" delivery.
+   *
+   * Note: MonClient is the only caller of this method and it is configured
+   *       to only call a single dispatcher.
+   *
+   * return true for success (auth succeeds for this stage of session construction)
+   * return false for failure (failure to parse caps, for instance)
    */
-  virtual int ms_handle_authentication(Connection *con) {
-    return 0;
+  [[nodiscard]] virtual bool ms_handle_fast_authentication(Connection *con) {
+    return false;
   }
 
   /**

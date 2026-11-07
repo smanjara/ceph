@@ -5,15 +5,18 @@ import socket
 import time
 from threading import Event
 
+from .cli import TelegrafCLICommand
+
 from telegraf.basesocket import BaseSocket
 from telegraf.protocol import Line
-from mgr_module import CLICommand, CLIReadCommand, MgrModule, Option, OptionValue, PG_STATES
+from mgr_module import MgrModule, Option, OptionValue, PG_STATES
 
 from typing import cast, Any, Dict, Iterable, Optional, Tuple
 from urllib.parse import urlparse
 
 
 class Module(MgrModule):
+    CLICommand = TelegrafCLICommand
     MODULE_OPTIONS = [
         Option(name='address',
                default='unixgram:///tmp/telegraf.sock'),
@@ -72,7 +75,7 @@ class Module(MgrModule):
                 }
 
     def get_daemon_stats(self) -> Iterable[Dict[str, Any]]:
-        for daemon, counters in self.get_all_perf_counters().items():
+        for daemon, counters in self.get_unlabeled_perf_counters().items():
             svc_type, svc_id = daemon.split('.', 1)
             metadata = self.get_metadata(svc_type, svc_id)
             if not metadata:
@@ -234,14 +237,14 @@ class Module(MgrModule):
         self.run = False
         self.event.set()
 
-    @CLIReadCommand('telegraf config-show')
+    @TelegrafCLICommand.Read('telegraf config-show')
     def config_show(self) -> Tuple[int, str, str]:
         """
         Show current configuration
         """
         return 0, json.dumps(self.config), ''
 
-    @CLICommand('telegraf config-set')
+    @TelegrafCLICommand('telegraf config-set')
     def config_set(self, key: str, value: str) -> Tuple[int, str, str]:
         """
         Set a configuration value
@@ -253,7 +256,7 @@ class Module(MgrModule):
         self.set_module_option(key, value)
         return 0, 'Configuration option {0} updated'.format(key), ''
 
-    @CLICommand('telegraf send')
+    @TelegrafCLICommand('telegraf send')
     def send(self) -> Tuple[int, str, str]:
         """
         Force sending data to Telegraf

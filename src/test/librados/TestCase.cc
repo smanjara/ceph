@@ -1,7 +1,8 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <errno.h>
+#include <fmt/format.h>
 #include "test/librados/test.h"
 #include "test/librados/TestCase.h"
 #include "include/scope_guard.h"
@@ -13,7 +14,8 @@ rados_t RadosTestNS::s_cluster = NULL;
 
 void RadosTestNS::SetUpTestCase()
 {
-  pool_name = get_temp_pool_name();
+  auto pool_prefix = fmt::format("{}_", ::testing::UnitTest::GetInstance()->current_test_case()->name());
+  pool_name = get_temp_pool_name(pool_prefix);
   ASSERT_EQ("", create_one_pool(pool_name, &s_cluster));
 }
 
@@ -65,12 +67,15 @@ rados_t RadosTestECNS::s_cluster = NULL;
 
 void RadosTestECNS::SetUpTestCase()
 {
-  pool_name = get_temp_pool_name();
+  SKIP_IF_CRIMSON();
+  auto pool_prefix = fmt::format("{}_", ::testing::UnitTest::GetInstance()->current_test_case()->name());
+  pool_name = get_temp_pool_name(pool_prefix);
   ASSERT_EQ("", create_one_ec_pool(pool_name, &s_cluster));
 }
 
 void RadosTestECNS::TearDownTestCase()
 {
+  SKIP_IF_CRIMSON();
   ASSERT_EQ(0, destroy_one_ec_pool(pool_name, &s_cluster));
 }
 
@@ -94,22 +99,30 @@ void RadosTestECNS::TearDown()
   rados_ioctx_destroy(ioctx);
 }
 
-std::string RadosTest::pool_name;
+std::string RadosTest::pool_name_default;
+std::string RadosTest::pool_name_split;
 rados_t RadosTest::s_cluster = NULL;
 
 void RadosTest::SetUpTestCase()
 {
-  pool_name = get_temp_pool_name();
-  ASSERT_EQ("", create_one_pool(pool_name, &s_cluster));
+  auto pool_prefix = fmt::format("{}_", ::testing::UnitTest::GetInstance()->current_test_case()->name());
+  pool_name_default = get_temp_pool_name(pool_prefix);
+  pool_name_split = get_temp_pool_name(pool_prefix);
+  ASSERT_EQ("", connect_cluster(&s_cluster));
+  ASSERT_EQ("", create_pool(pool_name_default, &s_cluster));
+  ASSERT_EQ("", create_pool(pool_name_split, &s_cluster));
 }
 
 void RadosTest::TearDownTestCase()
 {
-  ASSERT_EQ(0, destroy_one_pool(pool_name, &s_cluster));
+  ASSERT_EQ(0, destroy_pool(pool_name_default, &s_cluster));
+  ASSERT_EQ(0, destroy_pool(pool_name_split, &s_cluster));
+  rados_shutdown(s_cluster);
 }
 
 void RadosTest::SetUp()
 {
+  pool_name = GetParam() ? pool_name_split : pool_name_default;
   cluster = RadosTest::s_cluster;
   ASSERT_EQ(0, rados_ioctx_create(cluster, pool_name.c_str(), &ioctx));
   nspace = get_temp_pool_name();
@@ -128,14 +141,14 @@ void RadosTest::TearDown()
   rados_ioctx_destroy(ioctx);
 }
 
-void RadosTest::cleanup_default_namespace(rados_ioctx_t ioctx)
+void RadosTestBase::cleanup_default_namespace(rados_ioctx_t ioctx)
 {
   // remove all objects from the default namespace to avoid polluting
   // other tests
   cleanup_namespace(ioctx, "");
 }
 
-void RadosTest::cleanup_namespace(rados_ioctx_t ioctx, std::string ns)
+void RadosTestBase::cleanup_namespace(rados_ioctx_t ioctx, std::string ns)
 {
   rados_ioctx_snap_set_read(ioctx, LIBRADOS_SNAP_HEAD);
   rados_ioctx_set_namespace(ioctx, ns.c_str());
@@ -154,22 +167,45 @@ void RadosTest::cleanup_namespace(rados_ioctx_t ioctx, std::string ns)
   }
 }
 
-std::string RadosTestEC::pool_name;
+std::string RadosTestEC::pool_name_default;
+std::string RadosTestEC::pool_name_fast;
+std::string RadosTestEC::pool_name_fast_split;
 rados_t RadosTestEC::s_cluster = NULL;
 
 void RadosTestEC::SetUpTestCase()
 {
-  pool_name = get_temp_pool_name();
-  ASSERT_EQ("", create_one_ec_pool(pool_name, &s_cluster));
+  auto pool_prefix = fmt::format("{}_", ::testing::UnitTest::GetInstance()->current_test_case()->name()); 
+  pool_name_default = get_temp_pool_name(pool_prefix);
+  pool_name_fast = get_temp_pool_name(pool_prefix);
+  pool_name_fast_split = get_temp_pool_name(pool_prefix);
+  ASSERT_EQ("", connect_cluster(&s_cluster));
+  ASSERT_EQ("", create_ec_pool(pool_name_default, &s_cluster));
+  ASSERT_EQ("", create_ec_pool(pool_name_fast, &s_cluster, true));
+  ASSERT_EQ("", create_ec_pool(pool_name_fast_split, &s_cluster, true));
 }
 
 void RadosTestEC::TearDownTestCase()
 {
-  ASSERT_EQ(0, destroy_one_ec_pool(pool_name, &s_cluster));
+  ASSERT_EQ(0, destroy_ec_pool(pool_name_default, &s_cluster));
+  ASSERT_EQ(0, destroy_ec_pool(pool_name_fast, &s_cluster));
+  ASSERT_EQ(0, destroy_ec_pool(pool_name_fast_split, &s_cluster));
+  rados_shutdown(s_cluster);
 }
 
 void RadosTestEC::SetUp()
 {
+  const auto& params = GetParam();
+  bool fast_ec = std::get<0>(params);
+  bool split_ops = std::get<1>(params);
+  if (fast_ec && split_ops) {
+    pool_name = pool_name_fast_split;
+  } else if (fast_ec) {
+    pool_name = pool_name_fast;
+  } else if (!split_ops) {
+    pool_name = pool_name_default;
+  } else {
+    GTEST_SKIP() << "Legacy EC does not support split ops";
+  }
   cluster = RadosTestEC::s_cluster;
   ASSERT_EQ(0, rados_ioctx_create(cluster, pool_name.c_str(), &ioctx));
   nspace = get_temp_pool_name();

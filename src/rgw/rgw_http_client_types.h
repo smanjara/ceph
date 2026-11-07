@@ -1,6 +1,6 @@
 
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -56,7 +56,7 @@ class RGWIOProvider
 
 public:
   RGWIOProvider() {}
-  virtual ~RGWIOProvider() = default; 
+  virtual ~RGWIOProvider() = default;
 
   void assign_io(RGWIOIDProvider& io_id_provider, int io_type = -1);
   rgw_io_id get_io_id(int io_type) {

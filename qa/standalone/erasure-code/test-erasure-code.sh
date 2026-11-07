@@ -24,7 +24,7 @@ function run() {
 
     export CEPH_MON="127.0.0.1:7101" # git grep '\<7101\>' : there must be only one
     export CEPH_ARGS
-    CEPH_ARGS+="--fsid=$(uuidgen) --auth-supported=none "
+    CEPH_ARGS+="--fsid=$(uuidgen) --auth_cluster_required=none --auth_service_required=none --auth_client_required=none "
     CEPH_ARGS+="--mon-host=$CEPH_MON --mon-osd-prime-pg-temp=false"
 
     setup $dir || return 1
@@ -249,6 +249,19 @@ function TEST_rados_put_get_shec() {
     ceph osd erasure-code-profile rm $profile
 }
 
+function chunk_size() {
+    local chunk_size=$(ceph-conf --show-config-value osd_pool_erasure_code_stripe_unit)
+    if [ "$chunk_size" -eq 0 ]; then
+      local ec_opt=$(ceph-conf --show-config-value osd_pool_default_flag_ec_optimizations)
+      if [ "$ec_opt" = "true" ]; then
+        chunk_size=$((16 * 1024))
+      else 
+        chunk_size=$((4 * 1024))
+      fi
+    fi
+    echo $chunk_size
+}
+
 function TEST_alignment_constraints() {
     local payload=ABC
     echo "$payload" > $dir/ORIGINAL
@@ -257,17 +270,13 @@ function TEST_alignment_constraints() {
     # imposed by the stripe width
     # See http://tracker.ceph.com/issues/8622
     #
-    local stripe_unit=$(ceph-conf --show-config-value osd_pool_erasure_code_stripe_unit)
+    local stripe_unit=$(chunk_size)
     eval local $(ceph osd erasure-code-profile get myprofile | grep k=)
     local block_size=$((stripe_unit * k - 1))
     dd if=/dev/zero of=$dir/ORIGINAL bs=$block_size count=2
     rados --block-size=$block_size \
         --pool ecpool put UNALIGNED $dir/ORIGINAL || return 1
     rm $dir/ORIGINAL
-}
-
-function chunk_size() {
-    echo $(ceph-conf --show-config-value osd_pool_erasure_code_stripe_unit)
 }
 
 #
@@ -333,5 +342,5 @@ function TEST_chunk_mapping() {
 main test-erasure-code "$@"
 
 # Local Variables:
-# compile-command: "cd ../.. ; make -j4 && test/erasure-code/test-erasure-code.sh"
+# compile-command: "cd ../..; make -j4 && test/erasure-code/test-erasure-code.sh"
 # End:

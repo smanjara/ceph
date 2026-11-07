@@ -1,5 +1,5 @@
 import { Component, EventEmitter, Input, OnChanges, OnInit, Output } from '@angular/core';
-import { FormControl, ValidatorFn } from '@angular/forms';
+import { UntypedFormControl, ValidatorFn } from '@angular/forms';
 
 import _ from 'lodash';
 
@@ -11,7 +11,8 @@ import { SelectOption } from './select-option.model';
 @Component({
   selector: 'cd-select',
   templateUrl: './select.component.html',
-  styleUrls: ['./select.component.scss']
+  styleUrls: ['./select.component.scss'],
+  standalone: false
 })
 export class SelectComponent implements OnInit, OnChanges {
   @Input()
@@ -33,7 +34,7 @@ export class SelectComponent implements OnInit, OnChanges {
   selection = new EventEmitter();
 
   form: CdFormGroup;
-  filter: FormControl;
+  filter: UntypedFormControl;
   Object = Object;
   filteredOptions: Array<SelectOption> = [];
   icons = Icons;
@@ -48,7 +49,7 @@ export class SelectComponent implements OnInit, OnChanges {
   }
 
   private initFilter() {
-    this.filter = new FormControl('', { validators: this.customBadgeValidators });
+    this.filter = new UntypedFormControl('', { validators: this.customBadgeValidators });
     this.form = new CdFormGroup({ filter: this.filter });
     this.filteredOptions = [...(this.options || [])];
   }

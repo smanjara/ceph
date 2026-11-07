@@ -6,6 +6,7 @@ from contextlib import contextmanager
 import cephfs
 
 from .snapshot_util import mksnap, rmsnap
+from .charmap_util import charmap_get, charmap_set, charmap_rm
 from .pin_util import pin
 from .template import GroupTemplate
 from ..fs_util import listdir, listsnaps, get_ancestor_xattr, create_base_dir, has_subdir
@@ -78,6 +79,15 @@ class Group(GroupTemplate):
     def pin(self, pin_type, pin_setting):
         return pin(self.fs, self.path, pin_type, pin_setting)
 
+    def charmap_set(self, setting, value):
+        return charmap_set(self.fs, self.path, setting, value)
+
+    def charmap_rm(self):
+        return charmap_rm(self.fs, self.path)
+
+    def charmap_get(self, setting):
+        return charmap_get(self.fs, self.path, setting)
+
     def create_snapshot(self, snapname):
         snappath = os.path.join(self.path,
                                 self.vol_spec.snapshot_dir_prefix.encode('utf-8'),
@@ -116,6 +126,23 @@ class Group(GroupTemplate):
         except cephfs.Error as e:
             raise VolumeException(-e.args[0], e.args[1])
 
+        try:
+            normalization = self.fs.getxattr(self.path, 'ceph.dir.normalization').decode('utf-8')
+        except cephfs.NoData:
+            normalization = "none"
+
+        try:
+            casesensitive = self.fs.getxattr(self.path, 'ceph.dir.casesensitive').decode('utf-8')
+            casesensitive = casesensitive == "1"
+        except cephfs.NoData:
+            casesensitive = True
+
+        try:
+            pool_namespace = self.fs.getxattr(
+                self.path, 'ceph.dir.layout.pool_namespace').decode('utf-8')
+        except cephfs.NoData:
+            pool_namespace = ""
+
         return {'uid': int(st["uid"]),
                 'gid': int(st["gid"]),
                 'atime': str(st["atime"]),
@@ -123,10 +150,14 @@ class Group(GroupTemplate):
                 'ctime': str(st["ctime"]),
                 'mode': int(st["mode"]),
                 'data_pool': data_pool,
+                'pool_namespace': pool_namespace,
                 'created_at': str(st["btime"]),
                 'bytes_quota': "infinite" if nsize == 0 else nsize,
                 'bytes_used': int(usedbytes),
-                'bytes_pcent': "undefined" if nsize == 0 else '{0:.2f}'.format((float(usedbytes) / nsize) * 100.0)}
+                'bytes_pcent': "undefined" if nsize == 0 else '{0:.2f}'.format((float(usedbytes) / nsize) * 100.0),
+                'normalization': normalization,
+                'casesensitive': casesensitive,
+        }
 
     def resize(self, newsize, noshrink):
         try:
@@ -213,7 +244,30 @@ def set_group_attrs(fs, path, attrs):
     if mode is not None:
         fs.lchmod(path, mode)
 
-def create_group(fs, vol_spec, groupname, size, pool, mode, uid, gid):
+    normalization = attrs.get("normalization")
+    if normalization is not None:
+        try:
+            fs.setxattr(path, "ceph.dir.normalization", normalization.encode('utf-8'), 0)
+        except cephfs.Error as e:
+            raise VolumeException(-e.args[0], e.args[1])
+
+    casesensitive = attrs.get("casesensitive")
+    if casesensitive is False:
+        try:
+            fs.setxattr(path, "ceph.dir.casesensitive", "0".encode('utf-8'), 0)
+        except cephfs.Error as e:
+            raise VolumeException(-e.args[0], e.args[1])
+
+    # set pool namespace (for namespace isolation)
+    pool_namespace = attrs.get("pool_namespace")
+    if pool_namespace is not None:
+        try:
+            fs.setxattr(path, 'ceph.dir.layout.pool_namespace',
+                        pool_namespace.encode('utf-8'), 0)
+        except cephfs.Error as e:
+            raise VolumeException(-e.args[0], e.args[1])
+
+def create_group(fs, vol_spec, groupname, size, pool, mode, uid, gid, normalization, casesensitive, namespace_isolated=False, pool_namespace=None):
     """
     create a subvolume group.
 
@@ -225,6 +279,10 @@ def create_group(fs, vol_spec, groupname, size, pool, mode, uid, gid):
     :param mode: the user permissions
     :param uid: the user identifier
     :param gid: the group identifier
+    :param normalization: the unicode normalization form to use (nfd, nfc, nfkd or nfkc)
+    :param casesensitive: whether to make the subvolume case insensitive or not
+    :param namespace_isolated: whether to enable RADOS namespace isolation for the group
+    :param pool_namespace: an explicit RADOS namespace to use; if None, auto-generated from group name
     :return: None
     """
     group = Group(fs, vol_spec, groupname)
@@ -239,8 +297,12 @@ def create_group(fs, vol_spec, groupname, size, pool, mode, uid, gid):
             'uid': uid,
             'gid': gid,
             'data_pool': pool,
-            'quota': size
+            'quota': size,
+            'normalization': normalization,
+            'casesensitive': casesensitive,
         }
+        if namespace_isolated:
+            attrs['pool_namespace'] = pool_namespace or f'{vol_spec.fs_namespace}_{groupname}'
         set_group_attrs(fs, path, attrs)
     except (cephfs.Error, VolumeException) as e:
         try:
@@ -269,6 +331,9 @@ def remove_group(fs, vol_spec, groupname):
     except cephfs.Error as e:
         if e.args[0] == errno.ENOENT:
             raise VolumeException(-errno.ENOENT, "subvolume group '{0}' does not exist".format(groupname))
+        elif e.args[0] == errno.ENOTEMPTY:
+            raise VolumeException(-errno.ENOTEMPTY, f"subvolume group {groupname} contains subvolume(s) "
+                                  "or retained snapshots of deleted subvolume(s)")
         raise VolumeException(-e.args[0], e.args[1])
 
 

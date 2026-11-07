@@ -43,7 +43,7 @@ POSIX semantics for various reasons:
 - CephFS does not currently maintain the ``atime`` field. Most applications
   do not care, though this impacts some backup and data tiering
   applications that can move unused data to a secondary storage system.
-  You may be able to workaround this for some use cases, as CephFS does
+  You may be able to work around this for some use cases, as CephFS does
   support setting ``atime`` via the ``setattr`` operation.
 
 Perspective
@@ -53,7 +53,7 @@ People talk a lot about "POSIX compliance," but in reality most file
 system implementations do not strictly adhere to the spec, including
 local Linux file systems like ext4 and XFS.  For example, for
 performance reasons, the atomicity requirements for reads are relaxed:
-processing reading from a file that is also being written may see torn
+processes reading from a file that is also being written may see torn
 results.
 
 Similarly, NFS has extremely weak consistency semantics when multiple
@@ -100,5 +100,5 @@ opened will also be returned on fsync.
 
 See `PostgreSQL's summary of fsync() error reporting across operating systems
 <https://wiki.postgresql.org/wiki/Fsync_Errors>`_ and `Matthew Wilcox's
-presentation on Linux IO error handling
+presentation on Linux I/O error handling
 <https://www.youtube.com/watch?v=74c19hwY2oE>`_ for more information.

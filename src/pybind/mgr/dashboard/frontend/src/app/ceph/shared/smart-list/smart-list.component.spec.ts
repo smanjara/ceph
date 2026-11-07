@@ -6,7 +6,7 @@ import { BrowserAnimationsModule } from '@angular/platform-browser/animations';
 
 import { NgbNavModule } from '@ng-bootstrap/ng-bootstrap';
 import _ from 'lodash';
-import { NgxPipeFunctionModule } from 'ngx-pipe-function';
+import { PipesModule } from '~/app/shared/pipes/pipes.module';
 import { of } from 'rxjs';
 
 import { OsdService } from '~/app/shared/api/osd.service';
@@ -89,31 +89,20 @@ describe('OsdSmartListComponent', () => {
     component.ngOnChanges(changes);
   };
 
-  /**
-   * Verify an alert panel and its attributes.
-   *
-   * @param selector The CSS selector for the alert panel.
-   * @param panelTitle The title should be displayed.
-   * @param panelType Alert level of panel. Can be in `warning` or `info`.
-   * @param panelSize Pass `slim` for slim alert panel.
-   */
   const verifyAlertPanel = (
     selector: string,
     panelTitle: string,
-    panelType: 'warning' | 'info',
-    panelSize?: 'slim'
+    panelType: 'warning' | 'info'
   ) => {
     const alertPanel = fixture.debugElement.query(By.css(selector));
     expect(component.incompatible).toBe(false);
     expect(component.loading).toBe(false);
-
     expect(alertPanel.attributes.type).toBe(panelType);
-    if (panelSize === 'slim') {
-      expect(alertPanel.attributes.title).toBe(panelTitle);
-      expect(alertPanel.attributes.size).toBe(panelSize);
+    if (alertPanel.attributes.alertTitle) {
+      expect(alertPanel.attributes.alertTitle).toBe(panelTitle);
     } else {
-      const panelText = alertPanel.query(By.css('.alert-panel-text'));
-      expect(panelText.nativeElement.textContent).toBe(panelTitle);
+      const panelText = alertPanel.query(By.css('.cds--actionable-notification__content'));
+      expect(panelText.nativeElement.textContent).toContain(panelTitle);
     }
   };
 
@@ -124,7 +113,7 @@ describe('OsdSmartListComponent', () => {
       SharedModule,
       HttpClientTestingModule,
       NgbNavModule,
-      NgxPipeFunctionModule
+      PipesModule
     ]
   });
 
@@ -207,8 +196,7 @@ describe('OsdSmartListComponent', () => {
     verifyAlertPanel(
       'cd-alert-panel#alert-self-test-passed',
       'SMART overall-health self-assessment test result',
-      'info',
-      'slim'
+      'info'
     );
   });
 
@@ -218,8 +206,7 @@ describe('OsdSmartListComponent', () => {
     verifyAlertPanel(
       'cd-alert-panel#alert-self-test-failed',
       'SMART overall-health self-assessment test result',
-      'warning',
-      'slim'
+      'warning'
     );
   });
 
@@ -229,8 +216,7 @@ describe('OsdSmartListComponent', () => {
     verifyAlertPanel(
       'cd-alert-panel#alert-self-test-unknown',
       'SMART overall-health self-assessment test result',
-      'warning',
-      'slim'
+      'warning'
     );
   });
 

@@ -1,21 +1,23 @@
 import json
 import logging
+import socket
 
+from typing import List, Tuple
 from unittest import SkipTest
 
 from teuthology import misc
 from tasks.ceph_test_case import CephTestCase
 
 # TODO move definition of CephCluster away from the CephFS stuff
-from tasks.cephfs.filesystem import CephCluster
+from tasks.cephfs.filesystem import CephClusterBase
 
 
 log = logging.getLogger(__name__)
 
 
-class MgrCluster(CephCluster):
+class MgrClusterBase(CephClusterBase):
     def __init__(self, ctx):
-        super(MgrCluster, self).__init__(ctx)
+        super(MgrClusterBase, self).__init__(ctx)
         self.mgr_ids = list(misc.all_roles_of_type(ctx.cluster, 'mgr'))
 
         if len(self.mgr_ids) == 0:
@@ -29,8 +31,22 @@ class MgrCluster(CephCluster):
     def mgr_stop(self, mgr_id):
         self.mgr_daemons[mgr_id].stop()
 
-    def mgr_fail(self, mgr_id):
-        self.mon_manager.raw_cluster_cmd("mgr", "fail", mgr_id)
+    def mgr_fail(self, mgr_id=None):
+        if mgr_id is None:
+            self.mon_manager.raw_cluster_cmd("mgr", "fail")
+        else:
+            self.mon_manager.raw_cluster_cmd("mgr", "fail", mgr_id)
+
+    def set_down(self, yes='true'):
+        self.mon_manager.raw_cluster_cmd('mgr', 'set', 'down', str(yes))
+
+    def mgr_tell(self, *args, mgr_id=None, mgr_map=None):
+        if mgr_id is None:
+            if mgr_map is None:
+                mgr_map = self.get_mgr_map()
+            mgr_id = self.get_active_id(mgr_map=mgr_map)
+        J = self.mon_manager.raw_cluster_cmd("tell", f"mgr.{mgr_id}", *args)
+        return json.loads(J)
 
     def mgr_restart(self, mgr_id):
         self.mgr_daemons[mgr_id].restart()
@@ -39,11 +55,28 @@ class MgrCluster(CephCluster):
         return json.loads(
             self.mon_manager.raw_cluster_cmd("mgr", "dump", "--format=json-pretty"))
 
-    def get_active_id(self):
-        return self.get_mgr_map()["active_name"]
+    def get_registered_clients(self, name, mgr_map = None):
+        if mgr_map is None:
+            mgr_map = self.get_mgr_map()
+        for c in mgr_map['active_clients']:
+            if c['name'] == name:
+                return c['addrvec']
+        return None
 
-    def get_standby_ids(self):
-        return [s['name'] for s in self.get_mgr_map()["standbys"]]
+    def get_active_gid(self, mgr_map = None):
+        if mgr_map is None:
+            mgr_map = self.get_mgr_map()
+        return mgr_map["active_gid"]
+
+    def get_active_id(self, mgr_map = None):
+        if mgr_map is None:
+            mgr_map = self.get_mgr_map()
+        return mgr_map["active_name"]
+
+    def get_standby_ids(self, mgr_map = None):
+        if mgr_map is None:
+            mgr_map = self.get_mgr_map()
+        return [s['name'] for s in mgr_map["standbys"]]
 
     def set_module_conf(self, module, key, val):
         self.mon_manager.raw_cluster_cmd("config", "set", "mgr",
@@ -58,16 +91,30 @@ class MgrCluster(CephCluster):
         if force:
             cmd.append("--force")
         self.mon_manager.raw_cluster_cmd(*cmd)
-
+MgrCluster = MgrClusterBase
 
 class MgrTestCase(CephTestCase):
     MGRS_REQUIRED = 1
 
+    # (module_name, config_name, min_port) tuples whose per-mgr port
+    # options are assigned inside setup_mgrs(), while the daemons are
+    # stopped anyway. A subclass that needs a module port should prefer
+    # this over calling _assign_ports() after setup_mgrs(): the latter
+    # stops, fails and restarts every mgr a second time.
+    MODULE_PORTS: List[Tuple[str, str, int]] = []
+
     @classmethod
     def setup_mgrs(cls):
+        # for the port-in-use probes below; the map keeps the address
+        # usable even with no active mgr
+        mgr_map = cls.mgr_cluster.get_mgr_map()
+        ip_addr = mgr_map.get('active_addr', '').split(':')[0]
+
         # Stop all the daemons
         for daemon in cls.mgr_cluster.mgr_daemons.values():
             daemon.stop()
+
+        cls.mgr_cluster.mon_manager.raw_cluster_cmd("mgr", "set", "down", "false")
 
         for mgr_id in cls.mgr_cluster.mgr_ids:
             cls.mgr_cluster.mgr_fail(mgr_id)
@@ -75,11 +122,17 @@ class MgrTestCase(CephTestCase):
         # Unload all non-default plugins
         loaded = json.loads(cls.mgr_cluster.mon_manager.raw_cluster_cmd(
                    "mgr", "module", "ls", "--format=json-pretty"))['enabled_modules']
-        unload_modules = set(loaded) - {"cephadm", "restful"}
+        unload_modules = set(loaded) - {"cephadm"}
 
         for m in unload_modules:
             cls.mgr_cluster.mon_manager.raw_cluster_cmd(
                 "mgr", "module", "disable", m)
+
+        # Assign module ports while the daemons are down, so the single
+        # restart below picks them up
+        for module_name, config_name, min_port in cls.MODULE_PORTS:
+            cls._assign_module_ports(ip_addr, module_name, config_name,
+                                     min_port)
 
         # Start all the daemons
         for daemon in cls.mgr_cluster.mgr_daemons.values():
@@ -105,6 +158,10 @@ class MgrTestCase(CephTestCase):
                 "Only have {0} manager daemons, {1} are required".format(
                     len(cls.mgr_cluster.mgr_ids), cls.MGRS_REQUIRED))
 
+        # We expect laggy OSDs in this testing environment so turn off this warning.
+        # See https://tracker.ceph.com/issues/61907
+        cls.mgr_cluster.mon_manager.raw_cluster_cmd('config', 'set', 'mds',
+                                                    'defer_client_eviction_on_laggy_osds', 'false')
         cls.setup_mgrs()
 
     @classmethod
@@ -181,6 +238,31 @@ class MgrTestCase(CephTestCase):
         return uri
 
     @classmethod
+    def _assign_module_ports(cls, ip_addr, module_name, config_name,
+                             min_port=7789):
+        """
+        Hand out a distinct port per mgr for the given module option.
+        Call with the mgr daemons stopped, so the probes below don't
+        mistake a previous instance of the module for a foreign user
+        of the port.
+        """
+        # Start handing out ports well above Ceph's range.
+        assign_port = min_port
+
+        for mgr_id in cls.mgr_cluster.mgr_ids:
+            # Find a port that isn't in use
+            while ip_addr and cls.is_port_in_use(ip_addr, assign_port):
+                log.debug(f"Port {assign_port} in use, trying next")
+                assign_port += 1
+
+            log.debug(f"Using port {assign_port} for {module_name} on mgr.{mgr_id}")
+            cls.mgr_cluster.set_module_localized_conf(module_name, mgr_id,
+                                                      config_name,
+                                                      str(assign_port),
+                                                      force=True)
+            assign_port += 1
+
+    @classmethod
     def _assign_ports(cls, module_name, config_name, min_port=7789):
         """
         To avoid the need to run lots of hosts in teuthology tests to
@@ -190,22 +272,13 @@ class MgrTestCase(CephTestCase):
         This is already taken care of for us when running in a vstart
         environment.
         """
-        # Start handing out ports well above Ceph's range.
-        assign_port = min_port
+        ip_addr = cls.mgr_cluster.get_mgr_map()['active_addr'].split(':')[0]
 
         for mgr_id in cls.mgr_cluster.mgr_ids:
             cls.mgr_cluster.mgr_stop(mgr_id)
             cls.mgr_cluster.mgr_fail(mgr_id)
 
-        for mgr_id in cls.mgr_cluster.mgr_ids:
-            log.debug("Using port {0} for {1} on mgr.{2}".format(
-                assign_port, module_name, mgr_id
-            ))
-            cls.mgr_cluster.set_module_localized_conf(module_name, mgr_id,
-                                                      config_name,
-                                                      str(assign_port),
-                                                      force=True)
-            assign_port += 1
+        cls._assign_module_ports(ip_addr, module_name, config_name, min_port)
 
         for mgr_id in cls.mgr_cluster.mgr_ids:
             cls.mgr_cluster.mgr_restart(mgr_id)
@@ -218,3 +291,8 @@ class MgrTestCase(CephTestCase):
                     mgr_map['active_name'], mgr_map['active_gid']))
             return done
         cls.wait_until_true(is_available, timeout=30)
+
+    @classmethod
+    def is_port_in_use(cls, ip_addr: str, port: int) -> bool:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            return s.connect_ex((ip_addr, port)) == 0

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "StupidAllocator.h"
 #include "bluestore_types.h"
@@ -14,7 +14,8 @@ StupidAllocator::StupidAllocator(CephContext* cct,
                                  int64_t capacity,
                                  int64_t _block_size,
                                  std::string_view name)
-  : Allocator(name, capacity, _block_size),
+  : AllocatorBase(name, capacity, _block_size),
+    AllocatorPerf(cct, name),
     cct(cct), num_free(0),
     free(10)
 {
@@ -52,25 +53,16 @@ void StupidAllocator::_insert_free(uint64_t off, uint64_t len)
   }
 }
 
-/// return the effective length of the extent if we align to alloc_unit
-uint64_t StupidAllocator::_aligned_len(
-  StupidAllocator::interval_set_t::iterator p,
-  uint64_t alloc_unit)
-{
-  uint64_t skew = p.get_start() % alloc_unit;
-  if (skew)
-    skew = alloc_unit - skew;
-  if (skew > p.get_len())
-    return 0;
-  else
-    return p.get_len() - skew;
-}
-
 int64_t StupidAllocator::allocate_int(
   uint64_t want_size, uint64_t alloc_unit, int64_t hint,
   uint64_t *offset, uint32_t *length)
 {
+  auto lock_wait_start = mono_clock::now();
+
   std::lock_guard l(lock);
+
+  auto lock_acquired = mono_clock::now();
+
   ldout(cct, 10) << __func__ << " want_size 0x" << std::hex << want_size
 	   	 << " alloc_unit 0x" << alloc_unit
 	   	 << " hint 0x" << hint << std::dec
@@ -81,67 +73,65 @@ int64_t StupidAllocator::allocate_int(
 
   auto p = free[0].begin();
 
-  if (!hint)
+  if (hint < 0)
     hint = last_alloc;
 
   // search up (from hint)
-  if (hint) {
-    for (bin = orig_bin; bin < (int)free.size(); ++bin) {
-      p = free[bin].lower_bound(hint);
-      while (p != free[bin].end()) {
-	if (_aligned_len(p, alloc_unit) >= want_size) {
-	  goto found;
-	}
-	++p;
+  for (bin = orig_bin; bin < (int)free.size(); ++bin) {
+    p = free[bin].lower_bound(hint);
+    while (p != free[bin].end()) {
+      if (p.get_len() >= want_size) {
+        goto found;
       }
+      ++p;
     }
   }
 
   // search up (from origin, and skip searched extents by hint)
-  for (bin = orig_bin; bin < (int)free.size(); ++bin) {
-    p = free[bin].begin();
-    auto end = hint ? free[bin].lower_bound(hint) : free[bin].end();
-    while (p != end) {
-      if (_aligned_len(p, alloc_unit) >= want_size) {
-	goto found;
+  if (hint) {
+    for (bin = orig_bin; bin < (int)free.size(); ++bin) {
+      p = free[bin].begin();
+      auto end = free[bin].lower_bound(hint);
+      while (p != end) {
+        if (p.get_len() >= want_size) {
+	  goto found;
+        }
+        ++p;
       }
-      ++p;
     }
   }
 
   // search down (hint)
-  if (hint) {
-    for (bin = orig_bin; bin >= 0; --bin) {
-      p = free[bin].lower_bound(hint);
-      while (p != free[bin].end()) {
-	if (_aligned_len(p, alloc_unit) >= alloc_unit) {
-	  goto found;
-	}
-	++p;
+  for (bin = orig_bin; bin >= 0; --bin) {
+    p = free[bin].lower_bound(hint);
+    while (p != free[bin].end()) {
+      if (p.get_len() >= alloc_unit) {
+        goto found;
       }
+      ++p;
     }
   }
 
   // search down (from origin, and skip searched extents by hint)
-  for (bin = orig_bin; bin >= 0; --bin) {
-    p = free[bin].begin();
-    auto end = hint ? free[bin].lower_bound(hint) : free[bin].end();
-    while (p != end) {
-      if (_aligned_len(p, alloc_unit) >= alloc_unit) {
-	goto found;
+  if (hint) {
+    for (bin = orig_bin; bin >= 0; --bin) {
+      p = free[bin].begin();
+      auto end = free[bin].lower_bound(hint);
+      while (p != end) {
+        if (p.get_len() >= alloc_unit) {
+	  goto found;
+        }
+        ++p;
       }
-      ++p;
     }
   }
 
   return -ENOSPC;
 
  found:
-  uint64_t skew = p.get_start() % alloc_unit;
-  if (skew)
-    skew = alloc_unit - skew;
-  *offset = p.get_start() + skew;
-  *length = std::min(std::max(alloc_unit, want_size), p2align((p.get_len() - skew), alloc_unit));
+  *offset = p.get_start();
+  *length = std::min(std::max(alloc_unit, want_size), p2align(p.get_len(), alloc_unit));
+
   if (cct->_conf->bluestore_debug_small_allocations) {
     uint64_t max =
       alloc_unit * (rand() % cct->_conf->bluestore_debug_small_allocations);
@@ -158,7 +148,7 @@ int64_t StupidAllocator::allocate_int(
 
   free[bin].erase(*offset, *length);
   uint64_t off, len;
-  if (*offset && free[bin].contains(*offset - skew - 1, &off, &len)) {
+  if (*offset && free[bin].contains(*offset - 1, &off, &len)) {
     int newbin = _choose_bin(len);
     if (newbin != bin) {
       ldout(cct, 30) << __func__ << " demoting 0x" << std::hex << off << "~" << len
@@ -180,6 +170,13 @@ int64_t StupidAllocator::allocate_int(
   num_free -= *length;
   ceph_assert(num_free >= 0);
   last_alloc = *offset + *length;
+
+  logger->tinc_with_max(
+      l_bluestore_allocator_alloc_process_lat,
+      mono_clock::now() - lock_acquired);
+  logger->tinc_with_max(
+      l_bluestore_allocator_lock_wait_lat,
+      lock_acquired - lock_wait_start);
   return 0;
 }
 
@@ -307,6 +304,47 @@ void StupidAllocator::foreach(std::function<void(uint64_t offset, uint64_t lengt
       notify(p.get_start(), p.get_len());
     }
   }
+}
+
+// TODO: Naveen: A better alternative approach is min-heap merge
+uint64_t StupidAllocator::get_free_extents(
+  uint64_t range_begin,
+  uint64_t range_end,
+  size_t max_count,
+  free_extent_vector_t *out)
+{
+  ceph_assert(range_begin <= range_end);
+  if (range_begin == range_end) {
+    return range_end;
+  }
+
+  // Offsets interleave across bins (bins are bucketed by size, not offset),
+  // so collect all extents in the window first, then sort by offset.
+  std::vector<std::pair<uint64_t, uint64_t>> tmp;
+
+  std::lock_guard l(lock);
+  for (unsigned bin = 0; bin < free.size(); ++bin) {
+    auto it = free[bin].lower_bound(range_begin);
+    while (it != free[bin].end() && it.get_start() < range_end) {
+      tmp.emplace_back(it.get_start(), it.get_end());
+      ++it;
+    }
+  }
+
+  std::sort(tmp.begin(), tmp.end());
+
+  const bool unbounded = (max_count == 0);
+  size_t emit = unbounded ? tmp.size() : std::min(max_count, tmp.size());
+
+  for (size_t i = 0; i < emit; ++i) {
+    uint64_t lo = std::max(tmp[i].first, range_begin);
+    out->emplace_back(lo, std::min(tmp[i].second, range_end) - lo);
+  }
+
+  if (emit < tmp.size()) {
+    return tmp[emit].first;
+  }
+  return range_end;
 }
 
 void StupidAllocator::init_add_free(uint64_t offset, uint64_t length)

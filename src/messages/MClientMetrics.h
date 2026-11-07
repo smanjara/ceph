@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_MDS_CLIENT_METRICS_H
 #define CEPH_MDS_CLIENT_METRICS_H
@@ -13,13 +13,18 @@ class MClientMetrics final : public SafeMessage {
 private:
   static constexpr int HEAD_VERSION = 1;
   static constexpr int COMPAT_VERSION = 1;
+  static constexpr int PRIORITY = CEPH_MSG_PRIO_HIGH-1;
+
 public:
   std::vector<ClientMetricMessage> updates;
 
 protected:
-  MClientMetrics() : MClientMetrics(std::vector<ClientMetricMessage>{}) { }
+  MClientMetrics() : MClientMetrics(std::vector<ClientMetricMessage>{}) {
+    set_priority(PRIORITY);
+  }
   MClientMetrics(std::vector<ClientMetricMessage> updates)
     : SafeMessage(CEPH_MSG_CLIENT_METRICS, HEAD_VERSION, COMPAT_VERSION), updates(updates) {
+    set_priority(PRIORITY);
   }
   ~MClientMetrics() final {}
 

@@ -1,4 +1,4 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
 #ifndef _CEPH_UUID_H
 #define _CEPH_UUID_H
 
@@ -7,18 +7,12 @@
  */
 
 #include "encoding.h"
-#include "random.h"
 
 #include <ostream>
-#include <random>
 
 #include <boost/uuid/uuid.hpp>
-#include <boost/uuid/uuid_generators.hpp>
-#include <boost/uuid/uuid_io.hpp>
-
-#if FMT_VERSION >= 90000
-#include <fmt/ostream.h>
-#endif
+#include <boost/uuid/nil_generator.hpp>
+#include <boost/version.hpp>
 
 namespace ceph {
   class Formatter;
@@ -36,31 +30,19 @@ struct uuid_d {
     return uuid.is_nil();
   }
 
-  void generate_random() {
-    random_device_t rng;
-    boost::uuids::basic_random_generator gen(rng);
-    uuid = gen();
-  }
+  void generate_random();
   
-  bool parse(const char *s) {
-    try {
-      boost::uuids::string_generator gen;
-      uuid = gen(s);
-      return true;
-    } catch (std::runtime_error& e) {
-      return false;
-    }
-  }
-  void print(char *s) const {
-    memcpy(s, boost::uuids::to_string(uuid).c_str(), 37);
-  }
+  bool parse(const char *s);
+  void print(char *s) const;
 
- std::string to_string() const {
-    return boost::uuids::to_string(uuid);
-  }
+  std::string to_string() const;
 
   const char *bytes() const {
+#if BOOST_VERSION >= 108600
+    return (const char*)uuid.data();
+#else
     return (const char*)uuid.data;
+#endif
   }
 
   void encode(::ceph::buffer::list::contiguous_appender& p) const {
@@ -77,7 +59,7 @@ struct uuid_d {
   }
 
   void dump(ceph::Formatter *f) const;
-  static void generate_test_instances(std::list<uuid_d*>& o);
+  static std::list<uuid_d> generate_test_instances();
 };
 WRITE_CLASS_DENC_BOUNDED(uuid_d)
 
@@ -99,9 +81,5 @@ inline bool operator<(const uuid_d& l, const uuid_d& r) {
 inline bool operator>(const uuid_d& l, const uuid_d& r) {
   return l.to_string() > r.to_string();
 }
-
-#if FMT_VERSION >= 90000
-template <> struct fmt::formatter<uuid_d> : fmt::ostream_formatter {};
-#endif
 
 #endif

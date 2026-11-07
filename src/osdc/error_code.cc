@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -73,6 +74,9 @@ const char* osdc_error_category::message(int ev, char*,
 
   case osdc_errc::pool_eio:
     return "Pool EIO flag set";
+
+  case osdc_errc::handler_failed:
+    return "Handler function threw unknown exception";
   }
 
   return "Unknown error";
@@ -100,6 +104,8 @@ osdc_error_category::default_error_condition(int ev) const noexcept {
   case osdc_errc::timed_out:
     return bs::errc::timed_out;
   case osdc_errc::pool_eio:
+    return bs::errc::io_error;
+  case osdc_errc::handler_failed:
     return bs::errc::io_error;
   }
 
@@ -155,6 +161,8 @@ int osdc_error_category::from_code(int ev) const noexcept {
   case osdc_errc::timed_out:
     return -ETIMEDOUT;
   case osdc_errc::pool_eio:
+    return -EIO;
+  case osdc_errc::handler_failed:
     return -EIO;
   }
   return -EDOM;

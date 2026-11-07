@@ -1,5 +1,7 @@
 overrides:
   ceph:
+    log-ignorelist:
+      - evicting unresponsive client
     conf:
       global:
         osd_pool_default_size: 1
@@ -8,11 +10,11 @@ overrides:
         debug ms: 1
         debug client: 20
       mds:
-        debug ms: 1
+        debug ms: 2
         debug mds: 20
       osd: # force bluestore since it's required for ec overwrites
         osd objectstore: bluestore
-        bluestore block size: 1073741824
+        bluestore block size: 2147483648
 tasks:
 - workunit:
     cleanup: true
@@ -29,3 +31,13 @@ tasks:
     clients:
       client.0:
         - fs/full/subvolume_snapshot_rm.sh
+- workunit:
+    cleanup: true
+    clients:
+      client.0:
+        - fs/full/subvolume_ls.sh
+- workunit:
+    cleanup: true
+    clients:
+      client.0:
+        - fs/full/subvol_rm_retained_snap_when_cluster_is_full.sh

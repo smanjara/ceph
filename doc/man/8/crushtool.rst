@@ -16,7 +16,7 @@ Synopsis
 Description
 ===========
 
-**crushtool** is a utility that lets you create, compile, decompile
+**crushtool** is a utility that lets you create, compile, decompile,
 and test CRUSH map files.
 
 CRUSH is a pseudo-random data distribution algorithm that efficiently
@@ -61,11 +61,11 @@ silence all output from the CRUSH subsystem::
 Running tests with --test
 =========================
 
-The test mode will use the input crush map ( as specified with **-i
-map** ) and perform a dry run of CRUSH mapping or random placement
-(if **--simulate** is set ). On completion, two kinds of reports can be
+The test mode will use the input crush map (as specified with **-i
+map**\) and perform a dry run of CRUSH mapping or random placement
+(if **--simulate** is set). On completion, two kinds of reports can be
 created. 
-1) The **--show-...** option outputs human readable information
+1) The **--show-...** option outputs human-readable information
 on stderr. 
 2) The **--output-csv** option creates CSV files that are
 documented by the **--help-output** option.
@@ -151,14 +151,34 @@ pools; it only runs simulations by mapping values in the range
    Displays how many attempts were needed to find a device mapping.
    For instance::
 
-      0:     95224
-      1:      3745
-      2:      2225
+      tries 0:     95224
+      tries 1:      3745
+      tries 2:      2225
       ..
 
    shows that **95224** mappings succeeded without retries, **3745**
-   mappings succeeded with one attempts, etc. There are as many rows
+   mappings succeeded with one retry attempt, etc. There are as many rows
    as the value of the **--set-choose-total-tries** option.
+
+.. option:: --show-retry-exhaustion
+
+   Checks whether any PG mappings hit the maximum retry limit
+   (typically 50 tries) and displays a warning if retry exhaustion
+   is detected. This is useful for validating CRUSH rules, especially
+   in stretch cluster configurations with exactly
+   2 datacenters and 4 replicas can potentially fail to map some PGs due to CRUSH's
+   pseudorandom selection repeatedly choosing the same datacenter.
+   Although, the probability is extremely low, we still want to detect this.
+   
+   Outputs either a warning message if exhaustion is detected::
+
+      WARNING: Retry exhaustion detected!
+        5 PG(s) hit the maximum retry limit of 50
+        This indicates CRUSH failed to find optimal placement for some PGs.
+
+   or a success message showing the maximum tries actually needed::
+
+      No retry exhaustion detected (maximum tries needed: 7 / 50)
 
 .. option:: --output-csv
 
@@ -230,7 +250,7 @@ Example
 
 Suppose we have two rows with two racks each and 20 nodes per rack. Suppose
 each node contains 4 storage devices for Ceph OSD Daemons. This configuration
-allows us to deploy 320 Ceph OSD Daemons. Lets assume a 42U rack with 2U nodes,
+allows us to deploy 320 Ceph OSD Daemons. Let's assume a 42U rack with 2U nodes,
 leaving an extra 2U for a rack switch.
 
 To reflect our hierarchy of devices, nodes, racks and rows, we would execute
@@ -294,7 +314,7 @@ See also
 ========
 
 :doc:`ceph <ceph>`\(8),
-:doc:`osdmaptool <osdmaptool>`\(8),
+:doc:`osdmaptool <osdmaptool>`\(8)
 
 Authors
 =======

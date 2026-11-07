@@ -1,9 +1,8 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "Journald.h"
 
-#include <endian.h>
 #include <fcntl.h>
 #include <iterator>
 #include <memory>
@@ -14,6 +13,10 @@
 #include <sys/un.h>
 #include <syslog.h>
 #include <unistd.h>
+
+#include <iostream> // for std::cerr
+
+#include <boost/endian/conversion.hpp>
 #include <fmt/format.h>
 #include <fmt/ostream.h>
 
@@ -22,7 +25,6 @@
 #include "log/Entry.h"
 #include "log/SubsystemMap.h"
 #include "msg/msg_fmt.h"
-
 
 namespace ceph::logging {
 
@@ -87,6 +89,8 @@ class EntryEncoderBase {
     m_msg_vec[0].iov_len = static_segment.size();
   }
 
+  EntryEncoderBase(const EntryEncoderBase&) = delete; // we have self-referencing pointers
+
   constexpr struct iovec *iovec() { return this->m_msg_vec; }
   constexpr std::size_t iovec_len()
   {
@@ -123,9 +127,9 @@ MESSAGE
       e.m_prio,
       e.m_thread);
 
-    uint64_t msg_len = htole64(e.size());
+    uint64_t msg_len = boost::endian::native_to_little<uint64_t>(e.size());
     meta_buf.resize(meta_buf.size() + sizeof(msg_len));
-    *(reinterpret_cast<uint64_t*>(meta_buf.end()) - 1) = htole64(e.size());
+    memcpy(meta_buf.end() - sizeof(msg_len), &msg_len, sizeof(msg_len));
 
     meta_vec().iov_base = meta_buf.data();
     meta_vec().iov_len = meta_buf.size();
@@ -156,9 +160,9 @@ MESSAGE
       le.seq,
       le.channel);
 
-    uint64_t msg_len = htole64(le.msg.size());
+    uint64_t msg_len = boost::endian::native_to_little<uint64_t>(le.msg.size());
     meta_buf.resize(meta_buf.size() + sizeof(msg_len));
-    *(reinterpret_cast<uint64_t*>(meta_buf.end()) - 1) = htole64(le.msg.size());
+    *(reinterpret_cast<uint64_t*>(meta_buf.end()) - 1) = msg_len;
 
     meta_vec().iov_base = meta_buf.data();
     meta_vec().iov_len = meta_buf.size();

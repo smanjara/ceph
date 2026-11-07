@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -20,11 +21,15 @@
 #include "common/cmdparse.h"
 #include "common/LogEntry.h"
 #include "common/Thread.h"
+#include "common/Finisher.h"
+#include "global/global_context.h" // for g_ceph_context
 #include "mon/health_check.h"
 #include "mgr/Gil.h"
 
 #include "PyModuleRunner.h"
 #include "PyModule.h"
+
+#include <fmt/core.h>
 
 #include <vector>
 #include <string>
@@ -45,12 +50,18 @@ private:
 
   std::string m_command_perms;
   const MgrSession* m_session = nullptr;
+public:
+  Finisher finisher; // per active module finisher to execute commands
 
 public:
   ActivePyModule(const PyModuleRef &py_module_,
-      LogChannelRef clog_)
-    : PyModuleRunner(py_module_, clog_)
-  {}
+      LogChannelRef clog_,
+      ThreadMonitor* monitor_ = nullptr)
+    : PyModuleRunner(py_module_, clog_, monitor_),
+      finisher(g_ceph_context, thread_name, fmt::format("m-fin-{}", py_module->get_name()).substr(0,15))
+
+  {
+  }
 
   int load(ActivePyModules *py_modules);
   void notify(const std::string &notify_type, const std::string &notify_id);
@@ -58,11 +69,12 @@ public:
 
   bool method_exists(const std::string &method) const;
 
-  PyObject *dispatch_remote(
+  std::optional<std::vector<std::byte>> dispatch_remote(
       const std::string &method,
-      PyObject *args,
-      PyObject *kwargs,
-      std::string *err);
+      std::span<std::byte const> pickled_args,
+      std::span<std::byte const> pickled_kwargs,
+      std::string *err,
+      bool *crash_dump = nullptr);
 
   int handle_command(
     const ModuleCommand& module_command,
@@ -89,9 +101,14 @@ public:
     uri = str;
   }
 
-  std::string get_uri() const
+  std::string_view get_uri() const
   {
     return uri;
+  }
+
+  std::string_view get_fin_thread_name() const
+  {
+    return finisher.get_thread_name();
   }
 
   bool is_authorized(const std::map<std::string, std::string>& arguments) const;

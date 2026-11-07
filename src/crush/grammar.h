@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -50,8 +51,11 @@ struct crush_grammar : public boost::spirit::grammar<crush_grammar>
     _step_set_choose_tries,
     _step_set_choose_local_tries,
     _step_set_choose_local_fallback_tries,
+    _step_set_msr_descents,
+    _step_set_msr_collision_tries,
     _step_choose,
     _step_chooseleaf,
+    _step_choose_msr,
     _step_emit,
     _step,
     _crushrule,
@@ -91,8 +95,11 @@ struct crush_grammar : public boost::spirit::grammar<crush_grammar>
     boost::spirit::rule<ScannerT, boost::spirit::parser_context<>, boost::spirit::parser_tag<_step_set_chooseleaf_tries> >    step_set_chooseleaf_tries;
     boost::spirit::rule<ScannerT, boost::spirit::parser_context<>, boost::spirit::parser_tag<_step_set_chooseleaf_vary_r> >    step_set_chooseleaf_vary_r;
     boost::spirit::rule<ScannerT, boost::spirit::parser_context<>, boost::spirit::parser_tag<_step_set_chooseleaf_stable> >    step_set_chooseleaf_stable;
+    boost::spirit::rule<ScannerT, boost::spirit::parser_context<>, boost::spirit::parser_tag<_step_set_msr_descents> >    step_set_msr_descents;
+    boost::spirit::rule<ScannerT, boost::spirit::parser_context<>, boost::spirit::parser_tag<_step_set_msr_collision_tries> >    step_set_msr_collision_tries;
     boost::spirit::rule<ScannerT, boost::spirit::parser_context<>, boost::spirit::parser_tag<_step_choose> >    step_choose;
     boost::spirit::rule<ScannerT, boost::spirit::parser_context<>, boost::spirit::parser_tag<_step_chooseleaf> >      step_chooseleaf;
+    boost::spirit::rule<ScannerT, boost::spirit::parser_context<>, boost::spirit::parser_tag<_step_choose_msr> >      step_choose_msr;
     boost::spirit::rule<ScannerT, boost::spirit::parser_context<>, boost::spirit::parser_tag<_step_emit> >      step_emit;
     boost::spirit::rule<ScannerT, boost::spirit::parser_context<>, boost::spirit::parser_tag<_step> >      step;
     boost::spirit::rule<ScannerT, boost::spirit::parser_context<>, boost::spirit::parser_tag<_crushrule> >      crushrule;
@@ -149,12 +156,17 @@ struct crush_grammar : public boost::spirit::grammar<crush_grammar>
       step_set_chooseleaf_tries = str_p("set_chooseleaf_tries") >> posint;
       step_set_chooseleaf_vary_r = str_p("set_chooseleaf_vary_r") >> posint;
       step_set_chooseleaf_stable = str_p("set_chooseleaf_stable") >> posint;
+      step_set_msr_descents = str_p("set_msr_descents") >> posint;
+      step_set_msr_collision_tries = str_p("set_msr_collision_tries") >> posint;
       step_choose = str_p("choose")
 	>> ( str_p("indep") | str_p("firstn") )
 	>> integer
 	>> str_p("type") >> name;
       step_chooseleaf = str_p("chooseleaf")
 	>> ( str_p("indep") | str_p("firstn") )
+	>> integer
+	>> str_p("type") >> name;
+      step_choose_msr = str_p("choosemsr")
 	>> integer
 	>> str_p("type") >> name;
       step_emit = str_p("emit");
@@ -165,12 +177,15 @@ struct crush_grammar : public boost::spirit::grammar<crush_grammar>
 				step_set_chooseleaf_tries |
 				step_set_chooseleaf_vary_r |
 				step_set_chooseleaf_stable |
+				step_set_msr_descents |
+				step_set_msr_collision_tries |
 				step_choose |
 				step_chooseleaf |
+				step_choose_msr |
 				step_emit );
       crushrule = str_p("rule") >> !name >> '{'
 				>> (str_p("id") | str_p("ruleset")) >> posint
-				>> str_p("type") >> ( str_p("replicated") | str_p("erasure") )
+				>> str_p("type") >> ( str_p("replicated") | str_p("erasure") | str_p("msr_firstn") | str_p("msr_indep") )
 				>> !(str_p("min_size") >> posint)
 				>> !(str_p("max_size") >> posint)
 			   >> +step

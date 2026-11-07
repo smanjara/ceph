@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <boost/range/combine.hpp>
 
@@ -30,17 +30,20 @@ struct onode_item_t {
   uint32_t cnt_modify = 0;
 
   void initialize(Transaction& t, Onode& value) const {
-    auto& layout = value.get_mutable_layout(t);
-    layout.size = size;
-    layout.omap_root.update(omap_root_t(id, cnt_modify,
-      value.get_metadata_hint(block_size)));
+    auto &ftvalue = static_cast<FLTreeOnode&>(value);
+    ftvalue.update_onode_size(t, size);
+    auto laddr = laddr_t::from_byte_offset(id << laddr_t::UNIT_SHIFT);
+    auto oroot = omap_root_t(laddr, cnt_modify,
+      value.get_metadata_hint(block_size), omap_type_t::OMAP);
+    ftvalue.update_omap_root(t, oroot);
     validate(value);
   }
 
   void validate(Onode& value) const {
     auto& layout = value.get_layout();
-    ceph_assert(laddr_t(layout.size) == laddr_t{size});
-    ceph_assert(layout.omap_root.get(value.get_metadata_hint(block_size)).addr == id);
+    ceph_assert(uint64_t(layout.size) == uint64_t{size});
+    auto laddr = laddr_t::from_byte_offset(id << laddr_t::UNIT_SHIFT);
+    ceph_assert(layout.omap_root.get(value.get_metadata_hint(block_size)).addr == laddr);
     ceph_assert(layout.omap_root.get(value.get_metadata_hint(block_size)).depth == cnt_modify);
   }
 
@@ -60,7 +63,10 @@ struct fltree_onode_manager_test_t
     : public seastar_test_suite_t, TMTestState {
   using iterator_t = typename KVPool<onode_item_t>::iterator_t;
 
+  collection_manager::FlatCollectionManagerRef collection_manager;
   FLTreeOnodeManagerRef manager;
+  // the manager keys its trees by collection; this test uses a single one
+  const coll_t cid{spg_t{pg_t{0, 0}}};
 
   seastar::future<> set_up_fut() final {
     return tm_setup();
@@ -70,15 +76,18 @@ struct fltree_onode_manager_test_t
     return tm_teardown();
   }
 
-
-  virtual void _init() final {
-    TMTestState::_init();
-    manager.reset(new FLTreeOnodeManager(*tm));
+  virtual seastar::future<> _init() final {
+    return TMTestState::_init().then([this] {
+      collection_manager.reset(
+        new collection_manager::FlatCollectionManager(*tm));
+      manager.reset(new FLTreeOnodeManager(*tm, *collection_manager));
+    });
   }
 
-  virtual void _destroy() final {
+  virtual seastar::future<> _destroy() final {
     manager.reset();
-    TMTestState::_destroy();
+    collection_manager.reset();
+    return TMTestState::_destroy();
   }
 
   virtual FuturizedStore::mkfs_ertr::future<> _mkfs() final {
@@ -89,18 +98,34 @@ struct fltree_onode_manager_test_t
       return repeat_eagain([this] {
         return seastar::do_with(
           create_mutate_transaction(),
-          [this](auto &ref_t)
+          coll_root_t(),
+          [this](auto &ref_t, auto &coll_root)
         {
-          return with_trans_intr(*ref_t, [&](auto &t) {
+          return with_trans_intr(*ref_t, [this, &coll_root](auto &t) {
+            // mirrors SeaStore::Shard::mkfs_managers() + _create_collection():
+            // meta's tree first, then the collection map, then register cid
+            // and mkfs its tree.
             return manager->mkfs(t
             ).si_then([this, &t] {
+              return collection_manager->mkfs(t);
+            }).si_then([this, &t, &coll_root](auto cr) {
+              coll_root = cr;
+              tm->write_collection_root(t, coll_root);
+              return collection_manager->create(
+                coll_root, t, cid, coll_info_t(0, L_ADDR_NULL));
+            }).si_then([this, &t, &coll_root] {
+              if (coll_root.must_update()) {
+                tm->write_collection_root(t, coll_root);
+              }
+              return manager->create_tree(t, cid);
+            }).si_then([this, &t] {
               return submit_transaction_fut2(t);
             });
           });
         });
       });
     }).handle_error(
-      crimson::ct_error::assert_all{"Invalid error in _mkfs"}
+      crimson::ct_error::assert_all("Invalid error in _mkfs")
     );
   }
 
@@ -116,12 +141,9 @@ struct fltree_onode_manager_test_t
     with_transaction([this, &it, f=std::move(f)] (auto& t) {
       auto p_kv = *it;
       auto onode = with_trans_intr(t, [&](auto &t) {
-        return manager->get_or_create_onode(t, p_kv->key);
-      }).unsafe_get0();
+        return manager->get_or_create_onode(t, cid, p_kv->key);
+      }).unsafe_get();
       std::invoke(f, t, *onode, p_kv->value);
-      with_trans_intr(t, [&](auto &t) {
-        return manager->write_dirty(t, {onode});
-      }).unsafe_get0();
     });
   }
 
@@ -129,8 +151,8 @@ struct fltree_onode_manager_test_t
     with_transaction([this, &it] (auto& t) {
       auto p_kv = *it;
       auto onode = with_trans_intr(t, [&](auto &t) {
-        return manager->get_onode(t,  p_kv->key);
-      }).unsafe_get0();
+        return manager->get_onode(t, cid, p_kv->key);
+      }).unsafe_get();
       p_kv->value.validate(*onode);
     });
   }
@@ -139,8 +161,8 @@ struct fltree_onode_manager_test_t
     with_transaction([this, &it] (auto& t) {
       auto p_kv = *it;
       auto exist = with_trans_intr(t, [&](auto &t) {
-        return manager->contains_onode(t, p_kv->key);
-      }).unsafe_get0();
+        return manager->contains_onode(t, cid, p_kv->key);
+      }).unsafe_get();
       ceph_assert(exist == false);
     });
   }
@@ -168,17 +190,14 @@ struct fltree_onode_manager_test_t
     with_onodes_process(start, end,
         [this, f=std::move(f)] (auto& t, auto& oids, auto& items) {
       auto onodes = with_trans_intr(t, [&](auto &t) {
-        return manager->get_or_create_onodes(t, oids);
-      }).unsafe_get0();
+        return manager->get_or_create_onodes(t, cid, oids);
+      }).unsafe_get();
       for (auto tup : boost::combine(onodes, items)) {
         OnodeRef onode;
         onode_item_t* p_item;
         boost::tie(onode, p_item) = tup;
         std::invoke(f, t, *onode, *p_item);
       }
-      with_trans_intr(t, [&](auto &t) {
-        return manager->write_dirty(t, onodes);
-      }).unsafe_get0();
     });
   }
 
@@ -191,8 +210,8 @@ struct fltree_onode_manager_test_t
         onode_item_t* p_item;
         boost::tie(oid, p_item) = tup;
         auto onode = with_trans_intr(t, [&](auto &t) {
-          return manager->get_onode(t, oid);
-        }).unsafe_get0();
+          return manager->get_onode(t, cid, oid);
+        }).unsafe_get();
         p_item->validate(*onode);
       }
     });
@@ -204,8 +223,8 @@ struct fltree_onode_manager_test_t
         [this] (auto& t, auto& oids, auto& items) {
       for (auto& oid : oids) {
         auto exist = with_trans_intr(t, [&](auto &t) {
-          return manager->contains_onode(t, oid);
-        }).unsafe_get0();
+          return manager->contains_onode(t, cid, oid);
+        }).unsafe_get();
         ceph_assert(exist == false);
       }
     });
@@ -223,8 +242,8 @@ struct fltree_onode_manager_test_t
       assert(oids[0] < end);
       while (start != end) {
         auto [list_ret, list_end] = with_trans_intr(t, [&](auto &t) {
-          return manager->list_onodes(t, start, end, LIST_LIMIT);
-        }).unsafe_get0();
+          return manager->list_onodes(t, cid, start, end, LIST_LIMIT);
+        }).unsafe_get();
         listed_oids.insert(listed_oids.end(), list_ret.begin(), list_ret.end());
         start = list_end;
       }
@@ -235,7 +254,7 @@ struct fltree_onode_manager_test_t
   fltree_onode_manager_test_t() {}
 };
 
-TEST_F(fltree_onode_manager_test_t, 1_single)
+TEST_P(fltree_onode_manager_test_t, 1_single)
 {
   run_async([this] {
     uint64_t block_size = tm->get_block_size();
@@ -256,25 +275,26 @@ TEST_F(fltree_onode_manager_test_t, 1_single)
     with_onode_write(iter, [this](auto& t, auto& onode, auto& item) {
       OnodeRef onode_ref = &onode;
       with_trans_intr(t, [&](auto &t) {
-        return manager->erase_onode(t, onode_ref);
-      }).unsafe_get0();
+        return manager->erase_onode(t, cid, onode_ref);
+      }).unsafe_get();
     });
     validate_erased(iter);
   });
 }
 
-TEST_F(fltree_onode_manager_test_t, 2_synthetic)
+TEST_P(fltree_onode_manager_test_t, 2_synthetic)
 {
   run_async([this] {
     uint64_t block_size = tm->get_block_size();
     auto pool = KVPool<onode_item_t>::create_range(
-        {0, 100}, {32, 64, 128, 256, 512}, block_size);
+        {0, 10000}, {32, 64, 128, 256, 512}, block_size);
     auto start = pool.begin();
     auto end = pool.end();
     with_onodes_write(start, end,
         [](auto& t, auto& onode, auto& item) {
       item.initialize(t, onode);
     });
+    restart();
     validate_onodes(start, end);
 
     validate_list_onodes(pool);
@@ -285,6 +305,7 @@ TEST_F(fltree_onode_manager_test_t, 2_synthetic)
         [](auto& t, auto& onode, auto& item) {
       item.modify(t, onode);
     });
+    restart();
     validate_onodes(start, end);
 
     pool.shuffle();
@@ -294,6 +315,7 @@ TEST_F(fltree_onode_manager_test_t, 2_synthetic)
         [](auto& t, auto& onode, auto& item) {
       item.modify(t, onode);
     });
+    restart();
     validate_onodes(start, end);
 
     pool.shuffle();
@@ -303,9 +325,10 @@ TEST_F(fltree_onode_manager_test_t, 2_synthetic)
         [this](auto& t, auto& onode, auto& item) {
       OnodeRef onode_ref = &onode;
       with_trans_intr(t, [&](auto &t) {
-        return manager->erase_onode(t, onode_ref);
-      }).unsafe_get0();
+        return manager->erase_onode(t, cid, onode_ref);
+      }).unsafe_get();
     });
+    restart();
     validate_erased(rd_start, rd_end);
     pool.erase_from_random(rd_start, rd_end);
     start = pool.begin();
@@ -315,3 +338,16 @@ TEST_F(fltree_onode_manager_test_t, 2_synthetic)
     validate_list_onodes(pool);
   });
 }
+
+INSTANTIATE_TEST_SUITE_P(
+  fltree_onode__manager_test,
+  fltree_onode_manager_test_t,
+  ::testing::Combine(
+    ::testing::Values (
+      "segmented",
+      "circularbounded"
+    ),
+    ::testing::Values(
+      integrity_check_t::FULL_CHECK)
+  )
+);

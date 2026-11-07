@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -17,6 +18,13 @@
 
 #include "PyFormatter.h"
 #include <fstream>
+#include "common/debug.h"
+
+#define dout_context g_ceph_context
+#define dout_subsys ceph_subsys_mgr
+#undef dout_prefix
+#define dout_prefix *_dout << __func__ << " "
+
 
 #define LARGE_SIZE 1024
 
@@ -35,6 +43,11 @@ void PyFormatter::open_object_section(std::string_view name)
   dump_pyobject(name, dict);
   stack.push(cursor);
   cursor = dict;
+}
+
+void PyFormatter::dump_null(std::string_view name)
+{
+  dump_pyobject(name, Py_None);
 }
 
 void PyFormatter::dump_unsigned(std::string_view name, uint64_t u)
@@ -58,7 +71,12 @@ void PyFormatter::dump_float(std::string_view name, double d)
 
 void PyFormatter::dump_string(std::string_view name, std::string_view s)
 {
-  dump_pyobject(name, PyUnicode_FromString(s.data()));
+  PyObject *p = PyUnicode_FromStringAndSize(s.data(), s.size());
+  if (!p) {
+    PyErr_Clear();
+    return;
+  }
+  dump_pyobject(name, p);
 }
 
 void PyFormatter::dump_bool(std::string_view name, bool b)
@@ -99,6 +117,9 @@ void PyFormatter::dump_format_va(std::string_view name, const char *ns, bool quo
  */
 void PyFormatter::dump_pyobject(std::string_view name, PyObject *p)
 {
+  if (!p) {
+    ceph_abort_msg("PyFormatter::dump_pyobject received null PyObject");
+  }
   if (PyList_Check(cursor)) {
     PyList_Append(cursor, p);
     Py_DECREF(p);
@@ -124,17 +145,4 @@ void PyFormatter::finish_pending_streams()
   }
 
   pending_streams.clear();
-}
-
-PyObject* PyJSONFormatter::get()
-{
-  if(json_formatter::stack_size()) {
-    close_section();
-  }
-  ceph_assert(!json_formatter::stack_size());
-  std::ostringstream ss;
-  flush(ss);
-  std::string s = ss.str();
-  PyObject* obj = PyBytes_FromStringAndSize(std::move(s.c_str()), s.size());
-  return obj;
 }

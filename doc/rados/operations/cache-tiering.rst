@@ -2,7 +2,18 @@
  Cache Tiering
 ===============
 
-A cache tier provides Ceph Clients with better I/O performance for a subset of
+.. warning:: Cache tiering was deprecated in the Reef release and has lacked
+   a maintainer for a long time. It will be removed in a future release without
+   notice. **Do not deploy new cache tiers.** Migrate existing cache
+   tier deployments as soon as possible.
+
+.. note:: This documentation is retained for existing deployments only.
+   If you need to remove a cache tier, see :ref:`cache-tiering-removal`.
+   Some community members have adopted ``dm-cache`` (the Linux kernel's
+   device-mapper cache target) as a block-level caching alternative, though
+   this is not an officially supported or endorsed configuration.
+
+A cache tier provides Ceph clients with better I/O performance for a subset of
 the data stored in a backing storage tier. Cache tiering involves creating a
 pool of relatively fast/expensive storage devices (e.g., solid state drives)
 configured to act as a cache tier, and a backing pool of either erasure-coded
@@ -172,12 +183,12 @@ Setting up a backing storage pool typically involves one of two scenarios:
 In the standard storage scenario, you can setup a CRUSH rule to establish 
 the failure domain (e.g., osd, host, chassis, rack, row, etc.). Ceph OSD 
 Daemons perform optimally when all storage drives in the rule are of the 
-same size, speed (both RPMs and throughput) and type. See `CRUSH Maps`_ 
+same size, speed (both RPMs and throughput) and type. See :ref:`rados-crush-map`
 for details on creating a rule. Once you have created a rule, create 
 a backing storage pool. 
 
 In the erasure coding scenario, the pool creation arguments will generate the
-appropriate rule automatically. See `Create a Pool`_ for details.
+appropriate rule automatically. See :ref:`createpool` for details.
 
 In subsequent examples, we will refer to the backing storage pool 
 as ``cold-storage``.
@@ -196,9 +207,6 @@ that have the high performance drives while omitting the hosts that don't. See
 
 In subsequent examples, we will refer to the cache pool as ``hot-storage`` and
 the backing pool as ``cold-storage``.
-
-For cache tier configuration and default values, see 
-`Pools - Set Pool Values`_.
 
 
 Creating a Cache Tier
@@ -255,7 +263,7 @@ cache tier configuration options with the following usage:
 
    ceph osd pool set {cachepool} {key} {value}
    
-See `Pools - Set Pool Values`_ for details.
+See :ref:`setpoolvalues` for details.
 
 
 Target Size and Type
@@ -307,11 +315,10 @@ A similar parameter can be set for the write operation, which is
    ceph osd pool set {cachepool} min_write_recency_for_promote 2
 
 .. note:: The longer the period and the higher the
-   ``min_read_recency_for_promote`` and
-   ``min_write_recency_for_promote``values, the more RAM the ``ceph-osd``
-   daemon consumes. In particular, when the agent is active to flush
-   or evict cache objects, all ``hit_set_count`` HitSets are loaded
-   into RAM.
+   ``min_read_recency_for_promote`` and ``min_write_recency_for_promote``
+   values, the more RAM the ``ceph-osd`` daemon consumes. In particular, when
+   the agent is active to flush or evict cache objects, all ``hit_set_count``
+   HitSets are loaded into RAM.
 
 
 Cache Sizing
@@ -361,7 +368,7 @@ For example, to flush or evict at 1M objects, execute the following:
    agent will begin flushing or evicting when either threshold is triggered.
 
 .. note:: All client requests will be blocked only when  ``target_max_bytes`` or
-   ``target_max_objects`` reached
+   ``target_max_objects`` is reached.
 
 Relative Sizing
 ~~~~~~~~~~~~~~~
@@ -391,7 +398,7 @@ objects with a higher speed. To set the ``cache_target_dirty_high_ratio``:
    ceph osd pool set {cachepool} cache_target_dirty_high_ratio {0.0..1.0}
 
 For example, setting the value to ``0.6`` will begin aggressively flush dirty
-objects when they reach 60% of the cache pool's capacity. obviously, we'd
+objects when they reach 60% of the cache pool's capacity. Obviously, we'd
 better set the value between dirty_ratio and full_ratio:
 
 .. prompt:: bash $
@@ -436,7 +443,7 @@ cache tier:
 
 .. prompt:: bash $
 
-   ceph osd pool {cache-tier} cache_min_evict_age {#seconds}
+   ceph osd pool set {cache-tier} cache_min_evict_age {#seconds}
 
 For example, to evict objects after 30 minutes, execute the following:
 
@@ -445,10 +452,12 @@ For example, to evict objects after 30 minutes, execute the following:
    ceph osd pool set hot-storage cache_min_evict_age 1800
 
 
+.. _cache-tiering-removal:
+
 Removing a Cache Tier
 =====================
 
-Removing a cache tier differs depending on whether it is a writeback 
+Removing a cache tier differs depending on whether it is a writeback
 cache or a read-only cache.
 
 
@@ -544,9 +553,55 @@ disable and remove it.
 
       ceph osd tier remove cold-storage hot-storage
 
+Troubleshooting Unfound Objects
+===============================
+Under certain circumstances, restarting OSDs may result in unfound objects.
 
-.. _Create a Pool: ../pools#create-a-pool
-.. _Pools - Set Pool Values: ../pools#set-pool-values
+Here is an example of unfound objects appearing during an upgrade from Ceph
+14.2.6 to Ceph 14.2.7::
+
+   2/543658058 objects unfound (0.000%)
+   pg 19.12 has 1 unfound objects
+   pg 19.2d has 1 unfound objects
+   
+   Possible data damage: 2 pgs recovery_unfound
+   pg 19.12 is active+recovery_unfound+undersized+degraded+remapped, acting [299,310], 1 unfound
+   pg 19.2d is active+recovery_unfound+undersized+degraded+remapped, acting [290,309], 1 unfound
+   
+   # ceph pg 19.12 list_unfound
+   {
+       "num_missing": 1,
+       "num_unfound": 1,
+       "objects": [
+           {
+               "oid": {
+                   "oid": "hit_set_19.12_archive_2020-02-25 13:43:50.256316Z_2020-02-25 13:43:50.325825Z",
+                   "key": "",
+                   "snapid": -2,
+                   "hash": 18,
+                   "max": 0,
+                   "pool": 19,
+                   "namespace": ".ceph-internal"
+               },
+               "need": "3312398'55868341",
+               "have": "0'0",
+               "flags": "none",
+               "locations": []
+           }
+       ],
+       "more": false
+
+Field reports indicate that the unfound objects can be deleted with no
+adverse effects, provided that the objects belong to the
+``.ceph-internal`` namespace and have names of the form
+``hit_set_<PGID>_archive``. These are hit set archives maintained
+internally by cache tiering, not user data. Pawel Stefanski reported
+that deleting missing or unfound objects is safe as long as the objects
+are a part of ``.ceph-internal::hit_set_PGID_archive``.
+
+Members of the upstream Ceph community have reported this issue on
+releases ranging from 14.2.8 through 17.2.7.
+
+
 .. _Bloom Filter: https://en.wikipedia.org/wiki/Bloom_filter
-.. _CRUSH Maps: ../crush-map
 .. _Absolute Sizing: #absolute-sizing

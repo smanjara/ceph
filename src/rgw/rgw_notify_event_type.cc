@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "rgw_notify_event_type.h"
 #include "include/str_list.h"
@@ -31,7 +31,7 @@ namespace rgw::notify {
     case ObjectExpirationCurrent:
       return "s3:ObjectLifecycle:Expiration:Current";
     case ObjectExpirationNoncurrent:
-      return "s3:ObjectLifecycle:Expiration:Noncurrent";
+      return "s3:ObjectLifecycle:Expiration:NonCurrent";
     case ObjectExpirationDeleteMarker:
       return "s3:ObjectLifecycle:Expiration:DeleteMarker";
     case ObjectExpirationAbortMPU:
@@ -41,7 +41,7 @@ namespace rgw::notify {
     case ObjectTransitionCurrent:
       return "s3:ObjectLifecycle:Transition:Current";
     case ObjectTransitionNoncurrent:
-      return "s3:ObjectLifecycle:Transition:Noncurrent";
+      return "s3:ObjectLifecycle:Transition:NonCurrent";
     case ObjectSynced:
       return "s3:ObjectSynced:*";
     case ObjectSyncedCreate:
@@ -50,6 +50,30 @@ namespace rgw::notify {
       return "s3:ObjectSynced:Delete";
     case ObjectSyncedDeletionMarkerCreated:
       return "s3:ObjectSynced:DeletionMarkerCreated";
+    case LifecycleExpiration:
+      return "s3:LifecycleExpiration:*";
+    case LifecycleExpirationDelete:
+      return "s3:LifecycleExpiration:Delete";
+    case LifecycleExpirationDeleteMarkerCreated:
+      return "s3:LifecycleExpiration:DeleteMarkerCreated";
+    case LifecycleTransition:
+      return "s3:LifecycleTransition";
+    case Replication:
+      return "s3:Replication:*";
+    case ReplicationCreate:
+      return "s3:Replication:Create";
+    case ReplicationDelete:
+      return "s3:Replication:Delete";
+    case ReplicationDeletionMarkerCreated:
+      return "s3:Replication:DeletionMarkerCreated";
+    case ObjectRestore:
+      return "s3:ObjectRestore:*";
+    case ObjectRestoreInitiated:
+      return "s3:ObjectRestore:Post";
+    case ObjectRestoreCompleted:
+      return "s3:ObjectRestore:Completed";
+    case ObjectRestoreExpired:
+      return "s3:ObjectRestore:Delete";
     case UnknownEvent:
         return "s3:UnknownEvent";
     }
@@ -83,8 +107,10 @@ namespace rgw::notify {
         return ObjectExpiration;
     if (s == "s3:ObjectLifecycle:Expiration:Current")
         return ObjectExpirationCurrent;
+    if (s == "s3:ObjectLifecycle:Expiration:NonCurrent")
+        return ObjectExpirationNonCurrent;
     if (s == "s3:ObjectLifecycle:Expiration:Noncurrent")
-        return ObjectExpirationNoncurrent;
+        return ObjectExpirationNonCurrent;
     if (s == "s3:ObjectLifecycle:Expiration:DeleteMarker")
         return ObjectExpirationDeleteMarker;
     if (s == "s3:ObjectLifecycle:Expiration:AbortMultipartUpload")
@@ -93,8 +119,10 @@ namespace rgw::notify {
         return ObjectTransition;
     if (s == "s3:ObjectLifecycle:Transition:Current")
         return ObjectTransitionCurrent;
+    if (s == "s3:ObjectLifecycle:Transition:NonCurrent")
+        return ObjectTransitionNonCurrent;
     if (s == "s3:ObjectLifecycle:Transition:Noncurrent")
-        return ObjectTransitionNoncurrent;
+        return ObjectTransitionNonCurrent;
     if (s == "s3:ObjectSynced:*")
         return ObjectSynced;
     if (s == "s3:ObjectSynced:Create")
@@ -103,6 +131,30 @@ namespace rgw::notify {
         return ObjectSyncedDelete;
     if (s == "s3:ObjectSynced:DeletionMarkerCreated")
         return ObjectSyncedDeletionMarkerCreated;
+    if (s == "s3:LifecycleExpiration:*")
+      return LifecycleExpiration;
+    if (s == "s3:LifecycleExpiration:Delete")
+      return LifecycleExpirationDelete;
+    if (s == "s3:LifecycleExpiration:DeleteMarkerCreated")
+      return LifecycleExpirationDeleteMarkerCreated;
+    if (s == "s3:LifecycleTransition")
+      return LifecycleTransition;
+    if (s == "s3:Replication:*")
+      return Replication;
+    if (s == "s3:Replication:Create")
+      return ReplicationCreate;
+    if (s == "s3:Replication:Delete")
+      return ReplicationDelete;
+    if (s == "s3:Replication:DeletionMarkerCreated")
+      return ReplicationDeletionMarkerCreated;
+    if (s =="s3:ObjectRestore:*")
+      return ObjectRestore;
+    if (s == "s3:ObjectRestore:Post")
+      return ObjectRestoreInitiated;
+    if (s == "s3:ObjectRestore:Completed")
+      return ObjectRestoreCompleted;
+    if (s == "s3:ObjectRestore:Delete")
+      return ObjectRestoreExpired;
     return UnknownEvent;
   }
 

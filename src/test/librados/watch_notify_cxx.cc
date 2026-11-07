@@ -145,7 +145,7 @@ TEST_P(LibRadosWatchNotifyPP, WatchNotify) {
   sem_destroy(&sem);
 }
 
-TEST_F(LibRadosWatchNotifyECPP, WatchNotify) {
+TEST_P(LibRadosWatchNotifyECPP, WatchNotify) {
   SKIP_IF_CRIMSON();
   ASSERT_EQ(0, sem_init(&sem, 0, 0));
   char buf[128];
@@ -194,7 +194,7 @@ TEST_P(LibRadosWatchNotifyPP, WatchNotifyTimeout) {
   ASSERT_EQ(0, ioctx.unwatch("foo", handle));
 }
 
-TEST_F(LibRadosWatchNotifyECPP, WatchNotifyTimeout) {
+TEST_P(LibRadosWatchNotifyECPP, WatchNotifyTimeout) {
   SKIP_IF_CRIMSON();
   ASSERT_EQ(0, sem_init(&sem, 0, 0));
   ioctx.set_notify_timeout(1);
@@ -368,7 +368,7 @@ TEST_P(LibRadosWatchNotifyPP, WatchNotify3) {
   notify_oid = "foo";
   notify_ioctx = &ioctx;
   notify_cookies.clear();
-  uint32_t timeout = 12; // configured timeout
+  uint32_t timeout = 26; // configured timeout
   char buf[128];
   memset(buf, 0xcc, sizeof(buf));
   bufferlist bl1;
@@ -414,3 +414,4 @@ TEST_P(LibRadosWatchNotifyPP, WatchNotify3) {
 
 INSTANTIATE_TEST_SUITE_P(LibRadosWatchNotifyPPTests, LibRadosWatchNotifyPP,
 			::testing::Values("", "cache"));
+INSTANTIATE_TEST_SUITE_P_EC(LibRadosWatchNotifyECPP);

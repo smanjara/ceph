@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -16,7 +17,7 @@
 #ifndef CEPH_MDISCOVER_H
 #define CEPH_MDISCOVER_H
 
-#include "include/filepath.h"
+#include "common/filepath.h"
 #include "messages/MMDSOp.h"
 
 #include <string>
@@ -42,7 +43,7 @@ private:
   snapid_t  get_snapid() const { return snapid; }
 
   const filepath& get_want() const { return want; }
-  const std::string& get_dentry(int n) const { return want[n]; }
+  std::string_view get_dentry(int n) const { return want[n]; }
 
   bool wants_base_dir() const { return want_base_dir; }
   bool is_path_locked() const { return path_locked; }

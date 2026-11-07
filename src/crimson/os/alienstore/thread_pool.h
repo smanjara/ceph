@@ -1,5 +1,6 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab expandtab
+// vim: ts=8 sw=2 sts=2 expandtab expandtab
+
 #pragma once
 
 #include <atomic>
@@ -15,14 +16,10 @@
 #include <seastar/core/semaphore.hh>
 #include <seastar/core/sharded.hh>
 
-#if __cplusplus > 201703L
-#include <semaphore>
-namespace crimson {
-  using std::counting_semaphore;
-}
-#else
+// std::counting_semaphore is buggy in libstdc++-11
+// (https://gcc.gnu.org/bugzilla/show_bug.cgi?id=104928),
+// so we switch back to the homebrew version for now.
 #include "semaphore.h"
-#endif
 
 namespace crimson::os {
 
@@ -47,7 +44,7 @@ public:
     try {
       if constexpr (std::is_void_v<T>) {
         func();
-        state.set();
+        state.set(seastar::internal::monostate{});
       } else {
         state.set(func());
       }
@@ -61,7 +58,7 @@ public:
       if (state.failed()) {
         return futurator_t::make_exception_future(state.get_exception());
       } else {
-        return futurator_t::from_tuple(state.get_value());
+        return futurator_t::from_tuple(std::move(state).get_value());
       }
     });
   }

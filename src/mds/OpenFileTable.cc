@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -12,15 +13,19 @@
  *
  */
 
+#include "OpenFileTable.h"
 #include "acconfig.h"
+#include "mds/Anchor.h"
 #include "mds/CInode.h"
 #include "mds/CDir.h"
+#include "mds/inode_backtrace.h" // for inode_backpointer_t
+#include "mds/MDSContext.h" // for MDSIOContextBase
 #include "mds/MDSRank.h"
 #include "mds/MDCache.h"
 #include "osdc/Objecter.h"
-#include "OpenFileTable.h"
 
 #include "common/config.h"
+#include "common/debug.h"
 #include "common/errno.h"
 
 enum {
@@ -241,6 +246,14 @@ object_t OpenFileTable::get_object_name(unsigned idx) const
   return object_t(s);
 }
 
+void OpenFileTable::_reset_states() {
+  omap_num_objs = 0;
+  omap_num_items.resize(0);
+  journal_state = JOURNAL_NONE;
+  loaded_journals.clear();
+  loaded_anchor_map.clear();
+}
+
 void OpenFileTable::_encode_header(bufferlist &bl, int j_state)
 {
   std::string_view magic = CEPH_FS_ONDISK_MAGIC;
@@ -282,6 +295,14 @@ void OpenFileTable::_commit_finish(int r, uint64_t log_seq, MDSContext *fin)
   ceph_assert(log_seq >= committed_log_seq);
   committed_log_seq = log_seq;
   num_pending_commit--;
+
+  {
+    auto last = waiting_for_commit.upper_bound(log_seq);
+    for (auto it = waiting_for_commit.begin(); it != last; it++) {
+      finish_contexts(g_ceph_context, it->second);
+    }
+    waiting_for_commit.erase(waiting_for_commit.begin(), last);
+  }
 
   if (fin)
     fin->complete(r);
@@ -750,9 +771,20 @@ void OpenFileTable::_load_finish(int op_r, int header_r, int values_r,
 				 std::map<std::string, bufferlist> &values)
 {
   using ceph::decode;
-  int err = -CEPHFS_EINVAL;
+  int err = -EINVAL;
 
   auto decode_func = [this](unsigned idx, inodeno_t ino, bufferlist &bl) {
+    // Hardening: the table never shrinks while loading (see the object
+    // count handling below), so only objects within it are read or have
+    // their journals replayed and this should not trigger. Treat it as
+    // corruption rather than indexing past the end of omap_num_items.
+    if (idx >= omap_num_items.size()) {
+      CachedStackStringStream css;
+      *css << "anchor in object " << idx << " beyond object count "
+	   << omap_num_items.size();
+      throw buffer::malformed_input(css->str());
+    }
+
     auto p = bl.cbegin();
 
     size_t count = loaded_anchor_map.size();
@@ -821,13 +853,23 @@ void OpenFileTable::_load_finish(int op_r, int header_r, int values_r,
 
       if (version > omap_version) {
 	omap_version = version;
-	omap_num_objs = num_objs;
-	omap_num_items.resize(omap_num_objs);
 	journal_state = jstate;
       } else if (version == omap_version) {
-	ceph_assert(omap_num_objs == num_objs);
 	if (jstate > journal_state)
 	  journal_state = jstate;
+      }
+
+      // Object headers are not updated atomically. A commit that changes
+      // the object count journals the new count into the headers of the
+      // objects it writes before rewriting the first object's header, so
+      // an interrupted commit can leave a newer header claiming fewer
+      // objects than the ones still holding anchors (possibly including
+      // the object being loaded). Never shrink the table while loading:
+      // read every object that any header claims. The next commit trims
+      // trailing objects that turn out to be empty.
+      if (num_objs > omap_num_objs) {
+	omap_num_objs = num_objs;
+	omap_num_items.resize(omap_num_objs);
       }
     }
 

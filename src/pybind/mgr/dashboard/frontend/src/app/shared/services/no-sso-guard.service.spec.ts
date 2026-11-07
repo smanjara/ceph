@@ -13,7 +13,7 @@ describe('NoSsoGuardService', () => {
   let authStorageService: AuthStorageService;
   let ngZone: NgZone;
 
-  @Component({ selector: 'cd-404', template: '' })
+  @Component({ selector: 'cd-404', template: '', standalone: false })
   class NotFoundComponent {}
 
   const routes: Routes = [{ path: '404', component: NotFoundComponent }];
@@ -42,7 +42,7 @@ describe('NoSsoGuardService', () => {
   it('should prevent if logged in via SSO', fakeAsync(() => {
     spyOn(authStorageService, 'isSSO').and.returnValue(true);
     ngZone.run(() => {
-      expect(() => service.canActivate()).toThrowError(DashboardUserDeniedError);
+      expect(() => service.canActivate()).toThrow(DashboardUserDeniedError);
     });
     tick();
   }));

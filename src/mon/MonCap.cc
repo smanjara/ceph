@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -31,6 +32,11 @@
 #include <regex>
 
 #include "include/ceph_assert.h"
+
+#define dout_subsys ceph_subsys_mon
+
+#undef dout_prefix
+#define dout_prefix *_dout << "MonCap "
 
 using std::list;
 using std::map;
@@ -186,6 +192,11 @@ void MonCapGrant::expand_profile(const EntityName& name) const
     StringConstraint constraint(StringConstraint::MATCH_TYPE_REGEX,
                                 string("osd_mclock_max_capacity_iops_(hdd|ssd)"));
     profile_grants.push_back(MonCapGrant("config set", "name", constraint));
+    constraint = StringConstraint(StringConstraint::MATCH_TYPE_REGEX,
+                                  string("^(osd_max_backfills|") +
+                                  string("osd_recovery_max_active(.*)|") +
+                                  string("osd_mclock_scheduler_(.*))"));
+    profile_grants.push_back(MonCapGrant("config rm", "name", constraint));
   }
   if (profile == "mds") {
     profile_grants.push_back(MonCapGrant("mds", MON_CAP_ALL));
@@ -216,6 +227,32 @@ void MonCapGrant::expand_profile(const EntityName& name) const
     // allow the Telemetry module to gather heap and mempool metrics
     profile_grants.push_back(MonCapGrant("heap"));
     profile_grants.push_back(MonCapGrant("dump_mempools"));
+    // alow getpoolstats for mgr modules
+    profile_grants.push_back(MonCapGrant("pg", MON_CAP_R));
+  }
+  if (profile == "rgw") {
+    // maps
+    profile_grants.push_back(MonCapGrant("mon", MON_CAP_R));
+    profile_grants.push_back(MonCapGrant("osd", MON_CAP_R));
+    // cluster log warnings, sent as the 'log' command
+    profile_grants.push_back(MonCapGrant("log"));
+    // statfs and pool stats
+    profile_grants.push_back(MonCapGrant("pg", MON_CAP_R));
+    // pool creation on first write; this command grant is checked
+    // explicitly in enforce_pool_op_caps, since MPoolOp carries no
+    // command name
+    profile_grants.push_back(MonCapGrant("osd pool create"));
+    // pool tuning on creation
+    profile_grants.push_back(MonCapGrant("osd pool application enable"));
+    profile_grants.back().command_args["app"] = StringConstraint(
+      StringConstraint::MATCH_TYPE_EQUAL, "rgw");
+    StringConstraint constraint(StringConstraint::MATCH_TYPE_REGEX,
+        string("pg_autoscale_bias|recovery_priority|bulk"));
+    profile_grants.push_back(MonCapGrant("osd pool set", "var", constraint));
+    // ssl certs under the rgw config-key prefix
+    constraint = StringConstraint(StringConstraint::MATCH_TYPE_PREFIX,
+                                  string("rgw/"));
+    profile_grants.push_back(MonCapGrant("config-key get", "key", constraint));
   }
   if (profile == "osd" || profile == "mds" || profile == "mon" ||
       profile == "mgr") {
@@ -268,9 +305,9 @@ void MonCapGrant::expand_profile(const EntityName& name) const
     profile_grants.back().command_args["entity"] = StringConstraint(
       StringConstraint::MATCH_TYPE_PREFIX, "client.rgw.");
     profile_grants.back().command_args["caps_mon"] = StringConstraint(
-      StringConstraint::MATCH_TYPE_EQUAL, "allow rw");
+      StringConstraint::MATCH_TYPE_EQUAL, "profile rgw");
     profile_grants.back().command_args["caps_osd"] = StringConstraint(
-      StringConstraint::MATCH_TYPE_EQUAL, "allow rwx");
+      StringConstraint::MATCH_TYPE_EQUAL, "profile rgw");
   }
   if (profile == "bootstrap-rbd" || profile == "bootstrap-rbd-mirror") {
     profile_grants.push_back(MonCapGrant("mon", MON_CAP_R));  // read monmap
@@ -519,23 +556,25 @@ void MonCap::dump(Formatter *f) const
   f->dump_string("text", text);
 }
 
-void MonCap::generate_test_instances(list<MonCap*>& ls)
+list<MonCap> MonCap::generate_test_instances()
 {
-  ls.push_back(new MonCap);
-  ls.push_back(new MonCap);
-  ls.back()->parse("allow *");
-  ls.push_back(new MonCap);
-  ls.back()->parse("allow rwx");
-  ls.push_back(new MonCap);
-  ls.back()->parse("allow service foo x");
-  ls.push_back(new MonCap);
-  ls.back()->parse("allow command bar x");
-  ls.push_back(new MonCap);
-  ls.back()->parse("allow service foo r, allow command bar x");
-  ls.push_back(new MonCap);
-  ls.back()->parse("allow command bar with k1=v1 x");
-  ls.push_back(new MonCap);
-  ls.back()->parse("allow command bar with k1=v1 k2=v2 x");
+  list<MonCap> ls;
+  ls.emplace_back();
+  ls.emplace_back();
+  ls.back().parse("allow *");
+  ls.emplace_back();
+  ls.back().parse("allow rwx");
+  ls.emplace_back();
+  ls.back().parse("allow service foo x");
+  ls.emplace_back();
+  ls.back().parse("allow command bar x");
+  ls.emplace_back();
+  ls.back().parse("allow service foo r, allow command bar x");
+  ls.emplace_back();
+  ls.back().parse("allow command bar with k1=v1 x");
+  ls.emplace_back();
+  ls.back().parse("allow command bar with k1=v1 k2=v2 x");
+  return ls;
 }
 
 // grammar
@@ -680,3 +719,62 @@ bool MonCap::parse(const string& str, ostream *err)
   return false; 
 }
 
+bool MonCap::merge(MonCap newcap)
+{
+  ceph_assert(newcap.grants.size() == 1);
+  auto& ng = newcap.grants[0];
+
+  for (auto& g : grants) {
+    /* TODO: check case where cap is "allow rw *". */
+
+    if (g.fs_name == ng.fs_name) {
+      if (g.allow == ng.allow) {
+	// no update required; maintain idempotency.
+	return false;
+      } else {
+	// cap for given fs name is present, let's update it.
+	g.allow = ng.allow;
+	return true;
+      }
+    }
+  }
+
+  // cap for given fs name is absent, let's add a new cap for it.
+  grants.push_back(MonCapGrant(ng.allow, ng.fs_name));
+  return true;
+}
+
+string MonCapGrant::to_string()
+{
+  string str = "allow ";
+
+  if (allow & MON_CAP_R) {
+      str+= "r";
+  } else if (allow & MON_CAP_W) {
+      str+= "w";
+  } else if (allow & MON_CAP_X) {
+      str+= "x";
+  } else if (allow == MON_CAP_ANY) {
+      str+= "*";
+  }
+
+  if (not fs_name.empty()) {
+    str += " fsname=" + fs_name;
+  }
+
+  return str;
+}
+
+string MonCap::to_string()
+{
+  string str;
+
+  for (size_t i = 0; i < grants.size(); ++i) {
+    str += grants[i].to_string();
+    if (i < grants.size () - 1) {
+      str += ", ";
+    }
+  }
+
+  return str;
+}

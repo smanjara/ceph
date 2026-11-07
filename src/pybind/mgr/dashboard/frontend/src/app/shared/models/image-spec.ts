@@ -1,15 +1,19 @@
 export class ImageSpec {
   static fromString(imageSpec: string) {
-    const imageSpecSplited = imageSpec.split('/');
+    const imageSpecSplit = imageSpec.split('/');
 
-    const poolName = imageSpecSplited[0];
-    const namespace = imageSpecSplited.length >= 3 ? imageSpecSplited[1] : null;
-    const imageName = imageSpecSplited.length >= 3 ? imageSpecSplited[2] : imageSpecSplited[1];
+    const poolName = imageSpecSplit[0];
+    const namespace = imageSpecSplit.length >= 3 ? imageSpecSplit[1] : null;
+    const imageName = imageSpecSplit.length >= 3 ? imageSpecSplit[2] : imageSpecSplit[1];
 
     return new this(poolName, namespace, imageName);
   }
 
-  constructor(public poolName: string, public namespace: string, public imageName: string) {}
+  constructor(
+    public poolName: string,
+    public namespace: string,
+    public imageName: string
+  ) {}
 
   private getNameSpace() {
     return this.namespace ? `${this.namespace}/` : '';

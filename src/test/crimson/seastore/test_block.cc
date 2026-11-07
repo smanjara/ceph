@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "test/crimson/seastore/test_block.h"
 
@@ -19,6 +19,7 @@ void TestBlock::apply_delta(const ceph::bufferlist &bl) {
   decode(deltas, biter);
   for (auto &&d : deltas) {
     set_contents(d.val, d.offset, d.len);
+    modified_region.union_insert(d.offset, d.len);
   }
 }
 

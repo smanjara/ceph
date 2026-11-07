@@ -8,19 +8,28 @@ struct lua_State;
 class req_state;
 class RGWREST;
 class OpsLogSink;
+class RGWOp;
 
 namespace rgw::lua::request {
 
 // create the request metatable
-void create_top_metatable(lua_State* L, req_state* s, const char* op_name);
+void create_top_metatable(lua_State* L, req_state* s, const char* op_name, const rgw::sal::Object* multi_delete_obj = nullptr);
 
 // execute a lua script in the Request context
 int execute(
-    rgw::sal::Driver* driver,
     RGWREST* rest,
     OpsLogSink* olog,
     req_state *s, 
     RGWOp* op,
-    const std::string& script);
-} // namespace rgw::lua::request
+    const rgw::lua::LuaCodeType& code,
+    const rgw::sal::Object* multi_delete_obj = nullptr);
 
+int execute(
+    RGWREST* rest,
+    OpsLogSink* olog,
+    req_state *s, 
+    RGWOp* op,
+    const rgw::lua::LuaCodeType& code,
+    int& script_return_code,
+    const rgw::sal::Object* multi_delete_obj = nullptr);
+} // namespace rgw::lua::request

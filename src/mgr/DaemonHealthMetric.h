@@ -1,16 +1,21 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
 #include <cstdint>
-#include <ostream>
+#include <list>
+#include <iosfwd>
+#include <string>
 #include "include/denc.h"
 
+namespace ceph { class Formatter; }
+
 enum class daemon_metric : uint8_t {
-  SLOW_OPS,
-  PENDING_CREATING_PGS,
-  NONE,
+  SLOW_OPS = 0,
+  PENDING_CREATING_PGS = 1,
+  NONE = 2,
+  HIGH_DEBUG_LEVEL = 3,
 };
 
 static inline const char *daemon_metric_name(daemon_metric t) {
@@ -18,6 +23,7 @@ static inline const char *daemon_metric_name(daemon_metric t) {
   case daemon_metric::SLOW_OPS: return "SLOW_OPS";
   case daemon_metric::PENDING_CREATING_PGS: return "PENDING_CREATING_PGS";
   case daemon_metric::NONE: return "NONE";
+  case daemon_metric::HIGH_DEBUG_LEVEL: return "HIGH_DEBUG_LEVEL";
   default: return "???";
   }
 }
@@ -66,15 +72,13 @@ public:
     denc(v.value.n, p);
     DENC_FINISH(p);
   }
-
+  void dump(ceph::Formatter *f) const;
+  static std::list<DaemonHealthMetric> generate_test_instances();
   std::string get_type_name() const {
     return daemon_metric_name(get_type());
   }
 
-  friend std::ostream& operator<<(std::ostream& out, const DaemonHealthMetric& m) {
-    return out << daemon_metric_name(m.get_type()) << "("
-	       << m.get_n() << "|(" << m.get_n1() << "," << m.get_n2() << "))";
-  }
+  friend std::ostream& operator<<(std::ostream& out, const DaemonHealthMetric& m);
 private:
   daemon_metric type = daemon_metric::NONE;
   daemon_metric_t value;

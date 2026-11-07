@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_TEST_LIBRBD_MOCK_IMAGE_CTX_H
 #define CEPH_TEST_LIBRBD_MOCK_IMAGE_CTX_H
@@ -16,6 +16,7 @@
 #include "test/librbd/mock/MockReadahead.h"
 #include "test/librbd/mock/io/MockImageDispatcher.h"
 #include "test/librbd/mock/io/MockObjectDispatcher.h"
+#include "common/Cond.h"
 #include "common/WorkQueue.h"
 #include "common/zipkin_trace.h"
 #include "librbd/ImageCtx.h"
@@ -145,6 +146,7 @@ struct MockImageCtx {
   MOCK_METHOD0(rebuild_data_io_context, void());
   IOContext get_data_io_context();
   IOContext duplicate_data_io_context();
+  uint64_t get_data_offset() const;
 
   static void set_timer_instance(MockSafeTimer *timer, ceph::mutex *timer_lock);
   static void get_timer_instance(CephContext *cct, MockSafeTimer **timer,

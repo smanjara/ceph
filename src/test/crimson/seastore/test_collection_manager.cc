@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "os/ObjectStore.h"
 #include "test/crimson/gtest_seastar.h"
@@ -35,7 +35,7 @@ namespace {
         std::forward<decltype(args)>(args)...);				\
       },								\
       root,								\
-      std::forward<Args>(args)...).unsafe_get0();			\
+      std::forward<Args>(args)...).unsafe_get();			\
   }
 
 struct collection_manager_test_t :
@@ -74,7 +74,7 @@ struct collection_manager_test_t :
       *tref,
       [this](auto &t) {
 	return collection_manager->mkfs(t);
-      }).unsafe_get0();
+      }).unsafe_get();
     submit_transaction(std::move(tref));
     return coll_root;
   }
@@ -87,10 +87,10 @@ struct collection_manager_test_t :
   void checking_mappings(coll_root_t &coll_root, Transaction &t) {
     auto coll_list = list(coll_root, t);
     EXPECT_EQ(test_coll_mappings.size(), coll_list.size());
-    for (std::pair<coll_t, coll_info_t> p : test_coll_mappings) {
-      EXPECT_NE(
-        std::find(coll_list.begin(), coll_list.end(), p),
-        coll_list.end());
+    for (auto& [coll, coll_info] : coll_list) {
+      auto found = test_coll_mappings.find(coll);
+      ASSERT_TRUE(found != test_coll_mappings.end());
+      EXPECT_EQ(found->second, coll_info);
     }
   }
 
@@ -100,7 +100,7 @@ struct collection_manager_test_t :
   }
 };
 
-TEST_F(collection_manager_test_t, basic)
+TEST_P(collection_manager_test_t, basic)
 {
   run_async([this] {
     coll_root_t coll_root = get_root();
@@ -108,8 +108,8 @@ TEST_F(collection_manager_test_t, basic)
       auto t = create_mutate_transaction();
       for (int i = 0; i < 20; i++) {
         coll_t cid(spg_t(pg_t(i+1,i+2), shard_id_t::NO_SHARD));
-        create(coll_root, *t, cid, coll_info_t(i));
-        test_coll_mappings.emplace(cid, coll_info_t(i));
+        create(coll_root, *t, cid, coll_info_t(i, L_ADDR_NULL));
+        test_coll_mappings.emplace(cid, coll_info_t(i, L_ADDR_NULL));
       }
       checking_mappings(coll_root, *t);
       submit_transaction(std::move(t));
@@ -137,7 +137,7 @@ TEST_F(collection_manager_test_t, basic)
   });
 }
 
-TEST_F(collection_manager_test_t, overflow)
+TEST_P(collection_manager_test_t, overflow)
 {
   run_async([this] {
     coll_root_t coll_root = get_root();
@@ -146,8 +146,8 @@ TEST_F(collection_manager_test_t, overflow)
     auto t = create_mutate_transaction();
     for (int i = 0; i < 412; i++) {
       coll_t cid(spg_t(pg_t(i+1,i+2), shard_id_t::NO_SHARD));
-      create(coll_root, *t, cid, coll_info_t(i));
-      test_coll_mappings.emplace(cid, coll_info_t(i));
+      create(coll_root, *t, cid, coll_info_t(i, L_ADDR_NULL));
+      test_coll_mappings.emplace(cid, coll_info_t(i, L_ADDR_NULL));
     }
     submit_transaction(std::move(t));
     EXPECT_NE(old_location, coll_root.get_location());
@@ -158,7 +158,7 @@ TEST_F(collection_manager_test_t, overflow)
   });
 }
 
-TEST_F(collection_manager_test_t, update)
+TEST_P(collection_manager_test_t, update)
 {
   run_async([this] {
     coll_root_t coll_root = get_root();
@@ -166,8 +166,8 @@ TEST_F(collection_manager_test_t, update)
       auto t = create_mutate_transaction();
       for (int i = 0; i < 2; i++) {
         coll_t cid(spg_t(pg_t(1,i+1), shard_id_t::NO_SHARD));
-	create(coll_root, *t, cid, coll_info_t(i));
-        test_coll_mappings.emplace(cid, coll_info_t(i));
+	create(coll_root, *t, cid, coll_info_t(i, L_ADDR_NULL));
+        test_coll_mappings.emplace(cid, coll_info_t(i, L_ADDR_NULL));
       }
       submit_transaction(std::move(t));
     }
@@ -178,9 +178,22 @@ TEST_F(collection_manager_test_t, update)
        auto t = create_mutate_transaction();
        update(coll_root, *t, iter1->first, iter2->second);
        submit_transaction(std::move(t));
-       iter1->second.split_bits = iter2->second.split_bits;
+       iter1->second = iter2->second;
     }
     replay();
     checking_mappings(coll_root);
   });
 }
+
+INSTANTIATE_TEST_SUITE_P(
+  collection_manager_test,
+  collection_manager_test_t,
+  ::testing::Combine(
+    ::testing::Values (
+      "segmented",
+      "circularbounded"
+    ),
+    ::testing::Values(
+      integrity_check_t::FULL_CHECK)
+  )
+);

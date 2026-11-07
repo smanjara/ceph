@@ -5,6 +5,7 @@
 #   https://bitbucket.org/prometheus/sphinxcontrib-htsql/src/331a542c29a102eec9f8cba44797e53a49de2a49/sphinxcontrib/htsql.py?at=default&fileviewer=file-view-default
 # into the glory that follows:
 import json
+import os
 import yaml
 import jinja2
 import sphinx
@@ -14,6 +15,10 @@ from docutils import nodes
 from sphinx.util import logging
 
 logger = logging.getLogger(__name__)
+
+
+def note_extension_dependency(env):
+    env.note_dependency(os.path.relpath(__file__, env.srcdir))
 
 
 class CephReleases(Directive):
@@ -27,6 +32,7 @@ class CephReleases(Directive):
         current = self.arguments[1] == 'current'
         document = self.state.document
         env = document.settings.env
+        note_extension_dependency(env)
         rel_filename, filename = env.relfn2path(filename)
         env.note_dependency(filename)
         try:
@@ -121,6 +127,7 @@ class CephReleases(Directive):
 
 RELEASES_TEMPLATE = '''
 .. mermaid::
+   :name: ceph-releases-gantt
 
    gantt
        dateFormat  YYYY-MM-DD
@@ -180,6 +187,7 @@ class ReleasesGantt(Directive):
         filename = self.arguments[0]
         document = self.state.document
         env = document.settings.env
+        note_extension_dependency(env)
         rel_filename, filename = env.relfn2path(filename)
         env.note_dependency(filename)
         lines = self._render_time_line(filename)
@@ -191,14 +199,16 @@ class ReleasesGantt(Directive):
 
 class CephTimeline(Directive):
     has_content = False
-    required_arguments = 3
+    required_arguments = 2
     optional_arguments = 0
     option_spec = {}
+    final_argument_whitespace = True
 
     def run(self):
         filename = self.arguments[0]
         document = self.state.document
         env = document.settings.env
+        note_extension_dependency(env)
         rel_filename, filename = env.relfn2path(filename)
         env.note_dependency(filename)
         try:
@@ -209,7 +219,7 @@ class CephTimeline(Directive):
                 "Failed to open Ceph releases file {}: {}".format(filename, e),
                 line=self.lineno)]
 
-        display_releases = self.arguments[1:]
+        display_releases = self.arguments[1].split()
 
         timeline = []
         for code_name, info in releases["releases"].items():
@@ -285,6 +295,7 @@ class CephTimeline(Directive):
 
 TIMELINE_TEMPLATE = '''
 .. mermaid::
+   :name: ceph-releases-timeline
 
    gantt
        dateFormat  YYYY-MM-DD
@@ -331,6 +342,7 @@ class TimeLineGantt(Directive):
         display_releases = self.arguments[1].split()
         document = self.state.document
         env = document.settings.env
+        note_extension_dependency(env)
         rel_filename, filename = env.relfn2path(filename)
         env.note_dependency(filename)
         lines = self._render_time_line(filename, display_releases)

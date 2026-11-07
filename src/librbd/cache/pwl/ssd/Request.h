@@ -1,10 +1,12 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_LIBRBD_CACHE_SSD_REQUEST_H
 #define CEPH_LIBRBD_CACHE_SSD_REQUEST_H
 
 #include "librbd/cache/pwl/Request.h"
+
+#include <iosfwd>
 
 namespace librbd {
 class BlockGuardCell;
@@ -40,9 +42,7 @@ public:
 protected:
   void setup_buffer_resources(
       uint64_t *bytes_cached, uint64_t *bytes_dirtied,
-      uint64_t *bytes_allocated, uint64_t *number_lanes,
-      uint64_t *number_log_entries,
-      uint64_t *number_unpublished_reserves) override;
+      uint64_t *bytes_allocated, uint64_t *number_log_entries) override;
 };
 
 template <typename T>
@@ -79,9 +79,7 @@ public:
 
   void setup_buffer_resources(
       uint64_t *bytes_cached, uint64_t *bytes_dirtied,
-      uint64_t *bytes_allocated, uint64_t *number_lanes,
-      uint64_t *number_log_entries,
-      uint64_t *number_unpublished_reserves) override;
+      uint64_t *bytes_allocated, uint64_t *number_log_entries) override;
 };
 
 } // namespace ssd

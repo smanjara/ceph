@@ -1,8 +1,9 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
+#include "osd/osd_types.h"
 #include "crimson/common/type_helpers.h"
 #include "crimson/os/seastore/cached_extent.h"
 #include "crimson/os/seastore/transaction_manager.h"
@@ -13,6 +14,10 @@
 #include "stages/node_stage_layout.h"
 #include "super.h"
 
+namespace crimson::os::seastore {
+class CollectionManager;
+}
+
 /**
  * node_extent_manager.h
  *
@@ -21,8 +26,7 @@
 
 namespace crimson::os::seastore::onode {
 
-using crimson::os::seastore::LogicalCachedExtent;
-class NodeExtent : public LogicalCachedExtent {
+class NodeExtent : public LogicalChildNode {
  public:
   virtual ~NodeExtent() = default;
   const node_header_t& get_header() const {
@@ -32,7 +36,7 @@ class NodeExtent : public LogicalCachedExtent {
     return get_bptr().c_str();
   }
   NodeExtentMutable get_mutable() {
-    assert(is_pending());
+    assert(is_mutable());
     return do_get_mutable();
   }
 
@@ -41,7 +45,7 @@ class NodeExtent : public LogicalCachedExtent {
 
  protected:
   template <typename... T>
-  NodeExtent(T&&... t) : LogicalCachedExtent(std::forward<T>(t)...) {}
+  NodeExtent(T&&... t) : LogicalChildNode(std::forward<T>(t)...) {}
 
   NodeExtentMutable do_get_mutable() {
     return NodeExtentMutable(get_bptr().c_str(), get_length());
@@ -62,7 +66,6 @@ class NodeExtent : public LogicalCachedExtent {
 
 using crimson::os::seastore::TransactionManager;
 class NodeExtentManager {
-  using base_iertr = TransactionManager::base_iertr;
  public:
   virtual ~NodeExtentManager() = default;
 
@@ -77,7 +80,7 @@ class NodeExtentManager {
 
   using alloc_iertr = base_iertr;
   virtual alloc_iertr::future<NodeExtentRef> alloc_extent(
-      Transaction&, laddr_t hint, extent_len_t) = 0;
+      Transaction&, laddr_hint_t hint, extent_len_t) = 0;
 
   using retire_iertr = base_iertr::extend<
     crimson::ct_error::enoent>;
@@ -92,7 +95,10 @@ class NodeExtentManager {
 
   static NodeExtentManagerURef create_dummy(bool is_sync);
   static NodeExtentManagerURef create_seastore(
-      TransactionManager &tm, laddr_t min_laddr = L_ADDR_MIN, double p_eagain = 0.0);
+      TransactionManager &tm,
+      coll_t cid,
+      crimson::os::seastore::CollectionManager &collection_manager,
+      laddr_t min_laddr = L_ADDR_MIN, double p_eagain = 0.0);
 };
 inline std::ostream& operator<<(std::ostream& os, const NodeExtentManager& nm) {
   return nm.print(os);

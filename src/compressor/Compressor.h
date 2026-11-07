@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -23,9 +24,6 @@
 #include "include/common_fwd.h"
 #include "include/buffer.h"
 #include "include/int_types.h"
-#ifdef HAVE_QATZIP
-  #include "QatAccel.h"
-#endif
 
 namespace TOPNSPC {
 
@@ -69,11 +67,6 @@ public:
     COMP_AGGRESSIVE,            ///< compress unless hinted INCOMPRESSIBLE
     COMP_FORCE                  ///< compress always
   };
-
-#ifdef HAVE_QATZIP
-  bool qat_enabled;
-  static QatAccel qat_accel;
-#endif
 
   static const char* get_comp_alg_name(int a);
   static std::optional<CompressionAlgorithm> get_comp_alg_type(std::string_view s);

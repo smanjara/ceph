@@ -29,7 +29,7 @@ function run() {
 
     export CEPH_MON="127.0.0.1:7121" # git grep '\<7121\>' : there must be only one
     export CEPH_ARGS
-    CEPH_ARGS+="--fsid=$(uuidgen) --auth-supported=none "
+    CEPH_ARGS+="--fsid=$(uuidgen) --auth_cluster_required=none --auth_service_required=none --auth_client_required=none "
     CEPH_ARGS+="--mon-host=$CEPH_MON "
 
     export -n CEPH_CLI_TEST_DUP_COMMAND
@@ -142,7 +142,7 @@ function create_scenario() {
     ceph-objectstore-tool --data-path $dir/${osd} "$JSON" set-bytes $TESTDATA || return 1
 
     JSON="$(ceph-objectstore-tool --data-path $dir/${osd} --head --op list obj6)"
-    ceph-objectstore-tool --data-path $dir/${osd} "$JSON" clear-snapset || return 1
+    ceph-objectstore-tool --data-path $dir/${osd} "$JSON" clear-snapset clones || return 1
     JSON="$(ceph-objectstore-tool --data-path $dir/${osd} --head --op list obj7)"
     ceph-objectstore-tool --data-path $dir/${osd} "$JSON" clear-snapset corrupt || return 1
     JSON="$(ceph-objectstore-tool --data-path $dir/${osd} --head --op list obj8)"
@@ -153,8 +153,6 @@ function create_scenario() {
     ceph-objectstore-tool --data-path $dir/${osd} "$JSON" clear-snapset clone_overlap || return 1
     JSON="$(ceph-objectstore-tool --data-path $dir/${osd} --head --op list obj11)"
     ceph-objectstore-tool --data-path $dir/${osd} "$JSON" clear-snapset clones || return 1
-    JSON="$(ceph-objectstore-tool --data-path $dir/${osd} --head --op list obj12)"
-    ceph-objectstore-tool --data-path $dir/${osd} "$JSON" clear-snapset head || return 1
     JSON="$(ceph-objectstore-tool --data-path $dir/${osd} --head --op list obj13)"
     ceph-objectstore-tool --data-path $dir/${osd} "$JSON" clear-snapset snaps || return 1
     JSON="$(ceph-objectstore-tool --data-path $dir/${osd} --head --op list obj14)"
@@ -207,8 +205,20 @@ function TEST_scrub_snaps() {
     do
       activate_osd $dir $osd || return 1
     done
+    ceph tell osd.* config set osd_shallow_scrub_chunk_max 25
+    ceph tell osd.* config set osd_shallow_scrub_chunk_min 5
+    ceph tell osd.* config set osd_pg_stat_report_interval_max_seconds 1
+    ceph tell osd.* config set osd_pg_stat_report_interval_max_epochs 1
+
 
     wait_for_clean || return 1
+
+    ceph tell osd.* config get osd_shallow_scrub_chunk_max
+    ceph tell osd.* config get osd_shallow_scrub_chunk_min
+    ceph tell osd.* config get osd_pg_stat_report_interval_max_seconds
+    ceph tell osd.* config get osd_pg_stat_report_interval_max_epochs
+    ceph tell osd.* config get osd_scrub_chunk_max
+    ceph tell osd.* config get osd_scrub_chunk_min
 
     local pgid="${poolid}.0"
     if ! pg_scrub "$pgid" ; then
@@ -759,6 +769,11 @@ function _scrub_snaps_multi() {
       activate_osd $dir $osd || return 1
     done
 
+    ceph tell osd.* config set osd_shallow_scrub_chunk_max 3
+    ceph tell osd.* config set osd_shallow_scrub_chunk_min 3
+    ceph tell osd.* config set osd_scrub_chunk_min 3
+    ceph tell osd.* config set osd_pg_stat_report_interval_max_seconds 1
+    ceph tell osd.* config set osd_pg_stat_report_interval_max_epochs 1
     wait_for_clean || return 1
 
     local pgid="${poolid}.0"
@@ -1149,7 +1164,7 @@ fi
 function TEST_scrub_snaps_replica() {
     local dir=$1
     ORIG_ARGS=$CEPH_ARGS
-    CEPH_ARGS+=" --osd_scrub_chunk_min=3 --osd_scrub_chunk_max=3"
+    CEPH_ARGS+=" --osd_scrub_chunk_min=3 --osd_scrub_chunk_max=20 --osd_shallow_scrub_chunk_min=3 --osd_shallow_scrub_chunk_max=3 --osd_pg_stat_report_interval_max_seconds=1 --osd_pg_stat_report_interval_max_epochs=1"
     _scrub_snaps_multi $dir replica
     err=$?
     CEPH_ARGS=$ORIG_ARGS
@@ -1159,7 +1174,7 @@ function TEST_scrub_snaps_replica() {
 function TEST_scrub_snaps_primary() {
     local dir=$1
     ORIG_ARGS=$CEPH_ARGS
-    CEPH_ARGS+=" --osd_scrub_chunk_min=3 --osd_scrub_chunk_max=3"
+    CEPH_ARGS+=" --osd_scrub_chunk_min=3 --osd_scrub_chunk_max=20 --osd_shallow_scrub_chunk_min=3 --osd_shallow_scrub_chunk_max=3 --osd_pg_stat_report_interval_max_seconds=1 --osd_pg_stat_report_interval_max_epochs=1"
     _scrub_snaps_multi $dir primary
     err=$?
     CEPH_ARGS=$ORIG_ARGS

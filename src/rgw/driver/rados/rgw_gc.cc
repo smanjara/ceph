@@ -1,9 +1,10 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #include "rgw_gc.h"
 
 #include "rgw_tools.h"
+#include "common/Clock.h" // for ceph_clock_now()
 #include "include/scope_guard.h"
 #include "include/rados/librados.hpp"
 #include "cls/rgw/cls_rgw_client.h"
@@ -28,7 +29,7 @@ using namespace librados;
 static string gc_oid_prefix = "gc";
 static string gc_index_lock_name = "gc_process";
 
-void RGWGC::initialize(CephContext *_cct, RGWRados *_store) {
+void RGWGC::initialize(CephContext *_cct, RGWRados *_store, optional_yield y) {
   cct = _cct;
   store = _store;
 
@@ -49,9 +50,9 @@ void RGWGC::initialize(CephContext *_cct, RGWRados *_store) {
     //version = 1 -> marked ready for transition
     librados::ObjectWriteOperation op;
     op.create(false);
-    const uint64_t queue_size = cct->_conf->rgw_gc_max_queue_size, num_deferred_entries = cct->_conf->rgw_gc_max_deferred;
-    gc_log_init2(op, queue_size, num_deferred_entries);
-    store->gc_operate(this, obj_names[i], &op);
+    const uint64_t queue_size = cct->_conf->rgw_gc_max_queue_size;
+    gc_log_init2(op, queue_size, 0);
+    store->gc_operate(this, obj_names[i], std::move(op), y);
   }
 }
 
@@ -65,48 +66,50 @@ int RGWGC::tag_index(const string& tag)
   return rgw_shards_mod(XXH64(tag.c_str(), tag.size(), seed), max_objs);
 }
 
-std::tuple<int, std::optional<cls_rgw_obj_chain>> RGWGC::send_split_chain(const cls_rgw_obj_chain& chain, const std::string& tag)
+std::tuple<int, std::optional<cls_rgw_obj_chain>> RGWGC::send_split_chain(const cls_rgw_obj_chain& chain, const std::string& tag, optional_yield y)
 {
   ldpp_dout(this, 20) << "RGWGC::send_split_chain - tag is: " << tag << dendl;
 
   if (cct->_conf->rgw_max_chunk_size) {
     cls_rgw_obj_chain broken_chain;
+    cls_rgw_gc_set_entry_op op;
+    op.info.tag = tag;
+    size_t base_encoded_size = op.estimate_encoded_size();
+    size_t total_encoded_size = base_encoded_size;
+
     ldpp_dout(this, 20) << "RGWGC::send_split_chain - rgw_max_chunk_size is: " << cct->_conf->rgw_max_chunk_size << dendl;
 
     for (auto it = chain.objs.begin(); it != chain.objs.end(); it++) {
       ldpp_dout(this, 20) << "RGWGC::send_split_chain - adding obj with name: " << it->key << dendl;
       broken_chain.objs.emplace_back(*it);
-      cls_rgw_gc_obj_info info;
-      info.tag = tag;
-      info.chain = broken_chain;
-      cls_rgw_gc_set_entry_op op;
-      op.info = info;
-      size_t total_encoded_size = op.estimate_encoded_size();
+      total_encoded_size += it->estimate_encoded_size();
+
       ldpp_dout(this, 20) << "RGWGC::send_split_chain - total_encoded_size is: " << total_encoded_size << dendl;
 
       if (total_encoded_size > cct->_conf->rgw_max_chunk_size) { //dont add to chain, and send to gc
         broken_chain.objs.pop_back();
         --it;
         ldpp_dout(this, 20) << "RGWGC::send_split_chain - more than, dont add to broken chain and send chain" << dendl;
-        auto ret = send_chain(broken_chain, tag);
+        auto ret = send_chain(broken_chain, tag, y);
         if (ret < 0) {
           broken_chain.objs.insert(broken_chain.objs.end(), it, chain.objs.end()); // add all the remainder objs to the list to be deleted inline
           ldpp_dout(this, 0) << "RGWGC::send_split_chain - send chain returned error: " << ret << dendl;
           return {ret, {broken_chain}};
         }
         broken_chain.objs.clear();
+        total_encoded_size = base_encoded_size;
       }
     }
     if (!broken_chain.objs.empty()) { //when the chain is smaller than or equal to rgw_max_chunk_size
       ldpp_dout(this, 20) << "RGWGC::send_split_chain - sending leftover objects" << dendl;
-      auto ret = send_chain(broken_chain, tag);
+      auto ret = send_chain(broken_chain, tag, y);
       if (ret < 0) {
         ldpp_dout(this, 0) << "RGWGC::send_split_chain - send chain returned error: " << ret << dendl;
         return {ret, {broken_chain}};
       }
     }
   } else {
-    auto ret = send_chain(chain, tag);
+    auto ret = send_chain(chain, tag, y);
     if (ret < 0) {
       ldpp_dout(this, 0) << "RGWGC::send_split_chain - send chain returned error: " << ret << dendl;
       return {ret, {std::move(chain)}};
@@ -115,7 +118,7 @@ std::tuple<int, std::optional<cls_rgw_obj_chain>> RGWGC::send_split_chain(const 
   return {0, {}};
 }
 
-int RGWGC::send_chain(const cls_rgw_obj_chain& chain, const string& tag)
+int RGWGC::send_chain(const cls_rgw_obj_chain& chain, const string& tag, optional_yield y)
 {
   ObjectWriteOperation op;
   cls_rgw_gc_obj_info info;
@@ -127,151 +130,86 @@ int RGWGC::send_chain(const cls_rgw_obj_chain& chain, const string& tag)
 
   ldpp_dout(this, 20) << "RGWGC::send_chain - on object name: " << obj_names[i] << "tag is: " << tag << dendl;
 
-  auto ret = store->gc_operate(this, obj_names[i], &op);
+  auto ret = store->gc_operate(this, obj_names[i], std::move(op), y);
   if (ret != -ECANCELED && ret != -EPERM) {
     return ret;
   }
   ObjectWriteOperation set_entry_op;
   cls_rgw_gc_set_entry(set_entry_op, cct->_conf->rgw_gc_obj_min_wait, info);
-  return store->gc_operate(this, obj_names[i], &set_entry_op);
+  return store->gc_operate(this, obj_names[i], std::move(set_entry_op), y);
 }
 
-struct defer_chain_state {
-  librados::AioCompletion* completion = nullptr;
-  // TODO: hold a reference on the state in RGWGC to avoid use-after-free if
-  // RGWGC destructs before this completion fires
-  RGWGC* gc = nullptr;
-  cls_rgw_gc_obj_info info;
-
-  ~defer_chain_state() {
-    if (completion) {
-      completion->release();
-    }
-  }
-};
-
-static void async_defer_callback(librados::completion_t, void* arg)
-{
-  std::unique_ptr<defer_chain_state> state{static_cast<defer_chain_state*>(arg)};
-  if (state->completion->get_return_value() == -ECANCELED) {
-    state->gc->on_defer_canceled(state->info);
-  }
-}
-
-void RGWGC::on_defer_canceled(const cls_rgw_gc_obj_info& info)
-{
-  const std::string& tag = info.tag;
-  const int i = tag_index(tag);
-
-  // ECANCELED from cls_version_check() tells us that we've transitioned
-  transitioned_objects_cache[i] = true;
-
-  ObjectWriteOperation op;
-  cls_rgw_gc_queue_defer_entry(op, cct->_conf->rgw_gc_obj_min_wait, info);
-  cls_rgw_gc_remove(op, {tag});
-
-  auto c = librados::Rados::aio_create_completion(nullptr, nullptr);
-  store->gc_aio_operate(obj_names[i], c, &op);
-  c->release();
-}
-
-int RGWGC::async_defer_chain(const string& tag, const cls_rgw_obj_chain& chain)
-{
-  const int i = tag_index(tag);
-  cls_rgw_gc_obj_info info;
-  info.chain = chain;
-  info.tag = tag;
-
-  // if we've transitioned this shard object, we can rely on the cls_rgw_gc queue
-  if (transitioned_objects_cache[i]) {
-    ObjectWriteOperation op;
-    cls_rgw_gc_queue_defer_entry(op, cct->_conf->rgw_gc_obj_min_wait, info);
-
-    // this tag may still be present in omap, so remove it once the cls_rgw_gc
-    // enqueue succeeds
-    cls_rgw_gc_remove(op, {tag});
-
-    auto c = librados::Rados::aio_create_completion(nullptr, nullptr);
-    int ret = store->gc_aio_operate(obj_names[i], c, &op);
-    c->release();
-    return ret;
-  }
-
-  // if we haven't seen the transition yet, write the defer to omap with cls_rgw
-  ObjectWriteOperation op;
-
-  // assert that we haven't initialized cls_rgw_gc queue. this prevents us
-  // from writing new entries to omap after the transition
-  gc_log_defer1(op, cct->_conf->rgw_gc_obj_min_wait, info);
-
-  // prepare a callback to detect the transition via ECANCELED from cls_version_check()
-  auto state = std::make_unique<defer_chain_state>();
-  state->gc = this;
-  state->info.chain = chain;
-  state->info.tag = tag;
-  state->completion = librados::Rados::aio_create_completion(
-      state.get(), async_defer_callback);
-
-  int ret = store->gc_aio_operate(obj_names[i], state->completion, &op);
-  if (ret == 0) {
-    state.release(); // release ownership until async_defer_callback()
-  }
-  return ret;
-}
-
-int RGWGC::remove(int index, const std::vector<string>& tags, AioCompletion **pc)
+int RGWGC::remove(int index, const std::vector<string>& tags, AioCompletion **pc, optional_yield y)
 {
   ObjectWriteOperation op;
   cls_rgw_gc_remove(op, tags);
 
-  auto c = librados::Rados::aio_create_completion(nullptr, nullptr);
-  int ret = store->gc_aio_operate(obj_names[index], c, &op);
-  if (ret < 0) {
-    c->release();
-  } else {
-    *pc = c;
+  aio_completion_ptr c{librados::Rados::aio_create_completion(nullptr, nullptr)};
+  int ret = store->gc_aio_operate(obj_names[index], c.get(), &op);
+  if (ret >= 0) {
+    *pc = c.get();
+    c.release();
   }
   return ret;
 }
 
-int RGWGC::remove(int index, int num_entries)
+int RGWGC::remove(int index, int num_entries, optional_yield y)
 {
   ObjectWriteOperation op;
   cls_rgw_gc_queue_remove_entries(op, num_entries);
 
-  return store->gc_operate(this, obj_names[index], &op);
+  return store->gc_operate(this, obj_names[index], std::move(op), y);
 }
 
-int RGWGC::list(int *index, string& marker, uint32_t max, bool expired_only, std::list<cls_rgw_gc_obj_info>& result, bool *truncated, bool& processing_queue)
+static int gc_list(const DoutPrefixProvider* dpp, optional_yield y, librados::IoCtx& io_ctx,
+                   std::string& oid, std::string& marker, uint32_t max, bool expired_only,
+                   std::list<cls_rgw_gc_obj_info>& entries, bool& truncated, std::string& next_marker)
+{
+  librados::ObjectReadOperation op;
+  bufferlist bl;
+  cls_rgw_gc_list(op, marker, max, expired_only, bl);
+  int ret = rgw_rados_operate(dpp, io_ctx, oid, std::move(op), nullptr, y);
+  if (ret < 0) {
+    return ret;
+  }
+  return cls_rgw_gc_list_decode(bl, entries, truncated, next_marker);
+}
+
+int RGWGC::list(int& index, string& marker, uint32_t max, bool expired_only, std::list<cls_rgw_gc_obj_info>& result, bool& truncated, bool& processing_queue, std::optional<int> shard_id)
 {
   result.clear();
   string next_marker;
   bool check_queue = false;
 
-  for (; *index < max_objs && result.size() < max; (*index)++, marker.clear(), check_queue = false) {
+  int max_index = shard_id.has_value() ? (shard_id.value() + 1) : max_objs;
+  if (shard_id.has_value()) {
+    index = shard_id.value();
+  }
+
+  for (; index < max_index && result.size() < max; index++, marker.clear(), check_queue = false) {
     std::list<cls_rgw_gc_obj_info> entries, queue_entries;
     int ret = 0;
 
     //processing_queue is set to true from previous iteration if the queue was under process and probably has more elements in it.
-    if (! transitioned_objects_cache[*index] && ! check_queue && ! processing_queue) {
-      ret = cls_rgw_gc_list(store->gc_pool_ctx, obj_names[*index], marker, max - result.size(), expired_only, entries, truncated, next_marker);
+    if (! transitioned_objects_cache[index] && ! check_queue && ! processing_queue) {
+      ret = gc_list(this, null_yield, store->gc_pool_ctx, obj_names[index], marker, max - result.size(), expired_only, entries, truncated, next_marker);
       if (ret != -ENOENT && ret < 0) {
         return ret;
       }
       obj_version objv;
-      cls_version_read(store->gc_pool_ctx, obj_names[*index], &objv);
+      cls_version_read(store->gc_pool_ctx, obj_names[index], &objv);
       if (ret == -ENOENT || entries.size() == 0) {
         if (objv.ver == 0) {
           continue;
         } else {
           if (! expired_only) {
-            transitioned_objects_cache[*index] = true;
+            transitioned_objects_cache[index] = true;
             marker.clear();
           } else {
             std::list<cls_rgw_gc_obj_info> non_expired_entries;
-            ret = cls_rgw_gc_list(store->gc_pool_ctx, obj_names[*index], marker, 1, false, non_expired_entries, truncated, next_marker);
+            ret = gc_list(this, null_yield, store->gc_pool_ctx, obj_names[index], marker, 1, false, non_expired_entries, truncated, next_marker);
             if (non_expired_entries.size() == 0) {
-              transitioned_objects_cache[*index] = true;
+              transitioned_objects_cache[index] = true;
               marker.clear();
             }
           }
@@ -282,9 +220,9 @@ int RGWGC::list(int *index, string& marker, uint32_t max, bool expired_only, std
         marker.clear();
       }
     }
-    if (transitioned_objects_cache[*index] || check_queue || processing_queue) {
+    if (transitioned_objects_cache[index] || check_queue || processing_queue) {
       processing_queue = false;
-      ret = cls_rgw_gc_queue_list_entries(store->gc_pool_ctx, obj_names[*index], marker, (max - result.size()) - entries.size(), expired_only, queue_entries, truncated, next_marker);
+      ret = cls_rgw_gc_queue_list_entries(store->gc_pool_ctx, obj_names[index], marker, (max - result.size()) - entries.size(), expired_only, queue_entries, truncated, next_marker);
       if (ret < 0) {
         return ret;
       }
@@ -303,8 +241,8 @@ int RGWGC::list(int *index, string& marker, uint32_t max, bool expired_only, std
 
     marker = next_marker;
 
-    if (*index == max_objs - 1) {
-      if (queue_entries.size() > 0 && *truncated) {
+    if (index == max_index - 1) {
+      if (queue_entries.size() > 0 && truncated) {
         processing_queue = true;
       } else {
         processing_queue = false;
@@ -314,22 +252,22 @@ int RGWGC::list(int *index, string& marker, uint32_t max, bool expired_only, std
     }
 
     if (result.size() == max) {
-      if (queue_entries.size() > 0 && *truncated) {
+      if (queue_entries.size() > 0 && truncated) {
         processing_queue = true;
       } else {
         processing_queue = false;
-        *index += 1; //move to next gc object
+        index += 1; //move to next gc object
       }
 
       /* close approximation, it might be that the next of the objects don't hold
        * anything, in this case truncated should have been false, but we can find
        * that out on the next iteration
        */
-      *truncated = true;
+      truncated = true;
       return 0;
     }
   }
-  *truncated = false;
+  truncated = false;
   processing_queue = false;
 
   return 0;
@@ -367,8 +305,9 @@ public:
                                                                                   cct(_cct),
                                                                                   gc(_gc) {
     max_aio = cct->_conf->rgw_gc_max_concurrent_io;
-    remove_tags.resize(min(static_cast<int>(cct->_conf->rgw_gc_max_objs), rgw_shards_max()));
-    tag_io_size.resize(min(static_cast<int>(cct->_conf->rgw_gc_max_objs), rgw_shards_max()));
+    // must match obj_names[] / transitioned_objects_cache sized in initialize()
+    remove_tags.resize(gc->get_max_objs());
+    tag_io_size.resize(gc->get_max_objs());
   }
 
   ~RGWGCIOManager() {
@@ -390,12 +329,13 @@ public:
       }
     }
 
-    auto c = librados::Rados::aio_create_completion(nullptr, nullptr);
-    int ret = ioctx->aio_operate(oid, c, op);
+    aio_completion_ptr c{librados::Rados::aio_create_completion(nullptr, nullptr)};
+    int ret = ioctx->aio_operate(oid, c.get(), op);
     if (ret < 0) {
       return ret;
     }
-    ios.push_back(IO{IO::TailIO, c, oid, index, tag});
+    ios.push_back(IO{IO::TailIO, c.get(), oid, index, tag});
+    c.release();
 
     return 0;
   }
@@ -503,7 +443,7 @@ public:
 	}
       );
 
-    int ret = gc->remove(index, rt, &index_io.c);
+    int ret = gc->remove(index, rt, &index_io.c, null_yield);
     if (ret < 0) {
       /* we already cleared list of tags, this prevents us from
        * ballooning in case of a persistent problem
@@ -529,8 +469,8 @@ public:
     }
   }
 
-  int remove_queue_entries(int index, int num_entries) {
-    int ret = gc->remove(index, num_entries);
+  int remove_queue_entries(int index, int num_entries, optional_yield y) {
+    int ret = gc->remove(index, num_entries, null_yield);
     if (ret < 0) {
       ldpp_dout(dpp, 0) << "ERROR: failed to remove queue entries on index=" <<
 	    index << " ret=" << ret << dendl;
@@ -545,7 +485,7 @@ public:
 }; // class RGWGCIOManger
 
 int RGWGC::process(int index, int max_secs, bool expired_only,
-                   RGWGCIOManager& io_manager)
+                   RGWGCIOManager& io_manager, optional_yield y)
 {
   ldpp_dout(this, 20) << "RGWGC::process entered with GC index_shard=" <<
     index << ", max_secs=" << max_secs << ", expired_only=" <<
@@ -576,7 +516,7 @@ int RGWGC::process(int index, int max_secs, bool expired_only,
 
   string marker;
   string next_marker;
-  bool truncated;
+  bool truncated = false;
   IoCtx *ctx = new IoCtx;
   do {
     int max = 100;
@@ -585,7 +525,7 @@ int RGWGC::process(int index, int max_secs, bool expired_only,
     int ret = 0;
 
     if (! transitioned_objects_cache[index]) {
-      ret = cls_rgw_gc_list(store->gc_pool_ctx, obj_names[index], marker, max, expired_only, entries, &truncated, next_marker);
+      ret = gc_list(this, y, store->gc_pool_ctx, obj_names[index], marker, max, expired_only, entries, truncated, next_marker);
       ldpp_dout(this, 20) <<
       "RGWGC::process cls_rgw_gc_list returned with returned:" << ret <<
       ", entries.size=" << entries.size() << ", truncated=" << truncated <<
@@ -594,7 +534,7 @@ int RGWGC::process(int index, int max_secs, bool expired_only,
       cls_version_read(store->gc_pool_ctx, obj_names[index], &objv);
       if ((objv.ver == 1) && entries.size() == 0) {
         std::list<cls_rgw_gc_obj_info> non_expired_entries;
-        ret = cls_rgw_gc_list(store->gc_pool_ctx, obj_names[index], marker, 1, false, non_expired_entries, &truncated, next_marker);
+        ret = gc_list(this, y, store->gc_pool_ctx, obj_names[index], marker, 1, false, non_expired_entries, truncated, next_marker);
         if (non_expired_entries.size() == 0) {
           transitioned_objects_cache[index] = true;
           marker.clear();
@@ -611,7 +551,7 @@ int RGWGC::process(int index, int max_secs, bool expired_only,
     }
 
     if (transitioned_objects_cache[index]) {
-      ret = cls_rgw_gc_queue_list_entries(store->gc_pool_ctx, obj_names[index], marker, max, expired_only, entries, &truncated, next_marker);
+      ret = cls_rgw_gc_queue_list_entries(store->gc_pool_ctx, obj_names[index], marker, max, expired_only, entries, truncated, next_marker);
       ldpp_dout(this, 20) <<
       "RGWGC::process cls_rgw_gc_queue_list_entries returned with return value:" << ret <<
       ", entries.size=" << entries.size() << ", truncated=" << truncated <<
@@ -636,7 +576,6 @@ int RGWGC::process(int index, int max_secs, bool expired_only,
 	info.tag << "', time=" << info.time << ", chain.objs.size()=" <<
 	info.chain.objs.size() << dendl;
 
-      std::list<cls_rgw_obj>::iterator liter;
       cls_rgw_obj_chain& chain = info.chain;
 
       utime_t now = ceph_clock_now();
@@ -651,17 +590,15 @@ int RGWGC::process(int index, int max_secs, bool expired_only,
         }
       }
       if (! chain.objs.empty()) {
-	for (liter = chain.objs.begin(); liter != chain.objs.end(); ++liter) {
-	  cls_rgw_obj& obj = *liter;
-
+	for (const auto& obj : chain.objs) {
 	  if (obj.pool != last_pool) {
 	    delete ctx;
 	    ctx = new IoCtx;
 	    ret = rgw_init_ioctx(this, store->get_rados_handle(), obj.pool, *ctx);
 	    if (ret < 0) {
-        if (transitioned_objects_cache[index]) {
-          goto done;
-        }
+	      if (ret != -ENOENT && transitioned_objects_cache[index]) {
+		goto done;
+	      }
 	      last_pool = "";
 	      ldpp_dout(this, 0) << "ERROR: failed to create ioctx pool=" <<
 		obj.pool << dendl;
@@ -671,6 +608,7 @@ int RGWGC::process(int index, int max_secs, bool expired_only,
 	  }
 
 	  ctx->locator_set_key(obj.loc);
+	  ctx->set_pool_full_try(); // allow deletion at pool quota limit
 
 	  const string& oid = obj.key.name; /* just stored raw oid there */
 
@@ -703,7 +641,7 @@ int RGWGC::process(int index, int max_secs, bool expired_only,
       }
       //Remove the entries from the queue
       ldpp_dout(this, 5) << "RGWGC::process removing entries, marker: " << marker << dendl;
-      ret = io_manager.remove_queue_entries(index, entries.size());
+      ret = io_manager.remove_queue_entries(index, entries.size(), null_yield);
       if (ret < 0) {
         ldpp_dout(this, 0) <<
           "WARNING: failed to remove queue entries" << dendl;
@@ -722,19 +660,26 @@ done:
   return 0;
 }
 
-int RGWGC::process(bool expired_only)
+int RGWGC::process(bool expired_only, optional_yield y, std::optional<int> shard_id)
 {
   int max_secs = cct->_conf->rgw_gc_processor_max_time;
 
-  const int start = ceph::util::generate_random_number(0, max_objs - 1);
-
   RGWGCIOManager io_manager(this, store->ctx(), this);
 
-  for (int i = 0; i < max_objs; i++) {
-    int index = (i + start) % max_objs;
-    int ret = process(index, max_secs, expired_only, io_manager);
+  if (shard_id.has_value()) {
+    // Process only the specified shard
+    int ret = process(shard_id.value(), max_secs, expired_only, io_manager, y);
     if (ret < 0)
       return ret;
+  } else {
+    // Process all shards with random start
+    const int start = ceph::util::generate_random_number(0, max_objs - 1);
+    for (int i = 0; i < max_objs; i++) {
+      int index = (i + start) % max_objs;
+      int ret = process(index, max_secs, expired_only, io_manager, y);
+      if (ret < 0)
+        return ret;
+    }
   }
   if (!going_down()) {
     io_manager.drain();
@@ -779,7 +724,7 @@ void *RGWGC::GCWorker::entry() {
   do {
     utime_t start = ceph_clock_now();
     ldpp_dout(dpp, 2) << "garbage collection: start" << dendl;
-    int r = gc->process(true);
+    int r = gc->process(true, null_yield);
     if (r < 0) {
       ldpp_dout(dpp, 0) << "ERROR: garbage collection process() returned error r=" << r << dendl;
     }

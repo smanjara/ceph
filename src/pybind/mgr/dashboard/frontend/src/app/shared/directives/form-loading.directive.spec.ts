@@ -5,13 +5,15 @@ import { By } from '@angular/platform-browser';
 import { NgbAlertModule } from '@ng-bootstrap/ng-bootstrap';
 
 import { configureTestBed } from '~/testing/unit-test-helper';
-import { AlertPanelComponent } from '../components/alert-panel/alert-panel.component';
-import { LoadingPanelComponent } from '../components/loading-panel/loading-panel.component';
 import { CdForm } from '../forms/cd-form';
 import { SharedModule } from '../shared.module';
 import { FormLoadingDirective } from './form-loading.directive';
 
-@Component({ selector: 'cd-test-cmp', template: '<span *cdFormLoading="loading">foo</span>' })
+@Component({
+  selector: 'cd-test-cmp',
+  template: '<span *cdFormLoading="loading">foo</span>',
+  standalone: false
+})
 class TestComponent extends CdForm {
   constructor() {
     super();
@@ -28,13 +30,10 @@ describe('FormLoadingDirective', () => {
     expect(fixture.debugElement.queryAll(By.css('cd-loading-panel')).length).toEqual(loading);
   };
 
-  configureTestBed(
-    {
-      declarations: [TestComponent],
-      imports: [SharedModule, NgbAlertModule]
-    },
-    [LoadingPanelComponent, AlertPanelComponent]
-  );
+  configureTestBed({
+    declarations: [TestComponent],
+    imports: [SharedModule, NgbAlertModule]
+  });
 
   afterEach(() => {
     fixture = null;
@@ -62,12 +61,13 @@ describe('FormLoadingDirective', () => {
     component.loadingError();
     fixture.detectChanges();
 
-    expectShown(0, 1, 0);
+    expect(fixture.debugElement.queryAll(By.css('cd-alert-panel')).length).toEqual(1);
+    expect(fixture.debugElement.queryAll(By.css('cd-loading-panel')).length).toEqual(0);
 
     const alert = fixture.debugElement.nativeElement.querySelector(
-      'cd-alert-panel .alert-panel-text'
+      'cd-alert-panel .cds--actionable-notification__content'
     );
-    expect(alert.textContent).toBe('Form data could not be loaded.');
+    expect(alert.textContent).toContain('Form data could not be loaded.');
   });
 
   it('should show original component when calling loadingReady()', () => {

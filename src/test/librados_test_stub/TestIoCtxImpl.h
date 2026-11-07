@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_TEST_IO_CTX_IMPL_H
 #define CEPH_TEST_IO_CTX_IMPL_H
@@ -88,7 +88,7 @@ public:
                           bufferlist& bl, uint64_t timeout_ms, bufferlist *pbl);
   virtual int aio_operate(const std::string& oid, TestObjectOperationImpl &ops,
                           AioCompletionImpl *c, SnapContext *snap_context,
-                          int flags);
+                          const ceph::real_time *pmtime, int flags);
   virtual int aio_operate_read(const std::string& oid, TestObjectOperationImpl &ops,
                                AioCompletionImpl *c, int flags,
                                bufferlist *pbl, uint64_t snap_id,
@@ -105,7 +105,7 @@ public:
 
   virtual int create(const std::string& oid, bool exclusive,
                      const SnapContext &snapc) = 0;
-  virtual int exec(const std::string& oid, TestClassHandler *handler,
+  virtual int exec_internal(const std::string& oid, TestClassHandler *handler,
                    const char *cls, const char *method,
                    bufferlist& inbl, bufferlist* outbl,
                    uint64_t snap_id, const SnapContext &snapc);

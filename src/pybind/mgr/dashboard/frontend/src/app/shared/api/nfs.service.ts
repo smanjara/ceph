@@ -1,9 +1,10 @@
-import { HttpClient } from '@angular/common/http';
+import { HttpClient, HttpResponse } from '@angular/common/http';
 import { Injectable } from '@angular/core';
 
 import { Observable, throwError } from 'rxjs';
+import { NFSCluster, NFSClusterPayload } from '~/app/ceph/nfs/models/nfs.model';
 
-import { NfsFSAbstractionLayer } from '~/app/ceph/nfs/models/nfs.fsal';
+import { NfsFSAbstractionLayer, SUPPORTED_FSAL } from '~/app/ceph/nfs/models/nfs.fsal';
 import { ApiClient } from '~/app/shared/api/api-client';
 
 export interface Directory {
@@ -34,17 +35,16 @@ export class NfsService extends ApiClient {
 
   nfsFsal: NfsFSAbstractionLayer[] = [
     {
-      value: 'CEPH',
+      value: SUPPORTED_FSAL.CEPH,
       descr: $localize`CephFS`,
       disabled: false
     },
     {
-      value: 'RGW',
+      value: SUPPORTED_FSAL.RGW,
       descr: $localize`Object Gateway`,
       disabled: false
     }
   ];
-
   nfsSquash = {
     no_root_squash: ['no_root_squash', 'noidsquash', 'none'],
     root_id_squash: ['root_id_squash', 'rootidsquash', 'rootid'],
@@ -56,8 +56,10 @@ export class NfsService extends ApiClient {
     super();
   }
 
-  list() {
-    return this.http.get(`${this.apiPath}/export`);
+  list(clusterId?: string) {
+    return this.http.get(`${this.apiPath}/export`, {
+      params: clusterId ? { cluster_id: clusterId } : {}
+    });
   }
 
   get(clusterId: string, exportId: string) {
@@ -85,9 +87,10 @@ export class NfsService extends ApiClient {
     });
   }
 
-  listClusters() {
-    return this.http.get(`${this.apiPath}/cluster`, {
-      headers: { Accept: this.getVersionHeaderValue(0, 1) }
+  listClusters(info = true): Observable<NFSCluster[] | string[]> {
+    return this.http.get<NFSCluster[] | string[]>(`${this.apiPath}/cluster`, {
+      headers: { Accept: this.getVersionHeaderValue(0, 1) },
+      params: { info: String(info) }
     });
   }
 
@@ -104,5 +107,19 @@ export class NfsService extends ApiClient {
 
   filesystems() {
     return this.http.get(`${this.uiApiPath}/cephfs/filesystems`);
+  }
+
+  createCluster(request: NFSClusterPayload): Observable<HttpResponse<null>> {
+    return this.http.post<null>(`${this.apiPath}/cluster`, request, {
+      headers: { Accept: this.getVersionHeaderValue(1, 0) },
+      observe: 'response'
+    });
+  }
+
+  deleteCluster(clusterId: string): Observable<HttpResponse<null>> {
+    return this.http.delete<null>(`${this.apiPath}/cluster/${clusterId}`, {
+      headers: { Accept: this.getVersionHeaderValue(1, 0) },
+      observe: 'response'
+    });
   }
 }

@@ -1,7 +1,8 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "sqliteDB.h"
+#include "rgw_account.h"
 
 using namespace std;
 
@@ -156,8 +157,8 @@ int SQLiteDB::InitPrepareParams(const DoutPrefixProvider *dpp,
   if (!params)
     return -1;
 
-  if (params->user_table.empty()) {
-    params->user_table = getUserTable();
+  if (params->account_table.empty()) {
+    params->account_table = getAccountTable();
   }
   if (params->user_table.empty()) {
     params->user_table = getUserTable();
@@ -175,6 +176,7 @@ int SQLiteDB::InitPrepareParams(const DoutPrefixProvider *dpp,
     params->lc_head_table = getLCHeadTable();
   }
 
+  p_params.account_table = params->account_table;
   p_params.user_table = params->user_table;
   p_params.bucket_table = params->bucket_table;
   p_params.quota_table = params->quota_table;
@@ -215,6 +217,20 @@ static int list_callback(void *None, int argc, char **argv, char **aname)
   }
   return 0;
 }
+
+enum GetAccount {
+  AccountID = 0,
+  AccountTenant,
+  AccountName,
+  Email,
+  AccountQuota,
+  AccountBucketQuota,
+  MaxUsers,
+  MaxRoles,
+  MaxGroups,
+  AccountMaxBuckets,
+  MaxAccessKeys,
+};
 
 enum GetUser {
   UserID = 0,
@@ -358,6 +374,27 @@ enum GetLCHead {
   LCHeadStartDate
 };
 
+static int list_account(const DoutPrefixProvider *dpp, DBOpInfo &op, sqlite3_stmt *stmt) {
+  if (!stmt)
+    return -1;
+
+  op.account.info.id = (const char*)sqlite3_column_text(stmt, AccountID);
+  op.account.info.tenant = (const char*)sqlite3_column_text(stmt, AccountTenant);
+  op.account.info.name = (const char*)sqlite3_column_text(stmt, AccountName);
+  op.account.info.email = (const char*)sqlite3_column_text(stmt, Email);
+
+  SQL_DECODE_BLOB_PARAM(dpp, stmt, AccountQuota, op.account.info.quota, sdb);
+  SQL_DECODE_BLOB_PARAM(dpp, stmt, AccountBucketQuota, op.account.info.bucket_quota, sdb);
+
+  op.account.info.max_users = sqlite3_column_int(stmt, MaxUsers);
+  op.account.info.max_roles = sqlite3_column_int(stmt, MaxRoles);
+  op.account.info.max_groups = sqlite3_column_int(stmt, MaxGroups);
+  op.account.info.max_buckets = sqlite3_column_int(stmt, AccountMaxBuckets);
+  op.account.info.max_access_keys = sqlite3_column_int(stmt, MaxAccessKeys);
+
+  return 0;
+}
+
 static int list_user(const DoutPrefixProvider *dpp, DBOpInfo &op, sqlite3_stmt *stmt) {
   if (!stmt)
     return -1;
@@ -395,12 +432,11 @@ static int list_user(const DoutPrefixProvider *dpp, DBOpInfo &op, sqlite3_stmt *
 
   SQL_DECODE_BLOB_PARAM(dpp, stmt, MfaIDs, op.user.uinfo.mfa_ids, sdb);
 
-  op.user.uinfo.assumed_role_arn = (const char*)sqlite3_column_text(stmt, AssumedRoleARN);
-
   SQL_DECODE_BLOB_PARAM(dpp, stmt, UserAttrs, op.user.user_attrs, sdb);
   op.user.user_version.ver = sqlite3_column_int(stmt, UserVersion);
   op.user.user_version.tag = (const char*)sqlite3_column_text(stmt, UserVersionTag);
 
+  op.user.list_entries.push_back(op.user.uinfo);
   return 0;
 }
 
@@ -423,12 +459,8 @@ static int list_bucket(const DoutPrefixProvider *dpp, DBOpInfo &op, sqlite3_stmt
   op.bucket.info.placement_rule = op.bucket.ent.placement_rule;
   op.bucket.info.creation_time = op.bucket.ent.creation_time;
 
-  op.bucket.info.owner.id = (const char*)sqlite3_column_text(stmt, OwnerID);
-  op.bucket.info.owner.tenant = op.bucket.ent.bucket.tenant;
-
-  if (op.name == "GetBucket") {
-    op.bucket.info.owner.ns = (const char*)sqlite3_column_text(stmt, Bucket_User_NS);
-  }
+  const char* owner_id = (const char*)sqlite3_column_text(stmt, OwnerID);
+  op.bucket.info.owner = parse_owner(owner_id);
 
   op.bucket.info.flags = sqlite3_column_int(stmt, Flags);
   op.bucket.info.zonegroup = (const char*)sqlite3_column_text(stmt, Zonegroup);
@@ -566,9 +598,9 @@ static int list_lc_entry(const DoutPrefixProvider *dpp, DBOpInfo &op, sqlite3_st
     return -1;
 
   op.lc_entry.index = (const char*)sqlite3_column_text(stmt, LCEntryIndex);
-  op.lc_entry.entry.set_bucket((const char*)sqlite3_column_text(stmt, LCEntryBucketName));
-  op.lc_entry.entry.set_start_time(sqlite3_column_int(stmt, LCEntryStartTime));
-  op.lc_entry.entry.set_status(sqlite3_column_int(stmt, LCEntryStatus));
+  op.lc_entry.entry.bucket = (const char*)sqlite3_column_text(stmt, LCEntryBucketName);
+  op.lc_entry.entry.start_time = sqlite3_column_int(stmt, LCEntryStartTime);
+  op.lc_entry.entry.status = sqlite3_column_int(stmt, LCEntryStatus);
  
   op.lc_entry.list_entries.push_back(op.lc_entry.entry);
 
@@ -582,10 +614,10 @@ static int list_lc_head(const DoutPrefixProvider *dpp, DBOpInfo &op, sqlite3_stm
   int64_t start_date;
 
   op.lc_head.index = (const char*)sqlite3_column_text(stmt, LCHeadIndex);
-  op.lc_head.head.set_marker((const char*)sqlite3_column_text(stmt, LCHeadMarker));
+  op.lc_head.head.marker = (const char*)sqlite3_column_text(stmt, LCHeadMarker);
  
   SQL_DECODE_BLOB_PARAM(dpp, stmt, LCHeadStartDate, start_date, sdb);
-  op.lc_head.head.get_start_date() = start_date;
+  op.lc_head.head.start_date = start_date;
 
   return 0;
 }
@@ -593,9 +625,13 @@ static int list_lc_head(const DoutPrefixProvider *dpp, DBOpInfo &op, sqlite3_stm
 int SQLiteDB::InitializeDBOps(const DoutPrefixProvider *dpp)
 {
   (void)createTables(dpp);
+  dbops.InsertAccount = make_shared<SQLInsertAccount>(&this->db, this->getDBname(), cct);
+  dbops.RemoveAccount = make_shared<SQLRemoveAccount>(&this->db, this->getDBname(), cct);
+  dbops.GetAccount = make_shared<SQLGetAccount>(&this->db, this->getDBname(), cct);
   dbops.InsertUser = make_shared<SQLInsertUser>(&this->db, this->getDBname(), cct);
   dbops.RemoveUser = make_shared<SQLRemoveUser>(&this->db, this->getDBname(), cct);
   dbops.GetUser = make_shared<SQLGetUser>(&this->db, this->getDBname(), cct);
+  dbops.ListUsers = make_shared<SQLListUsers>(&this->db, this->getDBname(), cct);
   dbops.InsertBucket = make_shared<SQLInsertBucket>(&this->db, this->getDBname(), cct);
   dbops.UpdateBucket = make_shared<SQLUpdateBucket>(&this->db, this->getDBname(), cct);
   dbops.RemoveBucket = make_shared<SQLRemoveBucket>(&this->db, this->getDBname(), cct);
@@ -721,11 +757,16 @@ out:
 int SQLiteDB::createTables(const DoutPrefixProvider *dpp)
 {
   int ret = -1;
-  int cu = 0, cb = 0, cq = 0;
+  int ca = 0, cu = 0, cb = 0, cq = 0;
   DBOpParams params = {};
 
+  params.account_table = getAccountTable();
   params.user_table = getUserTable();
   params.bucket_table = getBucketTable();
+  params.quota_table = getQuotaTable();
+
+  if ((ca = createAccountTable(dpp, &params)))
+    goto out;
 
   if ((cu = createUserTable(dpp, &params)))
     goto out;
@@ -739,12 +780,32 @@ int SQLiteDB::createTables(const DoutPrefixProvider *dpp)
   ret = 0;
 out:
   if (ret) {
+    if (ca)
+      DeleteAccountTable(dpp, &params);
     if (cu)
       DeleteUserTable(dpp, &params);
     if (cb)
       DeleteBucketTable(dpp, &params);
+    if (cq)
+      DeleteQuotaTable(dpp, &params);
     ldpp_dout(dpp, 0)<<"Creation of tables failed" << dendl;
   }
+
+  return ret;
+}
+
+int SQLiteDB::createAccountTable(const DoutPrefixProvider *dpp, DBOpParams *params)
+{
+  int ret = -1;
+  string schema;
+
+  schema = CreateTableSchema("Account", params);
+
+  ret = exec(dpp, schema.c_str(), NULL);
+  if (ret)
+    ldpp_dout(dpp, 0)<<"CreateAccountTable failed" << dendl;
+
+  ldpp_dout(dpp, 20)<<"CreateAccountTable succeeded" << dendl;
 
   return ret;
 }
@@ -760,7 +821,7 @@ int SQLiteDB::createUserTable(const DoutPrefixProvider *dpp, DBOpParams *params)
   if (ret)
     ldpp_dout(dpp, 0)<<"CreateUserTable failed" << dendl;
 
-  ldpp_dout(dpp, 20)<<"CreateUserTable suceeded" << dendl;
+  ldpp_dout(dpp, 20)<<"CreateUserTable succeeded" << dendl;
 
   return ret;
 }
@@ -776,7 +837,7 @@ int SQLiteDB::createBucketTable(const DoutPrefixProvider *dpp, DBOpParams *param
   if (ret)
     ldpp_dout(dpp, 0)<<"CreateBucketTable failed " << dendl;
 
-  ldpp_dout(dpp, 20)<<"CreateBucketTable suceeded " << dendl;
+  ldpp_dout(dpp, 20)<<"CreateBucketTable succeeded " << dendl;
 
   return ret;
 }
@@ -792,7 +853,7 @@ int SQLiteDB::createObjectTable(const DoutPrefixProvider *dpp, DBOpParams *param
   if (ret)
     ldpp_dout(dpp, 0)<<"CreateObjectTable failed " << dendl;
 
-  ldpp_dout(dpp, 20)<<"CreateObjectTable suceeded " << dendl;
+  ldpp_dout(dpp, 20)<<"CreateObjectTable succeeded " << dendl;
 
   return ret;
 }
@@ -808,7 +869,7 @@ int SQLiteDB::createObjectTableTrigger(const DoutPrefixProvider *dpp, DBOpParams
   if (ret)
     ldpp_dout(dpp, 0)<<"CreateObjectTableTrigger failed " << dendl;
 
-  ldpp_dout(dpp, 20)<<"CreateObjectTableTrigger suceeded " << dendl;
+  ldpp_dout(dpp, 20)<<"CreateObjectTableTrigger succeeded " << dendl;
 
   return ret;
 }
@@ -824,7 +885,7 @@ int SQLiteDB::createObjectView(const DoutPrefixProvider *dpp, DBOpParams *params
   if (ret)
     ldpp_dout(dpp, 0)<<"CreateObjectView failed " << dendl;
 
-  ldpp_dout(dpp, 20)<<"CreateObjectView suceeded " << dendl;
+  ldpp_dout(dpp, 20)<<"CreateObjectView succeeded " << dendl;
 
   return ret;
 }
@@ -840,7 +901,7 @@ int SQLiteDB::createQuotaTable(const DoutPrefixProvider *dpp, DBOpParams *params
   if (ret)
     ldpp_dout(dpp, 0)<<"CreateQuotaTable failed " << dendl;
 
-  ldpp_dout(dpp, 20)<<"CreateQuotaTable suceeded " << dendl;
+  ldpp_dout(dpp, 20)<<"CreateQuotaTable succeeded " << dendl;
 
   return ret;
 }
@@ -856,7 +917,7 @@ int SQLiteDB::createObjectDataTable(const DoutPrefixProvider *dpp, DBOpParams *p
   if (ret)
     ldpp_dout(dpp, 0)<<"CreateObjectDataTable failed " << dendl;
 
-  ldpp_dout(dpp, 20)<<"CreateObjectDataTable suceeded " << dendl;
+  ldpp_dout(dpp, 20)<<"CreateObjectDataTable succeeded " << dendl;
 
   return ret;
 }
@@ -877,7 +938,7 @@ int SQLiteDB::createLCTables(const DoutPrefixProvider *dpp)
     ldpp_dout(dpp, 0)<<"CreateLCEntryTable failed" << dendl;
     return ret;
   }
-  ldpp_dout(dpp, 20)<<"CreateLCEntryTable suceeded" << dendl;
+  ldpp_dout(dpp, 20)<<"CreateLCEntryTable succeeded" << dendl;
 
   schema = CreateTableSchema("LCHead", &params);
   ret = exec(dpp, schema.c_str(), NULL);
@@ -885,7 +946,23 @@ int SQLiteDB::createLCTables(const DoutPrefixProvider *dpp)
     ldpp_dout(dpp, 0)<<"CreateLCHeadTable failed" << dendl;
     (void)DeleteLCEntryTable(dpp, &params);
   }
-  ldpp_dout(dpp, 20)<<"CreateLCHeadTable suceeded" << dendl;
+  ldpp_dout(dpp, 20)<<"CreateLCHeadTable succeeded" << dendl;
+
+  return ret;
+}
+
+int SQLiteDB::DeleteAccountTable(const DoutPrefixProvider *dpp, DBOpParams *params)
+{
+  int ret = -1;
+  string schema;
+
+  schema = DeleteTableSchema(params->account_table);
+
+  ret = exec(dpp, schema.c_str(), NULL);
+  if (ret)
+    ldpp_dout(dpp, 0)<<"DeleteAccountTable failed " << dendl;
+
+  ldpp_dout(dpp, 20)<<"DeleteAccountTable succeeded " << dendl;
 
   return ret;
 }
@@ -901,7 +978,7 @@ int SQLiteDB::DeleteUserTable(const DoutPrefixProvider *dpp, DBOpParams *params)
   if (ret)
     ldpp_dout(dpp, 0)<<"DeleteUserTable failed " << dendl;
 
-  ldpp_dout(dpp, 20)<<"DeleteUserTable suceeded " << dendl;
+  ldpp_dout(dpp, 20)<<"DeleteUserTable succeeded " << dendl;
 
   return ret;
 }
@@ -917,7 +994,7 @@ int SQLiteDB::DeleteBucketTable(const DoutPrefixProvider *dpp, DBOpParams *param
   if (ret)
     ldpp_dout(dpp, 0)<<"DeletebucketTable failed " << dendl;
 
-  ldpp_dout(dpp, 20)<<"DeletebucketTable suceeded " << dendl;
+  ldpp_dout(dpp, 20)<<"DeletebucketTable succeeded " << dendl;
 
   return ret;
 }
@@ -933,7 +1010,7 @@ int SQLiteDB::DeleteObjectTable(const DoutPrefixProvider *dpp, DBOpParams *param
   if (ret)
     ldpp_dout(dpp, 0)<<"DeleteObjectTable failed " << dendl;
 
-  ldpp_dout(dpp, 20)<<"DeleteObjectTable suceeded " << dendl;
+  ldpp_dout(dpp, 20)<<"DeleteObjectTable succeeded " << dendl;
 
   return ret;
 }
@@ -949,7 +1026,7 @@ int SQLiteDB::DeleteObjectDataTable(const DoutPrefixProvider *dpp, DBOpParams *p
   if (ret)
     ldpp_dout(dpp, 0)<<"DeleteObjectDataTable failed " << dendl;
 
-  ldpp_dout(dpp, 20)<<"DeleteObjectDataTable suceeded " << dendl;
+  ldpp_dout(dpp, 20)<<"DeleteObjectDataTable succeeded " << dendl;
 
   return ret;
 }
@@ -965,7 +1042,7 @@ int SQLiteDB::DeleteQuotaTable(const DoutPrefixProvider *dpp, DBOpParams *params
   if (ret)
     ldpp_dout(dpp, 0)<<"DeleteQuotaTable failed " << dendl;
 
-  ldpp_dout(dpp, 20)<<"DeleteQuotaTable suceeded " << dendl;
+  ldpp_dout(dpp, 20)<<"DeleteQuotaTable succeeded " << dendl;
 
   return ret;
 }
@@ -979,7 +1056,7 @@ int SQLiteDB::DeleteLCEntryTable(const DoutPrefixProvider *dpp, DBOpParams *para
   ret = exec(dpp, schema.c_str(), NULL);
   if (ret)
     ldpp_dout(dpp, 0)<<"DeleteLCEntryTable failed " << dendl;
-  ldpp_dout(dpp, 20)<<"DeleteLCEntryTable suceeded " << dendl;
+  ldpp_dout(dpp, 20)<<"DeleteLCEntryTable succeeded " << dendl;
 
   return ret;
 }
@@ -993,7 +1070,7 @@ int SQLiteDB::DeleteLCHeadTable(const DoutPrefixProvider *dpp, DBOpParams *param
   ret = exec(dpp, schema.c_str(), NULL);
   if (ret)
     ldpp_dout(dpp, 0)<<"DeleteLCHeadTable failed " << dendl;
-  ldpp_dout(dpp, 20)<<"DeleteLCHeadTable suceeded " << dendl;
+  ldpp_dout(dpp, 20)<<"DeleteLCHeadTable succeeded " << dendl;
 
   return ret;
 }
@@ -1008,7 +1085,7 @@ int SQLiteDB::ListAllUsers(const DoutPrefixProvider *dpp, DBOpParams *params)
   if (ret)
     ldpp_dout(dpp, 0)<<"GetUsertable failed " << dendl;
 
-  ldpp_dout(dpp, 20)<<"GetUserTable suceeded " << dendl;
+  ldpp_dout(dpp, 20)<<"GetUserTable succeeded " << dendl;
 
   return ret;
 }
@@ -1024,7 +1101,7 @@ int SQLiteDB::ListAllBuckets(const DoutPrefixProvider *dpp, DBOpParams *params)
   if (ret)
     ldpp_dout(dpp, 0)<<"Listbuckettable failed " << dendl;
 
-  ldpp_dout(dpp, 20)<<"ListbucketTable suceeded " << dendl;
+  ldpp_dout(dpp, 20)<<"ListbucketTable succeeded " << dendl;
 
   return ret;
 }
@@ -1051,7 +1128,7 @@ int SQLiteDB::ListAllObjects(const DoutPrefixProvider *dpp, DBOpParams *params)
     if (ret)
       ldpp_dout(dpp, 0)<<"ListObjecttable failed " << dendl;
 
-    ldpp_dout(dpp, 20)<<"ListObjectTable suceeded " << dendl;
+    ldpp_dout(dpp, 20)<<"ListObjectTable succeeded " << dendl;
   }
 
   return ret;
@@ -1072,6 +1149,174 @@ int SQLObjectOp::InitializeObjectOps(string db_name, const DoutPrefixProvider *d
   DeleteStaleObjectData = make_shared<SQLDeleteStaleObjectData>(sdb, db_name, cct);
 
   return 0;
+}
+
+int SQLInsertAccount::Prepare(const DoutPrefixProvider *dpp, struct DBOpParams *params)
+{
+  int ret = -1;
+  struct DBOpPrepareParams p_params = PrepareParams;
+
+  if (!*sdb) {
+    ldpp_dout(dpp, 0)<<"In SQLInsertAccount - no db" << dendl;
+    goto out;
+  }
+
+  InitPrepareParams(dpp, p_params, params);
+
+  SQL_PREPARE(dpp, p_params, sdb, stmt, ret, "PrepareInsertAccount");
+out:
+  return ret;
+}
+
+int SQLInsertAccount::Bind(const DoutPrefixProvider *dpp, struct DBOpParams *params)
+{
+  int index = -1;
+  int rc = 0;
+  struct DBOpPrepareParams p_params = PrepareParams;
+
+  SQL_BIND_INDEX(dpp, stmt, index, p_params.op.account.account_id, sdb);
+  SQL_BIND_TEXT(dpp, stmt, index, params->op.account.info.id.c_str(), sdb);
+
+  SQL_BIND_INDEX(dpp, stmt, index, p_params.op.account.tenant, sdb);
+  SQL_BIND_TEXT(dpp, stmt, index, params->op.account.info.tenant.c_str(), sdb);
+
+  SQL_BIND_INDEX(dpp, stmt, index, p_params.op.account.account_name, sdb);
+  SQL_BIND_TEXT(dpp, stmt, index, params->op.account.info.name.c_str(), sdb);
+
+  SQL_BIND_INDEX(dpp, stmt, index, p_params.op.account.email, sdb);
+  SQL_BIND_TEXT(dpp, stmt, index, params->op.account.info.email.c_str(), sdb);
+
+  SQL_BIND_INDEX(dpp, stmt, index, p_params.op.account.quota, sdb);
+  SQL_ENCODE_BLOB_PARAM(dpp, stmt, index, params->op.account.info.quota, sdb);
+
+  SQL_BIND_INDEX(dpp, stmt, index, p_params.op.account.bucket_quota, sdb);
+  SQL_ENCODE_BLOB_PARAM(dpp, stmt, index, params->op.account.info.bucket_quota, sdb);
+
+  SQL_BIND_INDEX(dpp, stmt, index, p_params.op.account.max_users, sdb);
+  SQL_BIND_INT(dpp, stmt, index, params->op.account.info.max_users, sdb);
+
+  SQL_BIND_INDEX(dpp, stmt, index, p_params.op.account.max_roles, sdb);
+  SQL_BIND_INT(dpp, stmt, index, params->op.account.info.max_roles, sdb);
+
+  SQL_BIND_INDEX(dpp, stmt, index, p_params.op.account.max_groups, sdb);
+  SQL_BIND_INT(dpp, stmt, index, params->op.account.info.max_groups, sdb);
+
+  SQL_BIND_INDEX(dpp, stmt, index, p_params.op.account.max_buckets, sdb);
+  SQL_BIND_INT(dpp, stmt, index, params->op.account.info.max_buckets, sdb);
+
+  SQL_BIND_INDEX(dpp, stmt, index, p_params.op.account.max_access_keys, sdb);
+  SQL_BIND_INT(dpp, stmt, index, params->op.account.info.max_access_keys, sdb);
+
+out:
+  return rc;
+}
+
+int SQLInsertAccount::Execute(const DoutPrefixProvider *dpp, struct DBOpParams *params)
+{
+  int ret = -1;
+
+  SQL_EXECUTE(dpp, params, stmt, NULL);
+out:
+  return ret;
+}
+
+int SQLRemoveAccount::Prepare(const DoutPrefixProvider *dpp, struct DBOpParams *params)
+{
+  int ret = -1;
+  struct DBOpPrepareParams p_params = PrepareParams;
+
+  if (!*sdb) {
+    ldpp_dout(dpp, 0)<<"In SQLRemoveAccount - no db" << dendl;
+    goto out;
+  }
+
+  InitPrepareParams(dpp, p_params, params);
+
+  SQL_PREPARE(dpp, p_params, sdb, stmt, ret, "PrepareRemoveAccount");
+out:
+  return ret;
+}
+
+int SQLRemoveAccount::Bind(const DoutPrefixProvider *dpp, struct DBOpParams *params)
+{
+  int index = -1;
+  int rc = 0;
+  struct DBOpPrepareParams p_params = PrepareParams;
+
+  SQL_BIND_INDEX(dpp, stmt, index, p_params.op.account.account_id, sdb);
+  SQL_BIND_TEXT(dpp, stmt, index, params->op.account.info.id.c_str(), sdb);
+
+out:
+  return rc;
+}
+
+int SQLRemoveAccount::Execute(const DoutPrefixProvider *dpp, struct DBOpParams *params)
+{
+  int ret = -1;
+
+  SQL_EXECUTE(dpp, params, stmt, NULL);
+out:
+  return ret;
+}
+
+int SQLGetAccount::Prepare(const DoutPrefixProvider *dpp, struct DBOpParams *params)
+{
+  int ret = -1;
+  struct DBOpPrepareParams p_params = PrepareParams;
+
+  if (!*sdb) {
+    ldpp_dout(dpp, 0)<<"In SQLGetAccount - no db" << dendl;
+    goto out;
+  }
+
+  InitPrepareParams(dpp, p_params, params);
+
+  if (params->op.query_str == "name") { 
+    SQL_PREPARE(dpp, p_params, sdb, name_stmt, ret, "PrepareGetAccount");
+  } else if (params->op.query_str == "email") { 
+    SQL_PREPARE(dpp, p_params, sdb, email_stmt, ret, "PrepareGetAccount");
+  } else { // by default by account_id
+    SQL_PREPARE(dpp, p_params, sdb, stmt, ret, "PrepareGetAccount");
+  }
+out:
+  return ret;
+}
+
+int SQLGetAccount::Bind(const DoutPrefixProvider *dpp, struct DBOpParams *params)
+{
+  int index = -1;
+  int rc = 0;
+  struct DBOpPrepareParams p_params = PrepareParams;
+
+  if (params->op.query_str == "name") { 
+    SQL_BIND_INDEX(dpp, name_stmt, index, p_params.op.account.account_name, sdb);
+    SQL_BIND_TEXT(dpp, name_stmt, index, params->op.account.info.name.c_str(), sdb);
+  } else if (params->op.query_str == "email") { 
+    SQL_BIND_INDEX(dpp, email_stmt, index, p_params.op.account.email, sdb);
+    SQL_BIND_TEXT(dpp, email_stmt, index, params->op.account.info.email.c_str(), sdb);
+  } else { // by default by account_id
+    SQL_BIND_INDEX(dpp, stmt, index, p_params.op.account.account_id, sdb);
+    SQL_BIND_TEXT(dpp, stmt, index, params->op.account.info.id.c_str(), sdb);
+  }
+
+out:
+  return rc;
+}
+
+int SQLGetAccount::Execute(const DoutPrefixProvider *dpp, struct DBOpParams *params)
+{
+  int ret = -1;
+
+  if (params->op.query_str == "name") { 
+    SQL_EXECUTE(dpp, params, name_stmt, list_account);
+  } else if (params->op.query_str == "email") { 
+    SQL_EXECUTE(dpp, params, email_stmt, list_account);
+  } else { // by default by account_id
+    SQL_EXECUTE(dpp, params, stmt, list_account);
+  }
+
+out:
+  return ret;
 }
 
 int SQLInsertUser::Prepare(const DoutPrefixProvider *dpp, struct DBOpParams *params)
@@ -1178,9 +1423,6 @@ int SQLInsertUser::Bind(const DoutPrefixProvider *dpp, struct DBOpParams *params
 
   SQL_BIND_INDEX(dpp, stmt, index, p_params.op.user.mfa_ids, sdb);
   SQL_ENCODE_BLOB_PARAM(dpp, stmt, index, params->op.user.uinfo.mfa_ids, sdb);
-
-  SQL_BIND_INDEX(dpp, stmt, index, p_params.op.user.assumed_role_arn, sdb);
-  SQL_BIND_TEXT(dpp, stmt, index, params->op.user.uinfo.assumed_role_arn.c_str(), sdb);
 
   SQL_BIND_INDEX(dpp, stmt, index, p_params.op.user.user_attrs, sdb);
   SQL_ENCODE_BLOB_PARAM(dpp, stmt, index, params->op.user.user_attrs, sdb);
@@ -1318,6 +1560,48 @@ out:
   return ret;
 }
 
+int SQLListUsers::Prepare(const DoutPrefixProvider *dpp, struct DBOpParams *params)
+{
+  int ret = -1;
+  struct DBOpPrepareParams p_params = PrepareParams;
+
+  if (!*sdb) {
+    ldpp_dout(dpp, 0)<<"In SQLListUsers - no db" << dendl;
+    goto out;
+  }
+
+  InitPrepareParams(dpp, p_params, params);
+
+  SQL_PREPARE(dpp, p_params, sdb, stmt, ret, "PrepareListUsers");
+out:
+  return ret;
+}
+
+int SQLListUsers::Bind(const DoutPrefixProvider *dpp, struct DBOpParams *params)
+{
+  int index = -1;
+  int rc = 0;
+  struct DBOpPrepareParams p_params = PrepareParams;
+
+  SQL_BIND_INDEX(dpp, stmt, index, p_params.op.user.user_id, sdb);
+  SQL_BIND_TEXT(dpp, stmt, index, params->op.user.uinfo.user_id.id.c_str(), sdb);
+
+  SQL_BIND_INDEX(dpp, stmt, index, p_params.op.list_max_count, sdb);
+  SQL_BIND_INT(dpp, stmt, index, params->op.list_max_count, sdb);
+out:
+  return rc;
+}
+
+int SQLListUsers::Execute(const DoutPrefixProvider *dpp, struct DBOpParams *params)
+{
+  int ret = -1;
+
+  SQL_EXECUTE(dpp, params, stmt, list_user);
+
+out:
+  return ret;
+}
+
 int SQLInsertBucket::Prepare(const DoutPrefixProvider *dpp, struct DBOpParams *params)
 {
   int ret = -1;
@@ -1344,7 +1628,7 @@ int SQLInsertBucket::Bind(const DoutPrefixProvider *dpp, struct DBOpParams *para
 
   // user_id here is copied as OwnerID in the bucket table.
   SQL_BIND_INDEX(dpp, stmt, index, p_params.op.user.user_id, sdb);
-  SQL_BIND_TEXT(dpp, stmt, index, params->op.user.uinfo.user_id.id.c_str(), sdb);
+  SQL_BIND_TEXT(dpp, stmt, index, params->op.bucket.owner.c_str(), sdb);
 
   SQL_BIND_INDEX(dpp, stmt, index, p_params.op.bucket.bucket_name, sdb);
   SQL_BIND_TEXT(dpp, stmt, index, params->op.bucket.info.bucket.name.c_str(), sdb);
@@ -1572,10 +1856,13 @@ int SQLUpdateBucket::Bind(const DoutPrefixProvider *dpp, struct DBOpParams *para
   }
 
   SQL_BIND_INDEX(dpp, *stmt, index, p_params.op.user.user_id, sdb);
-  SQL_BIND_TEXT(dpp, *stmt, index, params->op.user.uinfo.user_id.id.c_str(), sdb);
+  SQL_BIND_TEXT(dpp, *stmt, index, params->op.bucket.owner.c_str(), sdb);
 
   SQL_BIND_INDEX(dpp, *stmt, index, p_params.op.bucket.bucket_name, sdb);
   SQL_BIND_TEXT(dpp, *stmt, index, params->op.bucket.info.bucket.name.c_str(), sdb);
+
+  SQL_BIND_INDEX(dpp, *stmt, index, p_params.op.bucket.bucket_attrs, sdb);
+  SQL_ENCODE_BLOB_PARAM(dpp, *stmt, index, params->op.bucket.bucket_attrs, sdb);
 
   SQL_BIND_INDEX(dpp, *stmt, index, p_params.op.bucket.bucket_ver, sdb);
   SQL_BIND_INT(dpp, *stmt, index, params->op.bucket.bucket_version.ver, sdb);
@@ -1737,7 +2024,7 @@ int SQLListUserBuckets::Bind(const DoutPrefixProvider *dpp, struct DBOpParams *p
 
   if (params->op.query_str != "all") { 
     SQL_BIND_INDEX(dpp, *pstmt, index, p_params.op.user.user_id, sdb);
-    SQL_BIND_TEXT(dpp, *pstmt, index, params->op.user.uinfo.user_id.id.c_str(), sdb);
+    SQL_BIND_TEXT(dpp, *pstmt, index, params->op.bucket.owner.c_str(), sdb);
   }
 
   SQL_BIND_INDEX(dpp, *pstmt, index, p_params.op.bucket.min_marker, sdb);
@@ -2700,13 +2987,13 @@ int SQLInsertLCEntry::Bind(const DoutPrefixProvider *dpp, struct DBOpParams *par
   SQL_BIND_TEXT(dpp, stmt, index, params->op.lc_entry.index.c_str(), sdb);
 
   SQL_BIND_INDEX(dpp, stmt, index, p_params.op.lc_entry.bucket_name, sdb);
-  SQL_BIND_TEXT(dpp, stmt, index, params->op.lc_entry.entry.get_bucket().c_str(), sdb);
+  SQL_BIND_TEXT(dpp, stmt, index, params->op.lc_entry.entry.bucket.c_str(), sdb);
 
   SQL_BIND_INDEX(dpp, stmt, index, p_params.op.lc_entry.status, sdb);
-  SQL_BIND_INT(dpp, stmt, index, params->op.lc_entry.entry.get_status(), sdb);
+  SQL_BIND_INT(dpp, stmt, index, params->op.lc_entry.entry.status, sdb);
 
   SQL_BIND_INDEX(dpp, stmt, index, p_params.op.lc_entry.start_time, sdb);
-  SQL_BIND_INT(dpp, stmt, index, params->op.lc_entry.entry.get_start_time(), sdb);
+  SQL_BIND_INT(dpp, stmt, index, params->op.lc_entry.entry.start_time, sdb);
 
 out:
   return rc;
@@ -2749,7 +3036,7 @@ int SQLRemoveLCEntry::Bind(const DoutPrefixProvider *dpp, struct DBOpParams *par
   SQL_BIND_TEXT(dpp, stmt, index, params->op.lc_entry.index.c_str(), sdb);
 
   SQL_BIND_INDEX(dpp, stmt, index, p_params.op.lc_entry.bucket_name, sdb);
-  SQL_BIND_TEXT(dpp, stmt, index, params->op.lc_entry.entry.get_bucket().c_str(), sdb);
+  SQL_BIND_TEXT(dpp, stmt, index, params->op.lc_entry.entry.bucket.c_str(), sdb);
 
 out:
   return rc;
@@ -2804,7 +3091,7 @@ int SQLGetLCEntry::Bind(const DoutPrefixProvider *dpp, struct DBOpParams *params
   SQL_BIND_TEXT(dpp, *pstmt, index, params->op.lc_entry.index.c_str(), sdb);
 
   SQL_BIND_INDEX(dpp, *pstmt, index, p_params.op.lc_entry.bucket_name, sdb);
-  SQL_BIND_TEXT(dpp, *pstmt, index, params->op.lc_entry.entry.get_bucket().c_str(), sdb);
+  SQL_BIND_TEXT(dpp, *pstmt, index, params->op.lc_entry.entry.bucket.c_str(), sdb);
 
 out:
   return rc;
@@ -2900,7 +3187,7 @@ int SQLInsertLCHead::Bind(const DoutPrefixProvider *dpp, struct DBOpParams *para
   SQL_BIND_TEXT(dpp, stmt, index, params->op.lc_head.index.c_str(), sdb);
 
   SQL_BIND_INDEX(dpp, stmt, index, p_params.op.lc_head.marker, sdb);
-  SQL_BIND_TEXT(dpp, stmt, index, params->op.lc_head.head.get_marker().c_str(), sdb);
+  SQL_BIND_TEXT(dpp, stmt, index, params->op.lc_head.head.marker.c_str(), sdb);
 
   SQL_BIND_INDEX(dpp, stmt, index, p_params.op.lc_head.start_date, sdb);
   SQL_ENCODE_BLOB_PARAM(dpp, stmt, index, static_cast<int64_t>(params->op.lc_head.head.start_date), sdb);

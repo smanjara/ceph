@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
-// vim: ts=8 sw=2 smarttab
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -12,6 +12,7 @@
 #include "include/buffer_fwd.h"
 #include "include/ceph_assert.h"
 #include "common/hobject.h"
+#include "osd/osd_types.h"
 
 #include "crimson/common/errorator.h"
 #include "crimson/os/seastore/onode.h"
@@ -22,16 +23,22 @@
 namespace crimson::os::seastore {
 
 class OnodeManager {
-  using base_iertr = TransactionManager::base_iertr;
 public:
   using mkfs_iertr = base_iertr;
   using mkfs_ret = mkfs_iertr::future<>;
   virtual mkfs_ret mkfs(Transaction &t) = 0;
 
+  using create_tree_iertr = base_iertr;
+  using create_tree_ret = create_tree_iertr::future<>;
+  virtual create_tree_ret create_tree(Transaction &t, coll_t cid) = 0;
+
+  virtual void remove_tree(coll_t cid) = 0;
+
   using contains_onode_iertr = base_iertr;
   using contains_onode_ret = contains_onode_iertr::future<bool>;
   virtual contains_onode_ret contains_onode(
     Transaction &trans,
+    const coll_t &cid,
     const ghobject_t &hoid) = 0;
 
   using get_onode_iertr = base_iertr::extend<
@@ -40,6 +47,7 @@ public:
     OnodeRef>;
   virtual get_onode_ret get_onode(
     Transaction &trans,
+    const coll_t &cid,
     const ghobject_t &hoid) = 0;
 
   using get_or_create_onode_iertr = base_iertr::extend<
@@ -48,6 +56,7 @@ public:
     OnodeRef>;
   virtual get_or_create_onode_ret get_or_create_onode(
     Transaction &trans,
+    const coll_t &cid,
     const ghobject_t &hoid) = 0;
 
   using get_or_create_onodes_iertr = base_iertr::extend<
@@ -56,18 +65,14 @@ public:
     std::vector<OnodeRef>>;
   virtual get_or_create_onodes_ret get_or_create_onodes(
     Transaction &trans,
+    const coll_t &cid,
     const std::vector<ghobject_t> &hoids) = 0;
-
-  using write_dirty_iertr = base_iertr;
-  using write_dirty_ret = write_dirty_iertr::future<>;
-  virtual write_dirty_ret write_dirty(
-    Transaction &trans,
-    const std::vector<OnodeRef> &onodes) = 0;
 
   using erase_onode_iertr = base_iertr;
   using erase_onode_ret = erase_onode_iertr::future<>;
   virtual erase_onode_ret erase_onode(
     Transaction &trans,
+    const coll_t &cid,
     OnodeRef &onode) = 0;
 
   using list_onodes_iertr = base_iertr;
@@ -75,8 +80,9 @@ public:
   using list_onodes_ret = list_onodes_iertr::future<list_onodes_bare_ret>;
   virtual list_onodes_ret list_onodes(
     Transaction &trans,
-    const ghobject_t& start,
-    const ghobject_t& end,
+    const coll_t cid,
+    const ghobject_t start,
+    const ghobject_t end,
     uint64_t limit) = 0;
 
   virtual ~OnodeManager() {}

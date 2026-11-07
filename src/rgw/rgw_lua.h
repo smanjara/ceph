@@ -3,6 +3,7 @@
 #include <string>
 #include <set>
 #include "rgw_lua_version.h"
+#include "rgw_lua_types.h"
 #include "common/async/yield_context.h"
 #include "common/dout.h"
 #include "rgw_sal_fwd.h"
@@ -20,6 +21,7 @@ namespace rgw::lua {
 
 enum class context {
   preRequest,
+  postAuth,
   postRequest,
   background,
   getData,
@@ -32,6 +34,8 @@ enum class context {
 // return "none" if not matched
 context to_context(const std::string& s);
 
+std::string to_string(context ctx);
+
 // verify a lua script
 bool verify(const std::string& script, std::string& err_msg);
 
@@ -40,6 +44,8 @@ int write_script(const DoutPrefixProvider *dpp, rgw::sal::LuaManager* manager, c
 
 // read the stored lua script from a context
 int read_script(const DoutPrefixProvider *dpp, rgw::sal::LuaManager* manager, const std::string& tenant, optional_yield y, context ctx, std::string& script);
+
+std::tuple<LuaCodeType, int> read_script_or_bytecode(const DoutPrefixProvider *dpp, rgw::sal::LuaManager* manager, const std::string& tenant, optional_yield y, context ctx);
 
 // delete the stored lua script from a context
 int delete_script(const DoutPrefixProvider *dpp, rgw::sal::LuaManager* manager, const std::string& tenant, optional_yield y, context ctx);
@@ -57,11 +63,17 @@ int remove_package(const DoutPrefixProvider *dpp, rgw::sal::Driver* driver, opti
 // list lua packages in the allowlist
 int list_packages(const DoutPrefixProvider *dpp, rgw::sal::Driver* driver, optional_yield y, packages_t& packages);
 
+// reload lua packages
+int reload_packages(const DoutPrefixProvider *dpp, rgw::sal::Driver* driver, optional_yield y);
+
 // install all packages from the allowlist
-// return the list of packages that failed to install and the output of the install command
+// return (by reference) the list of packages that failed to install
+// and return (by reference) the temporary director in which the packages were installed
 int install_packages(const DoutPrefixProvider *dpp, rgw::sal::Driver* driver,
                      optional_yield y, const std::string& luarocks_path,
-                     packages_t& failed_packages, std::string& output);
+                     packages_t& failed_packages,
+                     std::string& install_dir);
+
 #endif
 }
 

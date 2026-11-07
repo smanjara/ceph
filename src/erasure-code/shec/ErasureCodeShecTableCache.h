@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -42,10 +43,10 @@ class ErasureCodeShecTableCache {
     int* dm_column;  // size: k
     int* minimum;  // size: k+m
     DecodingCacheParameter() {
-      decoding_matrix = 0;
-      dm_row = 0;
-      dm_column = 0;
-      minimum = 0;
+      decoding_matrix = nullptr;
+      dm_row = nullptr;
+      dm_column = nullptr;
+      minimum = nullptr;
     }
     ~DecodingCacheParameter() {
       if (decoding_matrix) {

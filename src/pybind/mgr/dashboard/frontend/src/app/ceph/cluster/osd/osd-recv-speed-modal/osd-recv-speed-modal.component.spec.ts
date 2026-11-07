@@ -5,7 +5,7 @@ import { RouterTestingModule } from '@angular/router/testing';
 
 import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap';
 import _ from 'lodash';
-import { ToastrModule } from 'ngx-toastr';
+
 import { of as observableOf } from 'rxjs';
 
 import { ConfigurationService } from '~/app/shared/api/configuration.service';
@@ -19,13 +19,7 @@ describe('OsdRecvSpeedModalComponent', () => {
   let configurationService: ConfigurationService;
 
   configureTestBed({
-    imports: [
-      HttpClientTestingModule,
-      ReactiveFormsModule,
-      RouterTestingModule,
-      SharedModule,
-      ToastrModule.forRoot()
-    ],
+    imports: [HttpClientTestingModule, ReactiveFormsModule, RouterTestingModule, SharedModule],
     declarations: [OsdRecvSpeedModalComponent],
     providers: [NgbActiveModal]
   });
@@ -264,7 +258,7 @@ describe('OsdRecvSpeedModalComponent', () => {
     it('should return nothing if neither value nor default value is given', () => {
       configOptions[0].default = null;
       const currentValues = component.getCurrentValues(configOptions);
-      expect(currentValues.values).not.toContain('osd_max_backfills');
+      expect(currentValues.values).not.toHaveProperty('osd_max_backfills');
     });
   });
 

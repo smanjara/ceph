@@ -1,4 +1,4 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
 #include "include/interval_set.h"
 #include "include/buffer.h"
 #include "include/encoding.h"
@@ -291,13 +291,13 @@ public:
   AppendGenerator(
     uint64_t off,
     uint64_t alignment,
-    uint64_t min_append_size,
+    uint64_t _min_append_size,
     uint64_t _max_append_size,
     uint64_t max_append_multiple) :
     off(off), alignment(alignment),
-    min_append_size(round_up(min_append_size, alignment)),
+    min_append_size(round_up(_min_append_size, alignment)),
     max_append_size(round_up(_max_append_size, alignment)) {
-    if (_max_append_size == min_append_size)
+    if (max_append_size == min_append_size)
       max_append_size += alignment;
     max_append_total = max_append_multiple * max_append_size;
   }
@@ -431,6 +431,9 @@ public:
 	}
       }
       ceph_assert(pos == _pos);
+      if (current != layers.end()) {
+        current->iter.seek(pos);
+      }
     }
 
     // grab the bytes in the range of [pos, pos+s), and advance @c pos
@@ -517,9 +520,11 @@ public:
 
   // takes ownership of gen
   void update(ContentsGenerator *gen, const ContDesc &next);
-  bool check(bufferlist &to_check);
+  bool check(bufferlist &to_check,
+	     const std::pair<uint64_t, uint64_t>& offlen);
   bool check_sparse(const std::map<uint64_t, uint64_t>& extends,
-		    bufferlist &to_check);
+		    bufferlist &to_check,
+		    const std::pair<uint64_t, uint64_t>& offlen);
   const ContDesc &most_recent();
   ContentsGenerator *most_recent_gen() {
     return layers.begin()->first.get();

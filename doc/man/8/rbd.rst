@@ -16,7 +16,7 @@ Synopsis
 Description
 ===========
 
-**rbd** is a utility for manipulating rados block device (RBD) images,
+**rbd** is a utility for manipulating RADOS block device (RBD) images,
 used by the Linux rbd driver and the rbd storage driver for QEMU/KVM.
 RBD images are simple block devices that are striped over objects and
 stored in a RADOS object store. The size of the objects the image is
@@ -29,11 +29,11 @@ Options
 .. option:: -c ceph.conf, --conf ceph.conf
 
    Use ceph.conf configuration file instead of the default /etc/ceph/ceph.conf to
-   determine monitor addresses during startup.
+   determine Monitor addresses during startup.
 
 .. option:: -m monaddress[:port]
 
-   Connect to specified monitor (instead of looking through ceph.conf).
+   Connect to specified Monitor (instead of looking through ceph.conf).
 
 .. option:: --cluster cluster-name
 
@@ -45,7 +45,7 @@ Options
 
 .. option:: --namespace namespace-name
 
-   Use a pre-defined image namespace within a pool
+   Use a predefined image namespace within a pool
 
 .. option:: --no-progress
 
@@ -77,7 +77,7 @@ Parameters
 
 .. option:: --object-size size-in-B/K/M
 
-   Specifies the object size in B/K/M.  Object size will be rounded up the
+   Specifies the object size in B/K/M.  Object size will be rounded up to the
    nearest power of two; if no suffix is given, unit B is assumed.  The default
    object size is 4M, smallest is 4K and maximum is 32M.
 
@@ -153,7 +153,7 @@ Parameters
    * object-map: object map support (requires exclusive-lock)
    * fast-diff: fast diff calculations (requires object-map)
    * deep-flatten: snapshot flatten support
-   * journaling: journaled IO support (requires exclusive-lock)
+   * journaling: journaled I/O support (requires exclusive-lock)
    * data-pool: erasure coded pool support
 
 .. option:: --image-shared
@@ -181,7 +181,7 @@ Commands
 .. TODO rst "option" directive seems to require --foo style options, parsing breaks on subcommands.. the args show up as bold too
 
 :command:`bench` --io-type <read | write | readwrite | rw> [--io-size *size-in-B/K/M/G/T*] [--io-threads *num-ios-in-flight*] [--io-total *size-in-B/K/M/G/T*] [--io-pattern seq | rand] [--rw-mix-read *read proportion in readwrite*] *image-spec*
-  Generate a series of IOs to the image and measure the IO throughput and
+  Generate a series of I/Os to the image and measure the I/O throughput and
   latency.  If no suffix is given, unit B is assumed for both --io-size and
   --io-total.  Defaults are: --io-size 4096, --io-threads 16, --io-total 1G,
   --io-pattern seq, --rw-mix-read 50.
@@ -260,10 +260,10 @@ Commands
 
 :command:`device map` [-t | --device-type *device-type*] [--cookie *device-cookie*] [--show-cookie] [--snap-id *snap-id*] [--read-only] [--exclusive] [-o | --options *device-options*] *image-spec* | *snap-spec*
   Map the specified image to a block device via the rbd kernel module
-  (default) or other supported device (*nbd* on Linux or *ggate* on
+  (default) or other supported device (*nbd* or *ubbd* on Linux or *ggate* on
   FreeBSD).
 
-  The --options argument is a comma separated list of device type
+  The --options argument is a comma-separated list of device type
   specific options (opt1,opt2=val,...).
 
 :command:`device unmap` [-t | --device-type *device-type*] [-o | --options *device-options*] [--snap-id *snap-id*] *image-spec* | *snap-spec* | *device-path*
@@ -303,7 +303,7 @@ Commands
   If the RBD fast-diff feature is not enabled on images, this operation will
   require querying the OSDs for every potential object within the image.
 
-  The --merge-snapshots will merge snapshots used space into their parent images.
+  The --merge-snapshots option will merge snapshots' used space into their parent images.
 
 :command:`encryption format` *image-spec* *format* *passphrase-file* [--cipher-alg *alg*]
   Formats image to an encrypted format.
@@ -313,8 +313,8 @@ Commands
 
 :command:`export` [--export-format *format (1 or 2)*] (*image-spec* | *snap-spec*) [*dest-path*]
   Export image to dest path (use - for stdout).
-  The --export-format accepts '1' or '2' currently. Format 2 allow us to export not only the content
-  of image, but also the snapshots and other properties, such as image_order, features.
+  The --export-format accepts '1' or '2' currently. Format 2 allows us to export not only the content
+  of the image, but also the snapshots and other properties, such as image order and features.
 
 :command:`export-diff` [--from-snap *snap-name*] [--whole-object] (*image-spec* | *snap-spec*) *dest-path*
   Export an incremental diff for an image to dest path (use - for stdout).  If
@@ -333,7 +333,7 @@ Commands
   be specified.
 
 :command:`flatten` [--encryption-format *encryption-format* --encryption-passphrase-file *passphrase-file*]... *image-spec*
-  If image is a clone, copy all shared blocks from the parent snapshot and
+  If the image is a clone, copy all shared blocks from the parent snapshot and
   make the child independent of the parent, severing the link between
   parent snap and child.  The parent snapshot can be unprotected and
   deleted if it has no further dependent clones.
@@ -367,6 +367,9 @@ Commands
 :command:`group snap list` *group-spec*
   List snapshots of a group.
 
+:command:`group snap info` *group-snap-spec*
+  Get information about a snapshot of a group.
+
 :command:`group snap rm` *group-snap-spec*
   Remove a snapshot from a group.
 
@@ -387,10 +390,10 @@ Commands
   Remove metadata key with the value.
 
 :command:`image-meta set` *image-spec* *key* *value*
-  Set metadata key with the value. They will displayed in `image-meta list`.
+  Set metadata key with the value. They will be displayed in `image-meta list`.
 
-:command:`import` [--export-format *format (1 or 2)*] [--image-format *format-id*] [--object-size *size-in-B/K/M*] [--stripe-unit *size-in-B/K/M* --stripe-count *num*] [--image-feature *feature-name*]... [--image-shared] *src-path* [*image-spec*]
-  Create a new image and imports its data from path (use - for
+:command:`import` [--export-format *format (1 or 2)*] [--image-format *format-id*] [--object-size *size-in-B/K/M*] [--stripe-unit *size-in-B/K/M* --stripe-count *num*] [--image-feature *feature-name*] [--estimated-size *size-in-M/G/T*]... [--image-shared] *src-path* [*image-spec*]
+  Create a new image and import its data from path (use - for
   stdin).  The import operation will try to create sparse rbd images 
   if possible.  For import from stdin, the sparsification unit is
   the data block size of the destination image (object size).
@@ -398,25 +401,25 @@ Commands
   The --stripe-unit and --stripe-count arguments are optional, but must be
   used together.
 
-  The --export-format accepts '1' or '2' currently. Format 2 allow us to import not only the content
-  of image, but also the snapshots and other properties, such as image_order, features.
+  The --export-format accepts '1' or '2' currently. Format 2 allows us to import not only the content
+  of the image, but also the snapshots and other properties, such as image order and features.
 
 :command:`import-diff` *src-path* *image-spec*
-  Import an incremental diff of an image and applies it to the current image.  If the diff
+  Import an incremental diff of an image and apply it to the current image.  If the diff
   was generated relative to a start snapshot, we verify that snapshot already exists before
   continuing.  If there was an end snapshot we verify it does not already exist before
   applying the changes, and create the snapshot when we are done.
-  
+
 :command:`info` *image-spec* | *snap-spec*
   Will dump information (such as size and object size) about a specific rbd image.
-  If image is a clone, information about its parent is also displayed.
+  If the image is a clone, information about its parent is also displayed.
   If a snapshot is specified, whether it is protected is shown as well.
 
 :command:`journal client disconnect` *journal-spec*
   Flag image journal client as disconnected.
 
 :command:`journal export` [--verbose] [--no-error] *src-journal-spec* *path-name*
-  Export image journal to path (use - for stdout). It can be make a backup
+  Export image journal to path (use - for stdout). It can be used to make a backup
   of the image journal especially before attempting dangerous operations.
 
   Note that this command may not always work if the journal is badly corrupted.
@@ -459,11 +462,11 @@ Commands
 
 :command:`merge-diff` *first-diff-path* *second-diff-path* *merged-diff-path*
   Merge two continuous incremental diffs of an image into one single diff. The
-  first diff's end snapshot must be equal with the second diff's start snapshot.
+  first diff's end snapshot must be equal to the second diff's start snapshot.
   The first diff could be - for stdin, and merged diff could be - for stdout, which
   enables multiple diff files to be merged using something like
   'rbd merge-diff first second - | rbd merge-diff - third result'. Note this command
-  currently only support the source incremental diff with stripe_count == 1
+  currently only supports the source incremental diff with stripe-count == 1
 
 :command:`migration abort` *image-spec*
   Cancel image migration. This step may be run after successful or
@@ -472,7 +475,7 @@ Commands
   the destination image are lost.
 
 :command:`migration commit` *image-spec*
-  Commit image migration. This step is run after a successful migration
+  Commit image migration. This step is run after successful migration
   prepare and migration execute steps and removes the source image data.
 
 :command:`migration execute` *image-spec*
@@ -489,9 +492,9 @@ Commands
   by its destination spec.
 
   An image can also be migrated from a read-only import source by adding the
-  *--import-only* optional and providing a JSON-encoded *--source-spec* or a
+  *--import-only* option and providing a JSON-encoded *--source-spec* or a
   path to a JSON-encoded source-spec file using the *--source-spec-path*
-  optionals.
+  option.
 
 :command:`mirror image demote` *image-spec*
   Demote a primary image to non-primary for RBD mirroring.
@@ -499,14 +502,12 @@ Commands
 :command:`mirror image disable` [--force] *image-spec*
   Disable RBD mirroring for an image. If the mirroring is
   configured in ``image`` mode for the image's pool, then it
-  can be explicitly disabled mirroring for each image within
-  the pool.
+  must be disabled for each image individually.
 
 :command:`mirror image enable` *image-spec* *mode*
   Enable RBD mirroring for an image. If the mirroring is
   configured in ``image`` mode for the image's pool, then it
-  can be explicitly enabled mirroring for each image within
-  the pool.
+  must be enabled for each image individually.
 
   The mirror image mode can either be ``journal`` (default) or
   ``snapshot``. The ``journal`` mode requires the RBD journaling
@@ -522,28 +523,31 @@ Commands
   Show RBD mirroring status for an image.
 
 :command:`mirror pool demote` [*pool-name*]
-  Demote all primary images within a pool to non-primary.
-  Every mirroring enabled image will demoted in the pool.
+  Demote all primary images within a pool or namespace to non-primary.
+  Every mirror-enabled image in the pool or namespace will be demoted.
 
 :command:`mirror pool disable` [*pool-name*]
-  Disable RBD mirroring by default within a pool. When mirroring
-  is disabled on a pool in this way, mirroring will also be
-  disabled on any images (within the pool) for which mirroring
-  was enabled explicitly.
+  Disable RBD mirroring within a pool or namespace. When mirroring
+  is disabled on a pool or namespace in this way, mirroring will also be
+  disabled on all images (within the pool or namespace) for which mirroring
+  was enabled, whether by default or explicitly.
 
-:command:`mirror pool enable` [*pool-name*] *mode*
-  Enable RBD mirroring by default within a pool.
+:command:`mirror pool enable` *pool-name* *mode* [--remote-namespace *remote-namespace-name*]
+  Enable RBD mirroring within a pool or namespace.
   The mirroring mode can either be ``pool`` or ``image``.
-  If configured in ``pool`` mode, all images in the pool
+  If configured in ``pool`` mode, all images in the pool or namespace
   with the journaling feature enabled are mirrored.
   If configured in ``image`` mode, mirroring needs to be
   explicitly enabled (by ``mirror image enable`` command)
   on each image.
+  A namespace can be mirrored to a different namespace on the remote
+  pool using the ``--remote-namespace`` option.
 
 :command:`mirror pool info` [*pool-name*]
-  Show information about the pool mirroring configuration.
-  It includes mirroring mode, peer UUID, remote cluster name,
-  and remote client name.
+  Show information about the pool or namespace mirroring configuration.
+  For both pools and namespaces, it includes the mirroring mode, mirror UUID
+  and remote namespace. For pools, it additionally includes the site name,
+  peer UUID, remote cluster name, and remote client name.
 
 :command:`mirror pool peer add` [*pool-name*] *remote-cluster-spec*
   Add a mirroring peer to a pool.
@@ -551,28 +555,32 @@ Commands
 
   The default for *remote client name* is "client.admin".
 
-  This requires mirroring mode is enabled.
+  This requires mirroring to be enabled on the pool.
 
 :command:`mirror pool peer remove` [*pool-name*] *uuid*
-  Remove a mirroring peer from a pool. The peer uuid is available
+  Remove a mirroring peer from a pool. The peer UUID is available
   from ``mirror pool info`` command.
 
 :command:`mirror pool peer set` [*pool-name*] *uuid* *key* *value*
   Update mirroring peer settings.
-  The key can be either ``client`` or ``cluster``, and the value
-  is corresponding to remote client name or remote cluster name.
+  The key can be either ``client`` or ``cluster``, with the value
+  corresponding to remote client name or remote cluster name.
 
 :command:`mirror pool promote` [--force] [*pool-name*]
-  Promote all non-primary images within a pool to primary.
-  Every mirroring enabled image will promoted in the pool.
+  Promote all non-primary images within a pool or namespace to primary.
+  Every mirror-enabled image in the pool or namespace will be promoted.
 
 :command:`mirror pool status` [--verbose] [*pool-name*]
-  Show status for all mirrored images in the pool.
-  With --verbose, also show additionally output status
-  details for every mirroring image in the pool.
+  Show status for all mirrored images in the pool or namespace.
+  With ``--verbose``, show additional output status
+  details for every mirror-enabled image in the pool or namespace.
 
 :command:`mirror snapshot schedule add` [-p | --pool *pool*] [--namespace *namespace*] [--image *image*] *interval* [*start-time*]
-  Add mirror snapshot schedule.
+  Add mirror snapshot schedule. The ``interval`` can be specified in
+  weeks, days, hours, or minutes using the w, d, h, m suffix respectively.
+  The ``start-time`` is a time string in ISO 8601 format. Not providing the
+  ``--pool``, ``--namespace`` and ``--image`` options creates a global
+  schedule which applies to all mirror-enabled images in the cluster.
 
 :command:`mirror snapshot schedule list` [-R | --recursive] [--format *format*] [--pretty-format] [-p | --pool *pool*] [--namespace *namespace*] [--image *image*]
   List mirror snapshot schedule.
@@ -602,8 +610,23 @@ Commands
   Rebuild an invalid object map for the specified image. An image snapshot can be
   specified to rebuild an invalid object map for a snapshot.
 
+:command:`perf image iostat` [-p | --pool *pool-name*] [--namespace *namespace*] [--iterations *iterations*] [--sort-by *sort-by*] [--format *format*] [--pretty-format] [*pool-spec*]
+  Display image IO statistics. The output shows per-image write/read
+  operations, bytes, and latency.
+
+  The pool/pool-spec refers to the pool where image data is stored (the data
+  pool for images created with ``--data-pool``, otherwise the pool where the
+  image is defined).
+
+:command:`perf image iotop` [-p | --pool *pool-name*] [--namespace *namespace*] [*pool-spec*]
+  Display a top-like IO monitor.
+  
+  The pool/pool-spec refers to the pool where image data is stored (the data
+  pool for images created with ``--data-pool``, otherwise the pool where the
+  image is defined).
+
 :command:`pool init` [*pool-name*] [--force]
-  Initialize pool for use by RBD. Newly created pools must initialized
+  Initialize pool for use by RBD. Newly created pools must be initialized
   prior to use.
 
 :command:`resize` (-s | --size *size-in-M/G/T*) [--allow-shrink] [--encryption-format *encryption-format* --encryption-passphrase-file *passphrase-file*]... *image-spec*
@@ -615,7 +638,7 @@ Commands
   snapshots, this fails and nothing is deleted.
 
 :command:`snap create` *snap-spec*
-  Create a new snapshot. Requires the snapshot name parameter specified.
+  Create a new snapshot. Requires the snapshot name parameter to be specified.
 
 :command:`snap limit clear` *image-spec*
   Remove any previously set limit on the number of snapshots allowed on
@@ -625,7 +648,7 @@ Commands
   Set a limit for the number of snapshots allowed on an image.
 
 :command:`snap ls` *image-spec*
-  Dump the list of snapshots inside a specific image.
+  Dump the list of snapshots of a specific image.
 
 :command:`snap protect` *snap-spec*
   Protect a snapshot from deletion, so that clones can be made of it
@@ -659,7 +682,7 @@ Commands
 :command:`sparsify` [--sparse-size *sparse-size*] *image-spec*
   Reclaim space for zeroed image extents. The default sparse size is
   4096 bytes and can be changed via --sparse-size option with the
-  following restrictions: it should be power of two, not less than
+  following restrictions: it should be a power of two, not less than
   4096, and not larger than image object size.
 
 :command:`status` *image-spec*
@@ -668,9 +691,11 @@ Commands
 :command:`trash ls` [*pool-name*]
   List all entries from trash.
 
-:command:`trash mv` *image-spec*
+:command:`trash mv` [--expires-at <expires-at>] *image-spec*
   Move an image to the trash. Images, even ones actively in-use by 
-  clones, can be moved to the trash and deleted at a later time.
+  clones, can be moved to the trash and deleted at a later time. Use
+  ``--expires-at`` to set the expiration time of an image after which
+  it is allowed to be removed.
 
 :command:`trash purge` [*pool-name*]
   Remove all expired images from trash.
@@ -678,13 +703,17 @@ Commands
 :command:`trash restore` *image-id*  
   Restore an image from trash.
 
-:command:`trash rm` *image-id* 
-  Delete an image from trash. If image deferment time has not expired
-  you can not removed it unless use force. But an actively in-use by clones 
-  or has snapshots can not be removed.
+:command:`trash rm` [--force] *image-id*
+  Delete an image from trash. If the image deferment time has not expired
+  it can be removed using ``--force``. An image that is actively in-use by clones
+  or has snapshots cannot be removed.
 
 :command:`trash purge schedule add` [-p | --pool *pool*] [--namespace *namespace*] *interval* [*start-time*]
-  Add trash purge schedule.
+  Add trash purge schedule. The ``interval`` can be specified in weeks,
+  days, hours, or minutes using the w, d, h, m suffix respectively. The
+  ``start-time`` is a time string in ISO 8601 format. Not providing the
+  ``--pool`` and ``--namespace`` options creates a global schedule which
+  applies to all trashed images in the cluster.
 
 :command:`trash purge schedule list` [-R | --recursive] [--format *format*] [--pretty-format] [-p | --pool *pool*] [--namespace *namespace*]
   List trash purge schedule.
@@ -728,22 +757,22 @@ The striping is controlled by three parameters:
 
 .. option:: object-size
 
-  The size of objects we stripe over is a power of two. It will be rounded up the nearest power of two.
+  The size of objects we stripe over is a power of two. It will be rounded up to the nearest power of two.
   The default object size is 4 MB, smallest is 4K and maximum is 32M.
 
-.. option:: stripe_unit
+.. option:: stripe-unit
 
-  Each [*stripe_unit*] contiguous bytes are stored adjacently in the same object, before we move on
+  Each [*stripe-unit*] contiguous bytes are stored adjacently in the same object, before we move on
   to the next object.
 
-.. option:: stripe_count
+.. option:: stripe-count
 
-  After we write [*stripe_unit*] bytes to [*stripe_count*] objects, we loop back to the initial object
+  After we write [*stripe-unit*] bytes to [*stripe-count*] objects, we loop back to the initial object
   and write another stripe, until the object reaches its maximum size.  At that point,
-  we move on to the next [*stripe_count*] objects.
+  we move on to the next [*stripe-count*] objects.
 
-By default, [*stripe_unit*] is the same as the object size and [*stripe_count*] is 1.  Specifying a different
-[*stripe_unit*] and/or [*stripe_count*] is often referred to as using "fancy" striping and requires format 2.
+By default, [*stripe-unit*] is the same as the object size and [*stripe-count*] is 1.  Specifying a different
+[*stripe-unit*] and/or [*stripe-count*] is often referred to as using "fancy" striping and requires format 2.
 
 
 Kernel rbd (krbd) options
@@ -773,11 +802,10 @@ Per client instance `rbd device map` options:
   For msgr2.1 protocol this option is ignored.
 
 * cephx_require_signatures - Require msgr1 message signing feature (since 3.19,
-  default).  This option is deprecated and will be removed in the future as the
-  feature has been supported since the Bobtail release.
+  default).  This option is deprecated and will be removed in a future release.
 
 * nocephx_require_signatures - Don't require msgr1 message signing feature
-  (since 3.19).  This option is deprecated and will be removed in the future.
+  (since 3.19).  This option is deprecated and will be removed in a future release.
 
 * tcp_nodelay - Disable Nagle's algorithm on client sockets (since 4.0,
   default).
@@ -823,7 +851,7 @@ Per mapping (block device) `rbd device map` options:
   manually zeroing.
 
 * abort_on_full - Fail write requests with -ENOSPC when the cluster is full or
-  the data pool reaches its quota (since 5.0).  The default behaviour is to
+  the data pool reaches its quota (since 5.0).  The default behavior is to
   block until the full condition is cleared.
 
 * alloc_size - Minimum allocation unit of the underlying OSD object store
@@ -848,7 +876,7 @@ Per mapping (block device) `rbd device map` options:
   Each key-value pair stands on its own: "myrack" doesn't need to reside in
   "mydc", which in turn doesn't need to reside in "myregion".  The location
   is not a path to the root of the hierarchy but rather a set of nodes that
-  are matched independently, owning to the fact that bucket names are unique
+  are matched independently, owing to the fact that bucket names are unique
   within a CRUSH map.  "Multipath" locations are supported, so it is possible
   to indicate locality for multiple parallel hierarchies::
 
@@ -859,6 +887,11 @@ Per mapping (block device) `rbd device map` options:
 
 * read_from_replica=balance - When issued a read on a replicated pool, pick
   a random OSD for serving it (since 5.8).
+
+  When issued a read on an erasure-coded pool, pick the shard that stores the
+  data, giving a performance uplift over routing the request via the primary
+  (requires Umbrella server and client; kernel client support is planned for a
+  future release).
 
   This mode is safe for general use only since Octopus (i.e. after "ceph osd
   require-osd-release octopus").  Otherwise it should be limited to read-only
@@ -885,7 +918,7 @@ Per mapping (block device) `rbd device map` options:
   backend that the data is incompressible, disabling compression in aggressive
   mode (since 5.8).
 
-* ms_mode=legacy - Use msgr1 on-the-wire protocol (since 5.11, default).
+* ms_mode=legacy - Use msgr1 on-the-wire protocol (since 5.11).
 
 * ms_mode=crc - Use msgr2.1 on-the-wire protocol, select 'crc' mode, also
   referred to as plain mode (since 5.11).  If the daemon denies 'crc' mode,
@@ -897,16 +930,16 @@ Per mapping (block device) `rbd device map` options:
   fail the connection.
 
 * ms_mode=prefer-crc - Use msgr2.1 on-the-wire protocol, select 'crc'
-  mode (since 5.11).  If the daemon denies 'crc' mode in favor of 'secure'
-  mode, agree to 'secure' mode.
+  mode (since 5.11, default).  If the daemon denies 'crc' mode in favor of
+  'secure' mode, agree to 'secure' mode.
 
 * ms_mode=prefer-secure - Use msgr2.1 on-the-wire protocol, select 'secure'
   mode (since 5.11).  If the daemon denies 'secure' mode in favor of 'crc'
   mode, agree to 'crc' mode.
 
 * rxbounce - Use a bounce buffer when receiving data (since 5.17).  The default
-  behaviour is to read directly into the destination buffer.  A bounce buffer
-  is needed if the destination buffer isn't guaranteed to be stable (i.e. remain
+  behavior is to read directly into the destination buffer.  A bounce buffer
+  is needed if the destination buffer is not guaranteed to be stable (i.e. remain
   unchanged while it is being read to).  In particular this is the case for
   Windows where a system-wide "dummy" (throwaway) page may be mapped into the
   destination buffer in order to generate a single large I/O.  Otherwise,
@@ -964,11 +997,11 @@ To delete a snapshot::
 
        rbd snap rm mypool/myimage@mysnap
 
-To map an image via the kernel with cephx enabled::
+To map an image via the kernel with CephX enabled::
 
        rbd device map mypool/myimage --id admin --keyfile secretfile
 
-To map an image via the kernel with different cluster name other than default *ceph*::
+To map an image via the kernel with a cluster name other than the default *ceph*::
 
        rbd device map mypool/myimage --cluster cluster-name
 
@@ -983,7 +1016,7 @@ To create an image and a clone from it::
        rbd snap protect mypool/parent@snap
        rbd clone mypool/parent@snap otherpool/child
 
-To create an image with a smaller stripe_unit (to better distribute small writes in some workloads)::
+To create an image with a smaller stripe-unit (to better distribute small writes in some workloads)::
 
        rbd create mypool/myimage --size 102400 --stripe-unit 65536B --stripe-count 16
 
@@ -1025,6 +1058,9 @@ To restore an image from trash and rename it::
 
        rbd trash restore mypool/myimage-id --image mynewimage
 
+To create a mirror snapshot schedule for an image::
+
+       rbd mirror snapshot schedule add --pool mypool --image myimage 12h 2020-01-14T11:30+05:30
 
 Availability
 ============

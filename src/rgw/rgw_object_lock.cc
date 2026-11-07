@@ -1,9 +1,16 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
+
 //
 #include "rgw_object_lock.h"
 
 using namespace std;
+
+void DefaultRetention::decode_json(JSONObj *obj) {
+  JSONDecoder::decode_json("mode", mode, obj);
+  JSONDecoder::decode_json("days", days, obj);
+  JSONDecoder::decode_json("years", years, obj);
+}
 
 void DefaultRetention::decode_xml(XMLObj *obj) {
   RGWXMLDecoder::decode_xml("Mode", mode, obj, true);
@@ -17,6 +24,15 @@ void DefaultRetention::decode_xml(XMLObj *obj) {
   }
 }
 
+void DefaultRetention::dump(Formatter *f) const {
+  encode_json("mode", mode, f);
+  if (days > 0) {
+    encode_json("days", days, f);
+  } else {
+    encode_json("years", years, f);
+  }
+}
+
 void DefaultRetention::dump_xml(Formatter *f) const {
   encode_xml("Mode", mode, f);
   if (days > 0) {
@@ -26,12 +42,34 @@ void DefaultRetention::dump_xml(Formatter *f) const {
   }
 }
 
+void ObjectLockRule::decode_json(JSONObj *obj) {
+  JSONDecoder::decode_json("defaultRetention", defaultRetention, obj);
+}
+
 void ObjectLockRule::decode_xml(XMLObj *obj) {
   RGWXMLDecoder::decode_xml("DefaultRetention", defaultRetention, obj, true);
 }
 
 void ObjectLockRule::dump_xml(Formatter *f) const {
   encode_xml("DefaultRetention", defaultRetention, f);
+}
+
+void ObjectLockRule::dump(Formatter *f) const {
+  encode_json("defaultRetention", defaultRetention, f);
+}
+
+std::list<ObjectLockRule> ObjectLockRule::generate_test_instances() {
+  std::list<ObjectLockRule> o;
+  o.emplace_back();
+  return o;
+}
+
+void RGWObjectLock::decode_json(JSONObj *obj) {
+  JSONDecoder::decode_json("enabled", enabled, obj);
+  JSONDecoder::decode_json("rule_exist", rule_exist, obj);
+  if (rule_exist) {
+    JSONDecoder::decode_json("rule", rule, obj);
+  }
 }
 
 void RGWObjectLock::decode_xml(XMLObj *obj) {
@@ -54,15 +92,37 @@ void RGWObjectLock::dump_xml(Formatter *f) const {
   }
 }
 
+void RGWObjectLock::dump(Formatter *f) const {
+  if (enabled) {
+    encode_json("enabled", enabled, f);
+  }
+  encode_json("rule_exist", rule_exist, f);
+  if (rule_exist) {
+    encode_json("rule", rule, f);
+  }
+}
+
 ceph::real_time RGWObjectLock::get_lock_until_date(const ceph::real_time& mtime) const {
   if (!rule_exist) {
     return ceph::real_time();
   }
-  int days = get_days();
-  if (days <= 0) {
-    days = get_years()*365;
+  if (int days = get_days(); days > 0) {
+    return mtime + std::chrono::days(days);
   }
-  return mtime + make_timespan(days*24*60*60);
+  return mtime + std::chrono::years(get_years());
+}
+
+list<RGWObjectLock> RGWObjectLock::generate_test_instances() {
+  list<RGWObjectLock> o;
+  RGWObjectLock obj;
+  obj.enabled = true;
+  obj.rule_exist = true;
+  o.push_back(std::move(obj));
+  obj = RGWObjectLock{};
+  obj.enabled = false;
+  obj.rule_exist = false;
+  o.push_back(std::move(obj));
+  return o;
 }
 
 void RGWObjectRetention::decode_xml(XMLObj *obj) {

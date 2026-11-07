@@ -20,6 +20,10 @@ For general object store configuration, refer to the following:
    :maxdepth: 1
 
    Storage devices <storage-devices>
+   BlueStore RocksDB cache <../bluestore/rocksdb-config>
+   BlueFS Spillover Cleaner <../bluestore/bluefs-spillover-cleaner>
+   Fast Crash Recovery for file-stored allocations <../bluestore/fast-onode-scan>
+   ExtBlkDev, FCM plugin <../bluestore/fcm-plugin>
    ceph-conf
 
 
@@ -42,7 +46,6 @@ To optimize the performance of your cluster, refer to the following:
    OSD Settings <osd-config-ref>
    DmClock Settings <mclock-config-ref>
    BlueStore Settings <bluestore-config-ref>
-   FileStore Settings <filestore-config-ref>
    Journal Settings <journal-ref>
    Pool, PG & CRUSH Settings <pool-pg-config-ref.rst>
    General Settings <general-config-ref>

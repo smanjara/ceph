@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -21,8 +22,9 @@
 #include "MgrMap.h"
 #include "PaxosService.h"
 #include "MonCommand.h"
+#include "CommandHandler.h"
 
-class MgrMonitor: public PaxosService
+class MgrMonitor: public PaxosService, public CommandHandler
 {
   MgrMap map;
   MgrMap pending_map;
@@ -45,7 +47,13 @@ class MgrMonitor: public PaxosService
    * @return true if a standby was promoted
    */
   bool promote_standby();
-  void drop_active();
+
+  /**
+   * Drop the active daemon from the MgrMap. No promotion is performed.
+   *
+   * @return whether PAXOS was plugged by this method
+   */
+  bool drop_active();
 
   /**
    * Remove this gid from the list of standbys.  By default,

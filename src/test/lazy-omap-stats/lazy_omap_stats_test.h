@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -16,7 +17,7 @@
 #define CEPH_LAZY_OMAP_STATS_TEST_H
 
 #include <map>
-#include <regex>
+#include <boost/regex.hpp>
 #include <string>
 
 #include "include/compat.h"
@@ -58,24 +59,30 @@ class LazyOmapStatsTest
   void create_payload();
   void write_many(const unsigned how_many);
   void scrub();
-  const int find_matches(std::string& output, std::regex& reg) const;
+  const int find_matches(std::string& output, boost::regex& reg) const;
   void check_one();
-  const int find_index(std::string& haystack, std::regex& needle,
+  const int find_index(std::string& haystack, boost::regex& needle,
                        std::string label) const;
   const unsigned tally_column(const unsigned omap_bytes_index,
                           const std::string& table, bool header) const;
   void check_column(const int index, const std::string& table,
                     const std::string& type, bool header = true) const;
-  index_t get_indexes(std::regex& reg, std::string& output) const;
+  index_t get_indexes(boost::regex& reg, std::string& output) const;
   void check_pg_dump();
   void check_pg_dump_summary();
   void check_pg_dump_pgs();
   void check_pg_dump_pools();
   void check_pg_ls();
   const std::string get_output(
-      const std::string command = R"({"prefix": "pg dump"})",
+      std::string&& command = R"({"prefix": "pg dump"})",
       const bool silent = false,
       const CommandTarget target = CommandTarget::TARGET_MGR);
+  const std::string get_output(
+      const std::string& command,
+      const bool silent = false,
+      const CommandTarget target = CommandTarget::TARGET_MGR) {
+    return get_output(std::string(command), silent, target);  // delegate to rvalue version
+  }
   void get_pool_id(const std::string& pool);
   std::map<std::string, std::string> get_scrub_stamps();
   void wait_for_active_clean();

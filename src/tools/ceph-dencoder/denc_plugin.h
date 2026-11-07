@@ -23,11 +23,24 @@ public:
     other.dencoders.clear();
   }
   ~DencoderPlugin() {
-#if !defined(__FreeBSD__)
+    unregister_dencoders();
+#if defined(__has_feature)
+#  if __has_feature(address_sanitizer) || __has_feature(leak_sanitizer)
+#    define DENC_SKIP_DLCLOSE 1
+#  endif
+#endif
+#if defined(__SANITIZE_ADDRESS__) && !defined(DENC_SKIP_DLCLOSE)
+#  define DENC_SKIP_DLCLOSE 1
+#endif
+#if !defined(__FreeBSD__) && !defined(DENC_SKIP_DLCLOSE)
+    // Skip dlclose under ASan/LSan: the leak checker at process exit needs
+    // the .so still mapped to resolve symbols. Clang may not define
+    // __SANITIZE_ADDRESS__ (e.g. clang-19), hence the __has_feature check.
     if (mod) {
       dlclose(mod);
     }
 #endif
+#undef DENC_SKIP_DLCLOSE
   }
   const dencoders_t& register_dencoders() {
     static constexpr std::string_view REGISTER_DENCODERS_FUNCTION = "register_dencoders\0";
@@ -66,6 +79,7 @@ private:
 };
 
 #define TYPE(t) plugin->emplace<DencoderImplNoFeature<t>>(#t, false, false);
+#define TYPE_VARARGS(t, ...) plugin->emplace<DencoderImplNoFeature<t>>(#t, false, false, ##__VA_ARGS__);
 #define TYPE_STRAYDATA(t) plugin->emplace<DencoderImplNoFeature<t>>(#t, true, false);
 #define TYPE_NONDETERMINISTIC(t) plugin->emplace<DencoderImplNoFeature<t>>(#t, false, true);
 #define TYPE_FEATUREFUL(t) plugin->emplace<DencoderImplFeatureful<t>>(#t, false, false);

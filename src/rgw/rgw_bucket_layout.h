@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -20,6 +20,8 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <optional>
 #include <string>
 #include "include/encoding.h"
@@ -54,10 +56,15 @@ void decode_json_obj(BucketHashType& t, JSONObj *obj);
 struct bucket_index_normal_layout {
   uint32_t num_shards = 1;
 
+  // the fewest number of shards this bucket layout allows
+  uint32_t min_num_shards = 1;
+
   BucketHashType hash_type = BucketHashType::Mod;
 
-  friend std::ostream& operator<<(std::ostream& out, const bucket_index_normal_layout& l) {
-    out << "num_shards=" << l.num_shards << ", hash_type=" << to_string(l.hash_type);
+  friend std::ostream& operator<<(std::ostream& out,
+				  const bucket_index_normal_layout& l) {
+    out << "num_shards=" << l.num_shards << ", min_num_shards=" <<
+      l.min_num_shards << ", hash_type=" << to_string(l.hash_type);
     return out;
   }
 };
@@ -130,7 +137,11 @@ void decode_json_obj(bucket_index_layout_generation& l, JSONObj *obj);
 
 enum class BucketLogType : uint8_t {
   // colocated with bucket index, so the log layout matches the index layout
-  InIndex,
+  InIndex,  // 0
+  // log generation has been removed.
+  Deleted,  // 1
+  // independent FIFO objects
+  FIFO,     // 2
 };
 
 std::string_view to_string(const BucketLogType& t);
@@ -143,6 +154,10 @@ inline std::ostream& operator<<(std::ostream& out, const BucketLogType &log_type
   switch (log_type) {
     case BucketLogType::InIndex:
       return out << "InIndex";
+    case BucketLogType::FIFO:
+      return out << "FIFO";
+    case BucketLogType::Deleted:
+      return out << "Deleted";
     default:
       return out << "Unknown";
   }
@@ -165,13 +180,40 @@ void decode(bucket_index_log_layout& l, bufferlist::const_iterator& bl);
 void encode_json_impl(const char *name, const bucket_index_log_layout& l, ceph::Formatter *f);
 void decode_json_obj(bucket_index_log_layout& l, JSONObj *obj);
 
+// layout for FIFO-backed bilog
+struct bucket_fifo_log_layout {
+  uint32_t num_shards = 7;
+  BucketHashType hash_type = BucketHashType::Mod;
+};
+
+inline bool operator==(const bucket_fifo_log_layout& l,
+                       const bucket_fifo_log_layout& r) {
+  return l.num_shards == r.num_shards && l.hash_type == r.hash_type;
+}
+inline bool operator!=(const bucket_fifo_log_layout& l,
+                       const bucket_fifo_log_layout& r) {
+  return !(l == r);
+}
+
+void encode(const bucket_fifo_log_layout& l, bufferlist& bl, uint64_t f=0);
+void decode(bucket_fifo_log_layout& l, bufferlist::const_iterator& bl);
+void encode_json_impl(const char *name, const bucket_fifo_log_layout& l, ceph::Formatter *f);
+void decode_json_obj(bucket_fifo_log_layout& l, JSONObj *obj);
+
 struct bucket_log_layout {
   BucketLogType type = BucketLogType::InIndex;
 
   bucket_index_log_layout in_index;
+  bucket_fifo_log_layout  fifo;
 
   friend std::ostream& operator<<(std::ostream& out, const bucket_log_layout& l) {
     out << "type=" << to_string(l.type);
+    if (l.type == BucketLogType::InIndex) {
+      out << ", in_index.gen=" << l.in_index.gen
+          << ", in_index.num_shards=" << l.in_index.layout.num_shards;
+    } else if (l.type == BucketLogType::FIFO) {
+      out << ", fifo.num_shards=" << l.fifo.num_shards;
+    }
     return out;
   }
 };
@@ -203,6 +245,37 @@ inline bucket_log_layout_generation log_layout_from_index(
   return {gen, {BucketLogType::InIndex, {index.gen, index.layout.normal}}};
 }
 
+// compute an appropriate number of bilog shards for a given index shard count
+// upon reshard. uses logarithmic formula to keep the bilog shard count much lower,
+// growing slowly every time index shards double, bilog gets 2 more shards.
+// typically ranges from 7 to 21 across the default index max shards 11 to 1999 shards.
+inline uint32_t bilog_shards_for_index(uint32_t index_shards,
+                                       uint32_t min_shards = 7,
+                                       uint32_t max_shards = 0)
+{
+  if (index_shards == 0) {
+    return min_shards;
+  }
+  auto v = static_cast<uint32_t>(std::log2(index_shards) * 2.0);
+  v = std::max(v, min_shards);
+  if (max_shards > 0) {
+    v = std::min(v, max_shards);
+  }
+  return v;
+}
+
+// return a log layout backed by independent FIFO objects
+inline bucket_log_layout_generation fifo_log_layout_from_index(
+    uint64_t gen, const bucket_index_layout_generation& index)
+{
+  bucket_log_layout_generation log;
+  log.gen = gen;
+  log.layout.type = BucketLogType::FIFO;
+  log.layout.in_index = {index.gen, index.layout.normal};
+  log.layout.fifo.num_shards = bilog_shards_for_index(index.layout.normal.num_shards);
+  return log;
+}
+
 inline auto matches_gen(uint64_t gen)
 {
   return [gen] (const bucket_log_layout_generation& l) { return l.gen == gen; };
@@ -210,7 +283,6 @@ inline auto matches_gen(uint64_t gen)
 
 inline bucket_index_layout_generation log_to_index_layout(const bucket_log_layout_generation& log_layout)
 {
-  ceph_assert(log_layout.layout.type == BucketLogType::InIndex);
   bucket_index_layout_generation index;
   index.gen = log_layout.layout.in_index.gen;
   index.layout.normal = log_layout.layout.in_index.layout;
@@ -220,6 +292,7 @@ inline bucket_index_layout_generation log_to_index_layout(const bucket_log_layou
 enum class BucketReshardState : uint8_t {
   None,
   InProgress,
+  InLogrecord,
 };
 std::string_view to_string(const BucketReshardState& s);
 bool parse(std::string_view str, BucketReshardState& s);
@@ -240,6 +313,10 @@ struct BucketLayout {
   // generation at the back()
   std::vector<bucket_log_layout_generation> logs;
 
+  // via this time to judge if the bucket is resharding, when the reshard status
+  // of bucket changed or the reshard status is read, this time will be updated
+  ceph::real_time judge_reshard_lock_time;
+
   friend std::ostream& operator<<(std::ostream& out, const BucketLayout& l) {
     std::stringstream ss;
     if (l.target_index) {
@@ -249,7 +326,8 @@ struct BucketLayout {
     }
     out << "resharding=" << to_string(l.resharding) <<
       ", current_index=[" << l.current_index << "], target_index=[" <<
-      ss.str() << "], logs.size()=" << l.logs.size();
+      ss.str() << "], logs.size()=" << l.logs.size() <<
+      ", judge_reshard_lock_time=" << l.judge_reshard_lock_time;
 
     return out;
   }
@@ -262,7 +340,8 @@ void decode_json_obj(BucketLayout& l, JSONObj *obj);
 
 
 inline uint32_t num_shards(const bucket_index_normal_layout& index) {
-  return index.num_shards;
+  // old buckets used num_shards=0 to mean 1
+  return index.num_shards > 0 ? index.num_shards : 1;
 }
 inline uint32_t num_shards(const bucket_index_layout& index) {
   ceph_assert(index.type == BucketIndexType::Normal);
@@ -271,11 +350,41 @@ inline uint32_t num_shards(const bucket_index_layout& index) {
 inline uint32_t num_shards(const bucket_index_layout_generation& index) {
   return num_shards(index.layout);
 }
+
+inline uint32_t num_shards(const bucket_fifo_log_layout& fifo) {
+  return fifo.num_shards > 0 ? fifo.num_shards : 1;
+}
+inline uint32_t num_shards(const bucket_log_layout& log) {
+  switch (log.type) {
+  case BucketLogType::InIndex:
+    return num_shards(log.in_index.layout);
+  case BucketLogType::FIFO:
+    return num_shards(log.fifo);
+  default:
+    return 0;
+  }
+}
+inline uint32_t num_shards(const bucket_log_layout_generation& log) {
+  return num_shards(log.layout);
+}
+
 inline uint32_t current_num_shards(const BucketLayout& layout) {
   return num_shards(layout.current_index);
 }
+inline uint32_t current_min_layout_shards(const BucketLayout& layout) {
+  return layout.current_index.layout.normal.min_num_shards;
+}
 inline bool is_layout_indexless(const bucket_index_layout_generation& layout) {
   return layout.layout.type == BucketIndexType::Indexless;
+}
+inline bool is_layout_reshardable(const bucket_index_layout_generation& layout) {
+  return layout.layout.type == BucketIndexType::Normal;
+}
+inline bool is_layout_reshardable(const BucketLayout& layout) {
+  return is_layout_reshardable(layout.current_index);
+}
+inline std::string_view current_layout_desc(const BucketLayout& layout) {
+  return rgw::to_string(layout.current_index.layout.type);
 }
 
 } // namespace rgw

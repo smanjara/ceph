@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_CRUSH_LOCATION_H
 #define CEPH_CRUSH_LOCATION_H
@@ -7,6 +7,8 @@
 #include <iosfwd>
 #include <map>
 #include <string>
+
+#include <fmt/core.h> // for FMT_VERSION
 #if FMT_VERSION >= 90000
 #include <fmt/ostream.h>
 #endif
@@ -14,7 +16,7 @@
 #include "common/ceph_mutex.h"
 #include "include/common_fwd.h"
 
-namespace TOPNSPC::crush {
+namespace ceph::crush {
 
 class CrushLocation {
 public:
@@ -37,8 +39,9 @@ private:
 
 std::ostream& operator<<(std::ostream& os, const CrushLocation& loc);
 }
-#endif
 
 #if FMT_VERSION >= 90000
-template <> struct fmt::formatter<TOPNSPC::crush::CrushLocation> : fmt::ostream_formatter {};
+template <> struct fmt::formatter<ceph::crush::CrushLocation> : fmt::ostream_formatter {};
+#endif
+
 #endif

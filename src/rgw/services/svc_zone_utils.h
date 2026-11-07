@@ -1,26 +1,25 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #pragma once
 
-#include "rgw_service.h"
+#include "driver/rados/rgw_service.h"
 
 
-class RGWSI_RADOS;
 class RGWSI_Zone;
 
 class RGWSI_ZoneUtils : public RGWServiceInstance
 {
   friend struct RGWServices_Def;
 
-  RGWSI_RADOS *rados_svc{nullptr};
+  librados::Rados* rados{nullptr};
   RGWSI_Zone *zone_svc{nullptr};
 
   std::string trans_id_suffix;
 
-  void init(RGWSI_RADOS *_rados_svc,
+  void init(librados::Rados* rados_,
             RGWSI_Zone *_zone_svc) {
-    rados_svc = _rados_svc;
+    rados = rados_;
     zone_svc = _zone_svc;
   }
 

@@ -5,7 +5,7 @@ import { SharedModule } from '~/app/shared/shared.module';
 import { configureTestBed } from '~/testing/unit-test-helper';
 import { CephfsDetailComponent } from './cephfs-detail.component';
 
-@Component({ selector: 'cd-cephfs-chart', template: '' })
+@Component({ selector: 'cd-cephfs-chart', template: '', standalone: false })
 class CephfsChartStubComponent {
   @Input()
   mdsCounter: any;
@@ -50,6 +50,6 @@ describe('CephfsDetailComponent', () => {
   });
 
   it('prepares standby on change', () => {
-    expect(component.standbys).toEqual([{ key: 'Standby daemons', value: 'b' }]);
+    expect(component.standbys).toEqual([{ key: 'Standby service instances', value: 'b' }]);
   });
 });

@@ -4,9 +4,10 @@ import { BrowserAnimationsModule } from '@angular/platform-browser/animations';
 import { RouterTestingModule } from '@angular/router/testing';
 
 import { NgbNavModule } from '@ng-bootstrap/ng-bootstrap';
-import { ToastrModule } from 'ngx-toastr';
+import { of } from 'rxjs';
 
 import { TableActionsComponent } from '~/app/shared/datatable/table-actions/table-actions.component';
+import { SettingsService } from '~/app/shared/api/settings.service';
 import { SharedModule } from '~/app/shared/shared.module';
 import { configureTestBed, PermissionHelper } from '~/testing/unit-test-helper';
 import { UserTabsComponent } from '../user-tabs/user-tabs.component';
@@ -20,7 +21,6 @@ describe('UserListComponent', () => {
     imports: [
       BrowserAnimationsModule,
       SharedModule,
-      ToastrModule.forRoot(),
       NgbNavModule,
       RouterTestingModule,
       HttpClientTestingModule
@@ -47,35 +47,75 @@ describe('UserListComponent', () => {
     expect(tableActions).toEqual({
       'create,update,delete': {
         actions: ['Create', 'Edit', 'Delete'],
-        primary: { multiple: 'Create', executing: 'Edit', single: 'Edit', no: 'Create' }
+        primary: {
+          multiple: 'Create',
+          executing: 'Create',
+          single: 'Create',
+          no: 'Create'
+        }
       },
       'create,update': {
         actions: ['Create', 'Edit'],
-        primary: { multiple: 'Create', executing: 'Edit', single: 'Edit', no: 'Create' }
+        primary: {
+          multiple: 'Create',
+          executing: 'Create',
+          single: 'Create',
+          no: 'Create'
+        }
       },
       'create,delete': {
         actions: ['Create', 'Delete'],
-        primary: { multiple: 'Create', executing: 'Delete', single: 'Delete', no: 'Create' }
+        primary: {
+          multiple: 'Create',
+          executing: 'Create',
+          single: 'Create',
+          no: 'Create'
+        }
       },
       create: {
         actions: ['Create'],
-        primary: { multiple: 'Create', executing: 'Create', single: 'Create', no: 'Create' }
+        primary: {
+          multiple: 'Create',
+          executing: 'Create',
+          single: 'Create',
+          no: 'Create'
+        }
       },
       'update,delete': {
         actions: ['Edit', 'Delete'],
-        primary: { multiple: 'Edit', executing: 'Edit', single: 'Edit', no: 'Edit' }
+        primary: {
+          multiple: '',
+          executing: '',
+          single: '',
+          no: ''
+        }
       },
       update: {
         actions: ['Edit'],
-        primary: { multiple: 'Edit', executing: 'Edit', single: 'Edit', no: 'Edit' }
+        primary: {
+          multiple: 'Edit',
+          executing: 'Edit',
+          single: 'Edit',
+          no: 'Edit'
+        }
       },
       delete: {
         actions: ['Delete'],
-        primary: { multiple: 'Delete', executing: 'Delete', single: 'Delete', no: 'Delete' }
+        primary: {
+          multiple: 'Delete',
+          executing: 'Delete',
+          single: 'Delete',
+          no: 'Delete'
+        }
       },
       'no-permissions': {
         actions: [],
-        primary: { multiple: '', executing: '', single: '', no: '' }
+        primary: {
+          multiple: '',
+          executing: '',
+          single: '',
+          no: ''
+        }
       }
     });
   });
@@ -93,5 +133,29 @@ describe('UserListComponent', () => {
     expect(component.getRemainingDays(today - (day + 1))).toBe(0);
     expect(component.getRemainingDays(null)).toBe(undefined);
     expect(component.getRemainingDays(undefined)).toBe(undefined);
+  });
+  describe('password expiry thresholds', () => {
+    let settingsService: SettingsService;
+
+    beforeEach(() => {
+      settingsService = TestBed.inject(SettingsService);
+    });
+
+    it('should call getStandardSettings on init and set expiration thresholds', () => {
+      spyOn(settingsService, 'getStandardSettings').and.returnValue(
+        of({ user_pwd_expiration_warning_1: 10, user_pwd_expiration_warning_2: 5 })
+      );
+      fixture.detectChanges();
+      expect(settingsService.getStandardSettings).toHaveBeenCalled();
+      expect(component.expirationWarningAlert).toBe(10);
+      expect(component.expirationDangerAlert).toBe(5);
+    });
+
+    it('should not call getValues on init', () => {
+      spyOn(settingsService, 'getValues').and.callThrough();
+      spyOn(settingsService, 'getStandardSettings').and.returnValue(of({}));
+      fixture.detectChanges();
+      expect(settingsService.getValues).not.toHaveBeenCalled();
+    });
   });
 });

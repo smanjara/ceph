@@ -94,7 +94,7 @@ class CmdParam(object):
         self.goodchars = goodchars
         self.positional = positional != 'false'
 
-        assert who == None
+        assert who is None
 
     def help(self):
         advanced = []
@@ -177,7 +177,7 @@ class Sig:
 
     @staticmethod
     def parse_args(args):
-        return [Sig._parse_arg_desc(arg) for arg in args.split()]
+        return [Sig._parse_arg_desc(arg) for arg in args]
 
 
 TEMPLATE = '''
@@ -193,7 +193,7 @@ TEMPLATE = '''
 {{ command.prefix }}
 {{ command.prefix | length * punct_char }}
 
-{{ command.help | wordwrap(70) }}
+{{ command.help | trim | wordwrap(70) }}
 
 :Example command:
     .. code-block:: bash
@@ -285,12 +285,14 @@ class CephMgrCommands(Directive):
         # make diskprediction_local happy
         mock_imports += ['numpy',
                          'scipy']
-        # make restful happy
-        mock_imports += ['pecan',
-                         'pecan.rest',
-                         'pecan.hooks',
-                         'werkzeug',
-                         'werkzeug.serving']
+        # make cephadm happy
+        mock_imports += ['cherrypy.process',
+                         'cherrypy.process.servers',
+                         'cherrypy._cptree',
+                         'cheroot',
+                         'cheroot.wsgi',
+                         'cheroot.ssl',
+                         'cheroot.ssl.builtin']
 
         for m in mock_imports:
             args = {}
@@ -322,8 +324,18 @@ class CephMgrCommands(Directive):
             ms = [c for c in mgr_mod.__dict__.values()
                   if subclass(c) and 'Standby' not in c.__name__]
             [m] = ms
-            assert isinstance(m.COMMANDS, list)
-            return m.COMMANDS
+
+            # Modules can define commands in two ways:
+            # 1. New decorator pattern: Commands registered via @ModuleCLICommand decorators,
+            #    retrieved via CLICommand.dump_cmd_list()
+            # 2. Old list pattern: Commands defined in a COMMANDS list
+            # Some modules have CLICommand defined but haven't migrated their commands yet,
+            # so we try the new pattern first and fall back to the old COMMANDS list.
+            if hasattr(m, 'CLICommand'):
+                commands = m.CLICommand.dump_cmd_list()
+                if commands:
+                    return commands
+            return getattr(m, 'COMMANDS', [])
 
     def _normalize_command(self, command):
         if 'handler' in command:
@@ -358,8 +370,9 @@ class CephMgrCommands(Directive):
         cmds = sorted(cmds, key=lambda cmd: cmd.prefix)
         self._render_cmds(cmds)
 
-        orig_rgw_mod = sys.modules['pybind_rgw_mod']
-        sys.modules['rgw'] = orig_rgw_mod
+        if 'pybind_rgw_mod' in sys.modules:
+            orig_rgw_mod = sys.modules['pybind_rgw_mod']
+            sys.modules['rgw'] = orig_rgw_mod
 
         return []
 

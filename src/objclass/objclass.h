@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #ifndef CEPH_OBJCLASS_H
 #define CEPH_OBJCLASS_H
@@ -153,7 +153,7 @@ extern int cls_get_snapset_seq(cls_method_context_t hctx, uint64_t *snap_seq);
 
 /* gather */
 extern int cls_cxx_gather(cls_method_context_t hctx, const std::set<std::string> &src_objs, const std::string& pool,
-			  const char *cls, const char *method, bufferlist& inbl);
+			  const char *cls, const char *method, bufferlist& inbl) __attribute__ ((deprecated));
 
 extern int cls_cxx_get_gathered_data(cls_method_context_t hctx, std::map<std::string, bufferlist> *results);
 

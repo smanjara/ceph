@@ -1,6 +1,8 @@
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+#include <chrono>
+#include <thread>
 
 #include "common/admin_socket.h"
 
@@ -9,7 +11,7 @@
 #include "svc_notify.h"
 
 #include "rgw_zone.h"
-#include "rgw_tools.h"
+#include "driver/rados/rgw_tools.h"
 
 #define dout_subsys ceph_subsys_rgw
 
@@ -90,6 +92,11 @@ int RGWSI_SysObj_Cache::remove(const DoutPrefixProvider *dpp,
                                optional_yield y)
 
 {
+  int r = RGWSI_SysObj_Core::remove(dpp, objv_tracker, obj, y);
+  if (r < 0) {
+    return r;
+  }
+
   rgw_pool pool;
   string oid;
   normalize_pool_and_obj(obj.pool, obj.oid, pool, oid);
@@ -98,12 +105,12 @@ int RGWSI_SysObj_Cache::remove(const DoutPrefixProvider *dpp,
   cache.invalidate_remove(dpp, name);
 
   ObjectCacheInfo info;
-  int r = distribute_cache(dpp, name, obj, info, INVALIDATE_OBJ, y);
+  r = distribute_cache(dpp, name, obj, info, INVALIDATE_OBJ, y);
   if (r < 0) {
     ldpp_dout(dpp, 0) << "ERROR: " << __func__ << "(): failed to distribute cache: r=" << r << dendl;
-  }
+  } // not fatal
 
-  return RGWSI_SysObj_Core::remove(dpp, objv_tracker, obj, y);
+  return 0;
 }
 
 int RGWSI_SysObj_Cache::read(const DoutPrefixProvider *dpp,
@@ -111,6 +118,7 @@ int RGWSI_SysObj_Cache::read(const DoutPrefixProvider *dpp,
                              RGWObjVersionTracker *objv_tracker,
                              const rgw_raw_obj& obj,
                              bufferlist *obl, off_t ofs, off_t end,
+                             ceph::real_time* pmtime, uint64_t* psize,
                              map<string, bufferlist> *attrs,
 			     bool raw_attrs,
                              rgw_cache_entry_info *cache_info,
@@ -120,8 +128,8 @@ int RGWSI_SysObj_Cache::read(const DoutPrefixProvider *dpp,
   rgw_pool pool;
   string oid;
   if (ofs != 0) {
-    return RGWSI_SysObj_Core::read(dpp, read_state, objv_tracker,
-                                   obj, obl, ofs, end, attrs, raw_attrs,
+    return RGWSI_SysObj_Core::read(dpp, read_state, objv_tracker, obj, obl,
+                                   ofs, end, pmtime, psize, attrs, raw_attrs,
                                    cache_info, refresh_version, y);
   }
 
@@ -133,6 +141,8 @@ int RGWSI_SysObj_Cache::read(const DoutPrefixProvider *dpp,
   uint32_t flags = (end != 0 ? CACHE_FLAG_DATA : 0);
   if (objv_tracker)
     flags |= CACHE_FLAG_OBJV;
+  if (pmtime || psize)
+    flags |= CACHE_FLAG_META;
   if (attrs)
     flags |= CACHE_FLAG_XATTRS;
   
@@ -151,6 +161,12 @@ int RGWSI_SysObj_Cache::read(const DoutPrefixProvider *dpp,
     i.copy_all(*obl);
     if (objv_tracker)
       objv_tracker->read_version = info.version;
+    if (pmtime) {
+      *pmtime = info.meta.mtime;
+    }
+    if (psize) {
+      *psize = info.meta.size;
+    }
     if (attrs) {
       if (raw_attrs) {
 	*attrs = info.xattrs;
@@ -163,9 +179,23 @@ int RGWSI_SysObj_Cache::read(const DoutPrefixProvider *dpp,
   if(r == -ENODATA)
     return -ENOENT;
 
+  // if we only ask for one of mtime or size, ask for the other too so we can
+  // satisfy CACHE_FLAG_META
+  uint64_t size = 0;
+  real_time mtime;
+  if (pmtime) {
+    if (!psize) {
+      psize = &size;
+    }
+  } else if (psize) {
+    if (!pmtime) {
+      pmtime = &mtime;
+    }
+  }
+
   map<string, bufferlist> unfiltered_attrset;
   r = RGWSI_SysObj_Core::read(dpp, read_state, objv_tracker,
-                         obj, obl, ofs, end,
+                         obj, obl, ofs, end, pmtime, psize,
 			 (attrs ? &unfiltered_attrset : nullptr),
 			 true, /* cache unfiltered attrs */
 			 cache_info,
@@ -193,6 +223,12 @@ int RGWSI_SysObj_Cache::read(const DoutPrefixProvider *dpp,
   info.flags = flags;
   if (objv_tracker) {
     info.version = objv_tracker->read_version;
+  }
+  if (pmtime) {
+    info.meta.mtime = *pmtime;
+  }
+  if (psize) {
+    info.meta.size = *psize;
   }
   if (attrs) {
     info.xattrs = std::move(unfiltered_attrset);
@@ -422,6 +458,18 @@ int RGWSI_SysObj_Cache::distribute_cache(const DoutPrefixProvider *dpp,
                                          ObjectCacheInfo& obj_info, int op,
                                          optional_yield y)
 {
+  // for testing: hold the cache notification in-flight to reproduce
+  // timing-sensitive races
+  if (cct->_conf->rgw_inject_delay_sec > 0) {
+    if (std::string_view(cct->_conf->rgw_inject_delay_pattern) ==
+        "delay_distribute_cache") {
+      const double delay_sec = cct->_conf->rgw_inject_delay_sec;
+      ldpp_dout(dpp, 0) << "distribute_cache: injecting delay of " << delay_sec
+          << "s before notify for " << obj << dendl;
+      std::this_thread::sleep_for(std::chrono::duration<double>(delay_sec));
+    }
+  }
+
   RGWCacheNotifyInfo info;
   info.op = op;
   info.obj_info = obj_info;

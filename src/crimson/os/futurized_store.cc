@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "futurized_store.h"
 #include "cyanstore/cyan_store.h"
@@ -10,29 +10,22 @@
 
 namespace crimson::os {
 
-seastar::future<std::unique_ptr<FuturizedStore>>
+std::unique_ptr<FuturizedStore>
 FuturizedStore::create(const std::string& type,
                        const std::string& data,
                        const ConfigValues& values)
 {
   if (type == "cyanstore") {
     using crimson::os::CyanStore;
-    return seastar::make_ready_future<std::unique_ptr<FuturizedStore>>(
-      std::make_unique<CyanStore>(data));
+    return std::make_unique<CyanStore>(data);
   } else if (type == "seastore") {
     return crimson::os::seastore::make_seastore(
-      data, values
-    ).then([] (auto seastore) {
-      return seastar::make_ready_future<std::unique_ptr<FuturizedStore>>(
-	std::make_unique<ShardedStoreProxy<seastore::SeaStore>>(
-	  seastore.release()));
-    });
+      data);
   } else {
     using crimson::os::AlienStore;
 #ifdef WITH_BLUESTORE
     // use AlienStore as a fallback. It adapts e.g. BlueStore.
-    return seastar::make_ready_future<std::unique_ptr<FuturizedStore>>(
-      std::make_unique<AlienStore>(type, data, values));
+    return std::make_unique<AlienStore>(type, data, values);
 #else
     ceph_abort_msgf("unsupported objectstore type: %s", type.c_str());
     return {};
@@ -40,4 +33,35 @@ FuturizedStore::create(const std::string& type,
   }
 }
 
+seastar::future<> with_store_do_transaction(
+  BackendStore store,
+  FuturizedStore::Shard::CollectionRef ch,
+  ceph::os::Transaction&& txn)
+{
+  std::unique_ptr<Context> on_commit(
+    ceph::os::Transaction::collect_all_contexts(txn));
+  const auto original_core = seastar::this_shard_id();
+  if (store.shard_id == original_core || store.shard_id == GLOBAL_STORE) {
+    return store.f_store.get_sharded_store(store.store_index).do_transaction_no_callbacks(
+      std::move(ch), std::move(txn)
+    ).then([on_commit=std::move(on_commit)]() mutable {
+      auto c = on_commit.release();
+      if (c) c->complete(0);
+      return seastar::now();
+    });
+  } else {
+    return seastar::smp::submit_to(
+      store.shard_id,
+      [store, ch=std::move(ch), txn=std::move(txn)]() mutable {
+      return store.f_store.get_sharded_store(store.store_index).do_transaction_no_callbacks(
+        std::move(ch), std::move(txn));
+    }).then([original_core, on_commit=std::move(on_commit)]() mutable {
+      return seastar::smp::submit_to(original_core, [on_commit=std::move(on_commit)]() mutable {
+        auto c = on_commit.release();
+        if (c) c->complete(0);
+        return seastar::now();
+      });
+    });
+  }
+}
 }

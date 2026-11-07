@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "Utils.h"
 
@@ -7,7 +7,6 @@
 #include "common/errno.h"
 #include "librbd/ImageCtx.h"
 #include "librbd/crypto/BlockCrypto.h"
-#include "librbd/crypto/CryptoImageDispatch.h"
 #include "librbd/crypto/CryptoInterface.h"
 #include "librbd/crypto/CryptoObjectDispatch.h"
 #include "librbd/crypto/EncryptionFormat.h"
@@ -32,9 +31,7 @@ void set_crypto(I *image_ctx,
   auto crypto = encryption_format->get_crypto();
 
   auto object_dispatch = CryptoObjectDispatch<I>::create(image_ctx, crypto);
-  auto image_dispatch = CryptoImageDispatch::create(crypto->get_data_offset());
   image_ctx->io_object_dispatcher->register_dispatch(object_dispatch);
-  image_ctx->io_image_dispatcher->register_dispatch(image_dispatch);
 
   image_ctx->encryption_format = std::move(encryption_format);
 }

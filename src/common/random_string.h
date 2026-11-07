@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -26,6 +26,7 @@ void gen_rand_alphanumeric_lower(CephContext *cct, char *dest, size_t size);
 void gen_rand_alphanumeric_upper(CephContext *cct, char *dest, size_t size);
 void gen_rand_alphanumeric_no_underscore(CephContext *cct, char *dest, size_t size);
 void gen_rand_alphanumeric_plain(CephContext *cct, char *dest, size_t size);
+void gen_rand_numeric(CephContext *cct, char *dest, size_t size);
 
 // returns a std::string with 'size' random characters
 std::string gen_rand_alphanumeric(CephContext *cct, size_t size);
@@ -33,3 +34,4 @@ std::string gen_rand_alphanumeric_lower(CephContext *cct, size_t size);
 std::string gen_rand_alphanumeric_upper(CephContext *cct, size_t size);
 std::string gen_rand_alphanumeric_no_underscore(CephContext *cct, size_t size);
 std::string gen_rand_alphanumeric_plain(CephContext *cct, size_t size);
+std::string gen_rand_numeric(CephContext *cct, size_t size);

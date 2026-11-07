@@ -24,7 +24,7 @@ function run() {
     # Fix port????
     export CEPH_MON="127.0.0.1:7129" # git grep '\<7129\>' : there must be only one
     export CEPH_ARGS
-    CEPH_ARGS+="--fsid=$(uuidgen) --auth-supported=none "
+    CEPH_ARGS+="--fsid=$(uuidgen) --auth_cluster_required=none --auth_service_required=none --auth_client_required=none "
     CEPH_ARGS+="--mon-host=$CEPH_MON --osd_max_backfills=1 --debug_reserver=20 "
     CEPH_ARGS+="--osd_mclock_override_recovery_settings=true "
 
@@ -64,8 +64,10 @@ function _common_test() {
        rados -p test put obj-${j} /etc/passwd
     done
 
-    # Mark out all OSDs for this pool
-    ceph osd out $(ceph pg dump pgs --format=json | jq '.pg_stats[0].up[]')
+
+    # Wait for PG to be visible and mark out all OSDs for this pool
+    local pg_up_osds=$(wait_for_pg_data '.pg_stats[0].up[]') || return 1
+    ceph osd out $pg_up_osds
     if [ "$moreobjects" != "0" ]; then
       for j in $(seq 1 $moreobjects)
       do
@@ -77,7 +79,27 @@ function _common_test() {
 
     flush_pg_stats
 
-    newprimary=$(ceph pg dump pgs --format=json | jq '.pg_stats[0].up_primary')
+    # Wait for log and dups to reach expected sizes (trimming may take time)
+    TIMEOUT=30
+    count=0
+    while true; do
+      current_log_len=$(ceph pg 1.0 query 2>/dev/null | jq '.info.stats.log_size' 2>/dev/null || echo "999")
+      current_dups_len=$(ceph pg 1.0 query 2>/dev/null | jq '.info.stats.log_dups_size' 2>/dev/null || echo "999")
+      
+      if [ "$current_log_len" -le "$loglen" ] && [ "$current_dups_len" -le "$dupslen" ]; then
+        echo "Log trimming complete: log=$current_log_len (expected <=$loglen), dups=$current_dups_len (expected <=$dupslen)"
+        break
+      fi
+      
+      sleep 1
+      count=$((count + 1))
+      if [ $count -gt $TIMEOUT ]; then
+        echo "WARNING: Log trimming timeout after ${TIMEOUT}s - log=$current_log_len (expected <=$loglen), dups=$current_dups_len (expected <=$dupslen)"
+        break
+      fi
+    done
+
+    newprimary=$(wait_for_pg_data '.pg_stats[0].up_primary') || return 1
     kill_daemons
 
     ERRORS=0

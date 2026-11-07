@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "test/librbd/test_mock_fixture.h"
 #include "test/librbd/test_support.h"
@@ -15,6 +15,7 @@
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include <list>
+#include <shared_mutex> // for std::shared_lock
 #include <boost/scope_exit.hpp>
 
 namespace librbd {
@@ -799,6 +800,12 @@ TEST_F(TestMockExclusiveLock, BlockRequests) {
                 exclusive_lock::OPERATION_REQUEST_TYPE_GENERAL, &ret_val));
   ASSERT_EQ(0, ret_val);
 
+  expect_is_state_shutdown(exclusive_lock, false);
+  expect_is_state_locked(exclusive_lock, false);
+  ASSERT_FALSE(exclusive_lock->accept_request(
+                 exclusive_lock::OPERATION_REQUEST_TYPE_GENERAL, &ret_val));
+  ASSERT_EQ(0, ret_val);
+
   exclusive_lock->block_requests(-EROFS);
   expect_is_state_shutdown(exclusive_lock, false);
   expect_is_state_locked(exclusive_lock, true);
@@ -808,6 +815,12 @@ TEST_F(TestMockExclusiveLock, BlockRequests) {
   ASSERT_FALSE(exclusive_lock->accept_request(
                  exclusive_lock::OPERATION_REQUEST_TYPE_GENERAL, &ret_val));
   ASSERT_EQ(-EROFS, ret_val);
+
+  expect_is_state_shutdown(exclusive_lock, false);
+  expect_is_state_locked(exclusive_lock, false);
+  ASSERT_FALSE(exclusive_lock->accept_request(
+                 exclusive_lock::OPERATION_REQUEST_TYPE_GENERAL, &ret_val));
+  ASSERT_EQ(0, ret_val);
 
   expect_is_state_shutdown(exclusive_lock, false);
   expect_is_state_locked(exclusive_lock, true);

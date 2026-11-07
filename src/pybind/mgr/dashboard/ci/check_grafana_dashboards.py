@@ -13,7 +13,6 @@ e.g.
     python ci/<script> frontend/src/app /ceph/monitoring/ceph-mixin/dashboards_out
 """
 import argparse
-import codecs
 import copy
 import json
 import os
@@ -29,7 +28,7 @@ class TemplateParser(HTMLParser):
         self.parsed_data = []
 
     def parse(self):
-        with codecs.open(self.file, encoding='UTF-8') as f:
+        with open(self.file, encoding='UTF-8') as f:
             self.feed(f.read())
 
     def handle_starttag(self, tag, attrs):
@@ -77,7 +76,7 @@ def get_grafana_dashboards(base_dir):
                 dashboard_config = json.load(f)
                 uid = dashboard_config.get('uid')
                 # if it's not a grafana dashboard, skip checks
-                # Fields in a dasbhoard:
+                # Fields in a dashboard:
                 # https://grafana.com/docs/grafana/latest/dashboards/json-model/#json-fields
                 expected_fields = [
                     'id', 'uid', 'title', 'tags', 'style', 'timezone', 'editable',
@@ -103,8 +102,6 @@ def get_grafana_dashboards(base_dir):
                 title = dashboard_config['title']
                 assert len(title) > 0, \
                     "Title not found in '{}'".format(json_file)
-                assert len(dashboard_config.get('links', [])) == 0, \
-                    "Links found in '{}'".format(json_file)
                 if not uid:
                     continue
                 if uid in dashboards:

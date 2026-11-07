@@ -5,14 +5,16 @@ from functools import wraps
 from typing import Any, Dict, List, Optional, Tuple
 
 from ceph.deployment.service_spec import ServiceSpec
-from orchestrator import DaemonDescription, DeviceLightLoc, HostSpec, \
-    InventoryFilter, OrchestratorClientMixin, OrchestratorError, OrchResult, \
+from orchestrator import NODE_PROXY_REPORT_KEYS, DaemonDescription, \
+    DeviceLightLoc, HardwareNoReport, HostSpec, InventoryFilter, \
+    OrchestratorClientMixin, OrchestratorError, OrchResult, \
     ServiceDescription, raise_if_exception
 
 from .. import mgr
+from ..model.hardware import NodeProxyRawData, RawHostReport
 from ._paginate import ListPaginator
 
-logger = logging.getLogger('orchestrator')
+logger = logging.getLogger(__name__)
 
 
 # pylint: disable=abstract-method
@@ -130,11 +132,9 @@ class ServiceManager(ResourceManager):
             service_ids = [service_ids]
 
         completion_list = [
-            self.api.service_action('reload', service_type, service_name,
-                                    service_id)
-            for service_name, service_id in service_ids
+            self.api.service_action('restart', f'{service_type}.{service_id}')
+            for service_id in service_ids
         ]
-        self.api.orchestrator_wait(completion_list)
         for c in completion_list:
             raise_if_exception(c)
 
@@ -166,8 +166,125 @@ class OsdManager(ResourceManager):
 
 class DaemonManager(ResourceManager):
     @wait_api_result
-    def action(self, daemon_name='', action='', image=None):
-        return self.api.daemon_action(daemon_name=daemon_name, action=action, image=image)
+    def action(self, daemon_name='', action='', image=None, force=False):
+        return self.api.daemon_action(daemon_name=daemon_name, action=action, image=image,
+                                      force=force)
+
+
+class UpgradeManager(ResourceManager):
+    @wait_api_result
+    def list(self, image: Optional[str], tags: bool,
+             show_all_versions: Optional[bool]) -> Dict[Any, Any]:
+        return self.api.upgrade_ls(image, tags, show_all_versions)
+
+    @wait_api_result
+    def status(self):
+        return self.api.upgrade_status()
+
+    @wait_api_result
+    def start(self, image: str, version: str, daemon_types: Optional[List[str]] = None,
+              host_placement: Optional[str] = None, services: Optional[List[str]] = None,
+              limit: Optional[int] = None, bucket_type: Optional[str] = None,
+              bucket_name: Optional[str] = None) -> str:
+        return self.api.upgrade_start(
+            image, version, daemon_types, host_placement, services, limit,
+            bucket_type, bucket_name)
+
+    @wait_api_result
+    def pause(self) -> str:
+        return self.api.upgrade_pause()
+
+    @wait_api_result
+    def resume(self) -> str:
+        return self.api.upgrade_resume()
+
+    @wait_api_result
+    def stop(self) -> str:
+        return self.api.upgrade_stop()
+
+
+class HardwareManager(ResourceManager):
+
+    @wait_api_result
+    def list_hosts(self) -> List[str]:
+        return self.api.node_proxy_list_hosts()
+
+    def fullreport(self, hostname: str) -> RawHostReport:
+        """
+        Return this host's node-proxy report.
+
+        :raises HardwareNoReport: the host has no node-proxy data, or its
+            report lacks host, sn or status.
+        """
+        # node_proxy_fullreport() returns {hostname: report}; unwrap it here.
+        report = self._fullreport(hostname)[hostname]
+        if not all(key in report for key in NODE_PROXY_REPORT_KEYS):
+            raise HardwareNoReport(f"Host '{hostname}' has an incomplete node-proxy report.")
+        return report
+
+    @wait_api_result
+    def _fullreport(self, hostname: str) -> NodeProxyRawData:
+        return self.api.node_proxy_fullreport(hostname=hostname)
+
+    @wait_api_result
+    def common(self, category: str, hostname: Optional[List[str]] = None) -> str:
+        return self.api.node_proxy_common(category, hostname=hostname)
+
+
+class CertStoreManager(ResourceManager):
+
+    @wait_api_result
+    def get_nvmeof_tls_bundle(self, service_name: str, daemon_name: str) -> Dict[str, str]:
+        return self.api.get_nvmeof_tls_bundle(service_name, daemon_name)
+
+    @wait_api_result
+    def get_cert(self, entity: str, service_name: Optional[str] = None,
+                 hostname: Optional[str] = None,
+                 ignore_missing_exception: bool = False) -> str:
+        return self.api.cert_store_get_cert(entity, service_name, hostname,
+                                            no_exception_when_missing=ignore_missing_exception)
+
+    @wait_api_result
+    def get_key(self, entity: str, service_name: Optional[str] = None,
+                hostname: Optional[str] = None,
+                ignore_missing_exception: bool = False) -> str:
+        return self.api.cert_store_get_key(entity, service_name, hostname,
+                                           no_exception_when_missing=ignore_missing_exception)
+
+    @wait_api_result
+    def cert_ls(self, filter_by: str = '', show_details: bool = False,
+                include_cephadm_signed: bool = False) -> Dict[str, Any]:
+        return self.api.cert_store_cert_ls(filter_by, show_details, include_cephadm_signed)
+
+
+class MonitoringManager(ResourceManager):
+
+    @wait_api_result
+    def get_prometheus_access_info(self) -> Dict[str, str]:
+        """Get Prometheus access information"""
+        return self.api.get_prometheus_access_info()
+
+    @wait_api_result
+    def get_alertmanager_access_info(self) -> Dict[str, str]:
+        """Get Alertmanager access information"""
+        return self.api.get_alertmanager_access_info()
+
+    @wait_api_result
+    def get_security_config(self) -> Dict[str, str]:
+        """Get security config information"""
+        return self.api.get_security_config()
+
+    @wait_api_result
+    def set_prometheus_remote_write(self, remote_write_url: str,
+                                    remote_write_allowed_metrics: List[str]) -> str:
+        """Set Prometheus remote write configuration"""
+        return self.api.set_prometheus_remote_write(remote_write_url,
+                                                    remote_write_allowed_metrics)
+
+    @wait_api_result
+    def remove_prometheus_remote_write(self, remote_write_url: str) -> str:
+        """Remove Prometheus remote write configuration"""
+        return self.api.remove_prometheus_remote_write(remote_write_url)
 
 
 class OrchClient(object):
@@ -189,6 +306,10 @@ class OrchClient(object):
         self.services = ServiceManager(self.api)
         self.osds = OsdManager(self.api)
         self.daemons = DaemonManager(self.api)
+        self.upgrades = UpgradeManager(self.api)
+        self.hardware = HardwareManager(self.api)
+        self.cert_store = CertStoreManager(self.api)
+        self.monitoring = MonitoringManager(self.api)
 
     def available(self, features: Optional[List[str]] = None) -> bool:
         available = self.status()['available']
@@ -240,3 +361,10 @@ class OrchFeature(object):
     DEVICE_BLINK_LIGHT = 'blink_device_light'
 
     DAEMON_ACTION = 'daemon_action'
+
+    UPGRADE_LIST = 'upgrade_ls'
+    UPGRADE_STATUS = 'upgrade_status'
+    UPGRADE_START = 'upgrade_start'
+    UPGRADE_PAUSE = 'upgrade_pause'
+    UPGRADE_RESUME = 'upgrade_resume'
+    UPGRADE_STOP = 'upgrade_stop'

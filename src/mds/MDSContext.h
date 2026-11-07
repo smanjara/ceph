@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -16,12 +17,13 @@
 #ifndef MDS_CONTEXT_H
 #define MDS_CONTEXT_H
 
-#include <vector>
 #include <deque>
+#include <ostream>
+#include <string>
+#include <vector>
 
 #include "include/Context.h"
 #include "include/elist.h"
-#include "include/spinlock.h"
 #include "common/ceph_time.h"
 
 class MDSRank;
@@ -181,13 +183,13 @@ class C_IO_Wrapper : public MDSIOContext
 {
 protected:
   bool async;
-  MDSContext *wrapped;
+  Context *wrapped;
   void finish(int r) override {
     wrapped->complete(r);
     wrapped = nullptr;
   }
 public:
-  C_IO_Wrapper(MDSRank *mds_, MDSContext *wrapped_) :
+  C_IO_Wrapper(MDSRank *mds_, Context *wrapped_) :
     MDSIOContext(mds_), async(true), wrapped(wrapped_) {
     ceph_assert(wrapped != NULL);
   }

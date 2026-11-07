@@ -8,6 +8,9 @@ tasks:
     fs: xfs
     log-ignorelist:
       - \(PG_AVAILABILITY\)
+      - \(POOL_APP_NOT_ENABLED\)
+      - MDS_ALL_DOWN
+      - MDS_UP_LESS_THAN_MAX
 - cram:
     clients:
       client.0:

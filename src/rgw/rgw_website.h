@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 /*
  * Ceph - scalable distributed file system
@@ -9,13 +9,12 @@
  *
  * This is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
- * License version 2.1, as published by the Free Software 
+ * License version 2.1, as published by the Free Software
  * Foundation.  See file COPYING.
- * 
+ *
  */
 
-#ifndef RGW_WEBSITE_H
-#define RGW_WEBSITE_H
+#pragma once
 
 #include <list>
 #include <string>
@@ -242,5 +241,3 @@ struct RGWBucketWebsiteConf
   }
 };
 WRITE_CLASS_ENCODER(RGWBucketWebsiteConf)
-
-#endif

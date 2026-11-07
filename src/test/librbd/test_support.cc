@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 #include "test/librbd/test_support.h"
 #include "include/rbd_types.h"
 #include "gtest/gtest.h"
@@ -128,7 +129,7 @@ bool is_librados_test_stub(librados::Rados &rados) {
 }
 
 bool is_rbd_pwl_enabled(ceph::common::CephContext *cct) {
-#if defined(WITH_RBD_RWL) || defined(WITH_RBD_SSD_CACHE)
+#ifdef WITH_RBD_SSD_CACHE
   auto value = cct->_conf.get_val<std::string>("rbd_persistent_cache_mode");
   return value == "disabled" ? false : true;
 #else

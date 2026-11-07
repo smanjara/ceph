@@ -1,3 +1,5 @@
+.. _dev_deploying_a_development_cluster:
+
 =================================
  Deploying a development cluster
 =================================
@@ -14,6 +16,9 @@ To start your development cluster, type the following::
 
 	vstart.sh [OPTIONS]...
 
+On a fresh build, the first run must create the cluster by passing ``-n``;
+later runs can omit it to restart and reuse the existing cluster.
+
 In order to stop the cluster, you can type::
 
 	./stop.sh
@@ -21,9 +26,13 @@ In order to stop the cluster, you can type::
 Options
 =======
 
+The most common options are listed below.  ``vstart.sh`` accepts many more
+(crimson, seastore, msgr versions, bluestore devices, and so on); see the
+``usage`` text near the top of ``src/vstart.sh`` for the complete list.
+
 .. option:: -b, --bluestore
 
-    Use bluestore as the objectstore backend for osds.
+    Use bluestore as the objectstore backend for osds.  This is the default.
 
 .. option:: --cache <pool>
 
@@ -37,10 +46,6 @@ Options
 
     Create an erasure pool.
 
-.. option:: -f, --filestore
-
-    Use filestore as the osd objectstore backend.
-
 .. option:: --hitset <pool> <hit_set_type>
 
     Enable hitset tracking.
@@ -52,10 +57,6 @@ Options
 .. option:: -k
 
     Keep old configuration files instead of overwriting these.
-
-.. option:: -K, --kstore
-
-    Use kstore as the osd objectstore backend.
 
 .. option:: -l, --localhost
 
@@ -75,11 +76,8 @@ Options
 
 .. option:: -n, --new
 
-    Create a new cluster.
-
-.. option:: -N, --not-new
-
-    Reuse existing cluster config (default).
+    Create a new cluster, replacing any existing one.  Without this flag,
+    ``vstart.sh`` reuses the existing cluster config; that is the default.
 
 .. option:: --nodaemon
 
@@ -99,7 +97,7 @@ Options
 
 .. option:: --rgw_frontend <frontend>
 
-    Specify the rgw frontend configuration (default is civetweb).
+    Specify the rgw frontend configuration (default is beast).
 
 .. option:: --rgw_compression <compression_type>
 
@@ -139,7 +137,7 @@ These environment variables will contains the number of instances of the desired
 
 Example: ::
 
-	OSD=3 MON=3 RGW=1 vstart.sh
+	OSD=3 MON=3 RGW=1 vstart.sh -n
 
 
 ============================================================

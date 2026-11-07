@@ -1,12 +1,13 @@
 import { HttpClient } from '@angular/common/http';
 import { Injectable } from '@angular/core';
-import { ActivatedRouteSnapshot, CanActivate, CanActivateChild, Router } from '@angular/router';
+import { ActivatedRouteSnapshot, Router } from '@angular/router';
 
 import { of as observableOf } from 'rxjs';
 import { catchError, map } from 'rxjs/operators';
 
 import { MgrModuleService } from '~/app/shared/api/mgr-module.service';
 import { Icons } from '~/app/shared/enum/icons.enum';
+import { AuthStorageService } from '~/app/shared/services/auth-storage.service';
 
 /**
  * This service checks if a route can be activated by executing a
@@ -36,14 +37,15 @@ import { Icons } from '~/app/shared/enum/icons.enum';
 @Injectable({
   providedIn: 'root'
 })
-export class ModuleStatusGuardService implements CanActivate, CanActivateChild {
+export class ModuleStatusGuardService {
   // TODO: Hotfix - remove ALLOWLIST'ing when a generic ErrorComponent is implemented
   static readonly ALLOWLIST: string[] = ['501'];
 
   constructor(
     private http: HttpClient,
     private router: Router,
-    private mgrModuleService: MgrModuleService
+    private mgrModuleService: MgrModuleService,
+    private authStorageService: AuthStorageService
   ) {}
 
   canActivate(route: ActivatedRouteSnapshot) {
@@ -60,7 +62,7 @@ export class ModuleStatusGuardService implements CanActivate, CanActivateChild {
     }
     const config = route.data['moduleStatusGuardConfig'];
     let backendCheck = false;
-    if (config.backend) {
+    if (config.backend && this.authStorageService.getPermissions().configOpt?.read) {
       this.mgrModuleService.getConfig('orchestrator').subscribe(
         (resp) => {
           backendCheck = config.backend === resp['orchestrator'];
@@ -83,6 +85,11 @@ export class ModuleStatusGuardService implements CanActivate, CanActivateChild {
               button_name: config.button_name,
               button_route: config.button_route,
               button_title: config.button_title,
+              secondary_button_name: config.secondary_button_name,
+              secondary_button_route: config.secondary_button_route,
+              secondary_button_title: config.secondary_button_title,
+              module_name: config.module_name,
+              navigate_to: config.navigate_to,
               uiConfig: config.uiConfig,
               uiApiPath: config.uiApiPath,
               icon: Icons.wrench,

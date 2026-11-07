@@ -19,7 +19,8 @@ set(librbd_test
   test_Operations.cc
   test_Trash.cc
   journal/test_Entries.cc
-  journal/test_Replay.cc)
+  journal/test_Replay.cc
+  journal/test_Stress.cc)
 add_library(rbd_test STATIC ${librbd_test})
 target_link_libraries(rbd_test PRIVATE
   rbd_test_support
@@ -132,17 +133,10 @@ set(unittest_librbd_srcs
   watcher/test_mock_RewatchRequest.cc
   )
 
-if(WITH_RBD_RWL OR WITH_RBD_SSD_CACHE)
+if(WITH_RBD_SSD_CACHE)
    list(APPEND unittest_librbd_srcs
-     cache/pwl/test_WriteLogMap.cc)
-   if(WITH_RBD_RWL)
-     list(APPEND unittest_librbd_srcs
-       cache/pwl/test_mock_ReplicatedWriteLog.cc)
-   endif()
-   if(WITH_RBD_SSD_CACHE)
-     list(APPEND unittest_librbd_srcs
-       cache/pwl/test_mock_SSDWriteLog.cc)
-   endif()
+     cache/pwl/test_WriteLogMap.cc
+     cache/pwl/test_mock_SSDWriteLog.cc)
 endif()
 
 if(LINUX AND HAVE_LIBCRYPTSETUP)
@@ -152,6 +146,16 @@ if(LINUX AND HAVE_LIBCRYPTSETUP)
           crypto/luks/test_mock_LoadRequest.cc)
 endif()
 
+if(HAVE_LIBNBD)
+  list(APPEND unittest_librbd_srcs
+          migration/test_mock_NBDStream.cc)
+endif()
+
+# On Windows, we'll skip librbd unit tests for the time being, running just the
+# functional tests. The reason is that the unit tests require libcls*, which in
+# turn requires libos and libosd, however those libraries haven't been ported to
+# Windows.
+if(NOT WIN32)
 add_executable(unittest_librbd
   ${unittest_librbd_srcs}
   $<TARGET_OBJECTS:common_texttable_obj>)
@@ -183,10 +187,11 @@ target_link_libraries(unittest_librbd
   OpenSSL::SSL
   ${UNITTEST_LIBS})
 
-if(WITH_RBD_RWL OR WITH_RBD_SSD_CACHE)
+if(WITH_RBD_SSD_CACHE)
   target_link_libraries(unittest_librbd
     librbd_plugin_pwl_cache)
 endif()
+endif(NOT WIN32)
 
 add_executable(ceph_test_librbd
   test_main.cc
@@ -199,6 +204,7 @@ target_link_libraries(ceph_test_librbd
   journal
   cls_journal_client
   cls_rbd_client
+  cls_lock_client
   libneorados
   librados
   ${UNITTEST_LIBS}

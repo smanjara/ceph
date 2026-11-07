@@ -1,5 +1,5 @@
 import { DatePipe } from '@angular/common';
-import { Component, NgZone, OnDestroy, OnInit } from '@angular/core';
+import { Component, Input, NgZone, OnDestroy, OnInit, ViewEncapsulation } from '@angular/core';
 
 import { NgbDateStruct } from '@ng-bootstrap/ng-bootstrap';
 import { Observable } from 'rxjs';
@@ -12,9 +12,28 @@ import { Icons } from '~/app/shared/enum/icons.enum';
 @Component({
   selector: 'cd-logs',
   templateUrl: './logs.component.html',
-  styleUrls: ['./logs.component.scss']
+  styleUrls: ['./logs.component.scss'],
+  encapsulation: ViewEncapsulation.None,
+  standalone: false
 })
 export class LogsComponent implements OnInit, OnDestroy {
+  @Input()
+  showClusterLogs = true;
+  @Input()
+  showAuditLogs = true;
+  @Input()
+  showDaemonLogs = true;
+  @Input()
+  showNavLinks = true;
+  @Input()
+  showFilterTools = true;
+  @Input()
+  showDownloadCopyButton = true;
+  @Input()
+  defaultTab = '';
+  @Input()
+  scrollable = false;
+
   contentData: any;
   clog: Array<any>;
   audit_log: Array<any>;
@@ -22,7 +41,7 @@ export class LogsComponent implements OnInit, OnDestroy {
   clogText: string;
   auditLogText: string;
   lokiServiceStatus$: Observable<boolean>;
-  promtailServiceStatus$: Observable<boolean>;
+  alloyServiceStatus$: Observable<boolean>;
 
   interval: number;
   priorities: Array<{ name: string; value: string }> = [
@@ -72,7 +91,7 @@ export class LogsComponent implements OnInit, OnDestroy {
         return data.length > 0 && data[0].status === 1;
       })
     );
-    this.promtailServiceStatus$ = this.cephService.getDaemons('promtail').pipe(
+    this.alloyServiceStatus$ = this.cephService.getDaemons('alloy').pipe(
       map((data: any) => {
         return data.length > 0 && data[0].status === 1;
       })
@@ -173,5 +192,9 @@ export class LogsComponent implements OnInit, OnDestroy {
         '\n';
     }
     return logText;
+  }
+
+  trackByLogEntry(index: number, entry: any): string {
+    return `${entry.stamp}-${index}`;
   }
 }

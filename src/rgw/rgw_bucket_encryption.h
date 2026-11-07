@@ -1,10 +1,14 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab ft=cpp
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab ft=cpp
 
 #pragma once
+#include <algorithm>
+#include <utility>
 #include <include/types.h>
+#include "include/encoding.h"
 
 class XMLObj;
+namespace ceph { class Formatter; }
 
 class ApplyServerSideEncryptionByDefault
 {
@@ -49,6 +53,7 @@ class ServerSideEncryptionConfiguration
 protected:
   ApplyServerSideEncryptionByDefault applyServerSideEncryptionByDefault;
   bool bucketKeyEnabled;
+  std::vector<std::string> blockedEncryptionTypes;
 
 public:
   ServerSideEncryptionConfiguration(): bucketKeyEnabled(false) {};
@@ -56,6 +61,10 @@ public:
     const std::string &keyid="", bool enabled = false)
       : applyServerSideEncryptionByDefault(algorithm, keyid),
         bucketKeyEnabled(enabled) {}
+  explicit ServerSideEncryptionConfiguration(
+      std::vector<std::string> blocked_encryption_types)
+      : bucketKeyEnabled(false),
+        blockedEncryptionTypes(std::move(blocked_encryption_types)) {}
 
   const std::string& kms_master_key_id() const {
     return applyServerSideEncryptionByDefault.kms_master_key_id();
@@ -69,17 +78,31 @@ public:
     return bucketKeyEnabled;
   }
 
+  const std::vector<std::string>& blocked_encryption_types() const {
+    return blockedEncryptionTypes;
+  }
+
+  bool sse_c_blocked() const {
+    return std::find(blockedEncryptionTypes.begin(),
+                     blockedEncryptionTypes.end(),
+                     "SSE-C") != blockedEncryptionTypes.end();
+  }
+
   void encode(bufferlist& bl) const {
-    ENCODE_START(1, 1, bl);
+    ENCODE_START(2, 1, bl);
     encode(applyServerSideEncryptionByDefault, bl);
     encode(bucketKeyEnabled, bl);
+    encode(blockedEncryptionTypes, bl);
     ENCODE_FINISH(bl);
   }
 
   void decode(bufferlist::const_iterator& bl) {
-    DECODE_START(1, bl);
+    DECODE_START(2, bl);
     decode(applyServerSideEncryptionByDefault, bl);
     decode(bucketKeyEnabled, bl);
+    if (struct_v >= 2) {
+      decode(blockedEncryptionTypes, bl);
+    }
     DECODE_FINISH(bl);
   }
 
@@ -99,6 +122,9 @@ public:
   RGWBucketEncryptionConfig(const std::string &algorithm,
     const std::string &keyid = "", bool enabled = false)
       : rule_exist(true), rule(algorithm, keyid, enabled) {}
+  explicit RGWBucketEncryptionConfig(
+      std::vector<std::string> blocked_encryption_types)
+      : rule_exist(true), rule(std::move(blocked_encryption_types)) {}
 
   const std::string& kms_master_key_id() const {
     return rule.kms_master_key_id();
@@ -110,6 +136,10 @@ public:
 
   bool bucket_key_enabled() const {
     return rule.bucket_key_enabled();
+  }
+
+  bool sse_c_blocked() const {
+    return rule.sse_c_blocked();
   }
 
   bool has_rule() const {
@@ -137,6 +167,6 @@ public:
   void decode_xml(XMLObj *obj);
   void dump_xml(Formatter *f) const;
   void dump(Formatter *f) const;
-  static void generate_test_instances(std::list<RGWBucketEncryptionConfig*>& o);
+  static std::list<RGWBucketEncryptionConfig> generate_test_instances();
 };
 WRITE_CLASS_ENCODER(RGWBucketEncryptionConfig)
